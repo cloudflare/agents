@@ -102,7 +102,7 @@ import {
   type ListSubmissionsOptions,
   type ThinkSubmissionStatus
 } from "../submissions";
-import type { TaskStatus } from "agents/tasks";
+import type { TaskJson, TaskStatus } from "agents/tasks";
 import type { CreateFetchToolsOptions } from "../tools/fetch";
 import { isLocalWorkspace, type ThinkWorkspace } from "../workspace-files";
 import { ThinkSession } from "../session";
@@ -110,7 +110,11 @@ import { ThinkConfigStore } from "../config-store";
 import { DEFAULT_SYSTEM_PROMPT, systemPromptForTurn } from "../system-prompt";
 import { Think as LegacyThink } from "../think";
 import type { AgentToolRunInspection, AgentToolStoredChunk } from "agents";
-import { chunksOfMessage } from "agents/chat";
+import {
+  chunksOfMessage,
+  REPLAY_PAGE_BYTES,
+  utf8Length
+} from "agents/internal";
 import {
   isCompactionMessage,
   type Session,
@@ -2403,7 +2407,7 @@ export class Think<
     return "";
   }
 
-  /** The text of each settled agent-tool run's reply, while it is read. */
+  /** The text of a completed agent-tool run's reply, while its result is made. */
   readonly #agentToolReplyText = new Map<string, string>();
 
   async startAgentToolRun(
@@ -2418,7 +2422,20 @@ export class Think<
     const operationId = agentToolOperationId(options.runId);
     // A start of a run this agent has returns it.
     if (!(await this.harness.inspection(session.id, operationId))) {
+      // A parent that stopped before the run started starts nothing.
+      if (options.signal?.aborted) {
+        return {
+          runId: options.runId,
+          status: "aborted",
+          startedAt: Date.now(),
+          error: abortText(options.signal.reason) ?? "cancelled"
+        };
+      }
       await this.#sync();
+      this.#turns.set(operationId, {
+        trigger: "agent-tool",
+        abort: new AbortController()
+      });
       await session.submit([this.formatAgentToolInput(input)], {
         operationId,
         metadata: {
@@ -2432,6 +2449,12 @@ export class Think<
         }
       });
     }
+    // A parent that stops while the run waits or runs cancels it.
+    options.signal?.addEventListener(
+      "abort",
+      () => void this.cancelAgentToolRun(options.runId, options.signal?.reason),
+      { once: true }
+    );
     // SAFETY: submitted above, or there already.
     return (await this.inspectAgentToolRun(
       options.runId
@@ -2439,30 +2462,23 @@ export class Think<
   }
 
   async cancelAgentToolRun(runId: string, reason?: unknown): Promise<void> {
-    const text =
-      reason instanceof Error
-        ? reason.message
-        : reason === undefined || reason === null
-          ? undefined
-          : String(reason);
     await this.harness.abort(
       this.harness.session().id,
       agentToolOperationId(runId),
-      text
+      abortText(reason)
     );
   }
 
   async inspectAgentToolRun(
     runId: string
   ): Promise<AgentToolRunInspection | null> {
-    const status = await this.harness.inspection(
-      this.harness.session().id,
-      agentToolOperationId(runId)
-    );
+    const session = this.harness.session().id;
+    const operationId = agentToolOperationId(runId);
+    const status = await this.harness.inspection(session, operationId);
     if (!status) return null;
     const base = {
       runId,
-      requestId: agentToolOperationId(runId),
+      requestId: operationId,
       startedAt: status.startedAt ?? status.createdAt,
       ...(status.settledAt !== undefined && {
         completedAt: status.settledAt
@@ -2472,28 +2488,12 @@ export class Think<
       return { ...base, status: "running" };
     }
     if (status.status === "done") {
-      // The stored reply's text: what the transcript kept of it.
-      const reply = status.messageId
-        ? this.messages.find((message) => message.id === status.messageId)
-        : undefined;
-      const text = reply?.parts
-        .map((part) => (part.type === "text" ? part.text : ""))
-        .filter((part) => part.length > 0)
-        .join("\n");
-      if (text) this.#agentToolReplyText.set(runId, text);
-      try {
-        const output = this.getAgentToolOutput(runId);
-        return {
-          ...base,
-          status: "completed",
-          output,
-          summary: this.getAgentToolSummary(runId, output)
-        };
-      } finally {
-        this.#agentToolReplyText.delete(runId);
-      }
+      return {
+        ...base,
+        status: "completed",
+        ...this.#agentToolResult(session, operationId, runId, status)
+      };
     }
-    const reason = status.status === "unanswered" ? status.reason : undefined;
     // A turn reset skips the run, as on Think: an error, not a cancel.
     if (status.abortReason === SKIPPED_BY_RESET) {
       return {
@@ -2502,7 +2502,12 @@ export class Think<
         error: "Agent tool run was skipped before the child could finish."
       };
     }
-    if (status.abortReason !== undefined || reason === "aborted") {
+    const reason = status.status === "unanswered" ? status.reason : undefined;
+    if (
+      status.abortReason !== undefined ||
+      reason === "aborted" ||
+      reason === "withdrawn"
+    ) {
       return {
         ...base,
         status: "aborted",
@@ -2516,18 +2521,75 @@ export class Think<
     };
   }
 
+  /**
+   * A completed run's output and summary, made once from its reply and
+   * kept on the operation, so a later read returns the same result.
+   */
+  #agentToolResult(
+    session: string,
+    operationId: string,
+    runId: string,
+    status: { metadata?: Record<string, unknown>; messageId?: string }
+  ): { output?: unknown; summary: string } {
+    const kept = (
+      status.metadata?.agentTool as
+        | { result?: { output?: unknown; summary: string } }
+        | undefined
+    )?.result;
+    if (kept) return kept;
+    const reply = status.messageId
+      ? this.messages.find((message) => message.id === status.messageId)
+      : undefined;
+    const text = reply?.parts
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .filter((part) => part.length > 0)
+      .join("\n");
+    if (text) this.#agentToolReplyText.set(runId, text);
+    try {
+      const output = this.getAgentToolOutput(runId);
+      const result = {
+        ...(output !== undefined && { output }),
+        summary: this.getAgentToolSummary(runId, output)
+      };
+      this.harness.patchOperationMetadata(session, operationId, "agentTool", {
+        result: result as TaskJson
+      });
+      return result;
+    } finally {
+      this.#agentToolReplyText.delete(runId);
+    }
+  }
+
   async getAgentToolChunks(
     runId: string,
     options?: { afterSequence?: number }
   ): Promise<AgentToolStoredChunk[]> {
+    const all = await this.#agentToolChunks(runId, options?.afterSequence);
+    // One page per call, as the adapter's contract says: at most
+    // REPLAY_PAGE_BYTES of bodies, at least one chunk.
+    const page: AgentToolStoredChunk[] = [];
+    let bytes = 0;
+    for (const chunk of all) {
+      const size = utf8Length(chunk.body);
+      if (page.length > 0 && bytes + size > REPLAY_PAGE_BYTES) break;
+      page.push(chunk);
+      bytes += size;
+    }
+    return page;
+  }
+
+  /** Every chunk of the run after `afterSequence`, numbered from 0. */
+  async #agentToolChunks(
+    runId: string,
+    afterSequence = -1
+  ): Promise<AgentToolStoredChunk[]> {
     const session = this.harness.session().id;
     const operationId = agentToolOperationId(runId);
-    const after = options?.afterSequence ?? -1;
     let chunks = await this.harness.operationChunks(session, operationId);
     if (chunks.length === 0) {
       // Settled: the reply is stored and its stream gone. A replay from the
       // start gets the reply; a reader with a position saw it live.
-      if (after >= 0) return [];
+      if (afterSequence >= 0) return [];
       const status = await this.harness.inspection(session, operationId);
       const messageId =
         status?.status === "done" ? status.messageId : undefined;
@@ -2538,7 +2600,64 @@ export class Think<
     }
     return chunks
       .map((chunk, sequence) => ({ sequence, body: JSON.stringify(chunk) }))
-      .filter((chunk) => chunk.sequence > after);
+      .filter((chunk) => chunk.sequence > afterSequence);
+  }
+
+  /**
+   * Follow the run: its chunks after `afterSequence`, then the ones its
+   * reply streams, as newline-delimited JSON, until the run ends or
+   * `signal` aborts. Cancelling the stream only detaches.
+   */
+  async tailAgentToolRun(
+    runId: string,
+    options?: { afterSequence?: number; signal?: AbortSignal }
+  ): Promise<ReadableStream<Uint8Array>> {
+    const session = this.harness.session().id;
+    const operationId = agentToolOperationId(runId);
+    const stop = new AbortController();
+    const signal = options?.signal
+      ? AbortSignal.any([options.signal, stop.signal])
+      : stop.signal;
+    const encoder = new TextEncoder();
+    let last = options?.afterSequence ?? -1;
+    return new ReadableStream<Uint8Array>({
+      pull: async (controller) => {
+        for (;;) {
+          if (signal.aborted) {
+            controller.close();
+            return;
+          }
+          const fresh = await this.#agentToolChunks(runId, last);
+          if (fresh.length > 0) {
+            for (const chunk of fresh) {
+              controller.enqueue(encoder.encode(`${JSON.stringify(chunk)}\n`));
+              last = chunk.sequence;
+            }
+            return;
+          }
+          const status = await this.harness.inspection(session, operationId);
+          if (
+            !status ||
+            (status.status !== "queued" && status.status !== "running")
+          ) {
+            controller.close();
+            return;
+          }
+          if (status.status === "queued") {
+            // Not started: nothing streams yet.
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          } else {
+            await this.harness.operationChanged(
+              session,
+              operationId,
+              last + 1,
+              signal
+            );
+          }
+        }
+      },
+      cancel: () => stop.abort()
+    });
   }
 }
 
@@ -2572,6 +2691,12 @@ stubUnsupported(Think.prototype, LegacyThink.prototype);
 /** The operation an agent-tool run is. */
 function agentToolOperationId(runId: string): string {
   return `agent-tool:${runId}`;
+}
+
+/** A cancel's reason as text, or `undefined` when none was given. */
+function abortText(reason: unknown): string | undefined {
+  if (reason instanceof Error) return reason.message;
+  return reason === undefined || reason === null ? undefined : String(reason);
 }
 
 /** A step that ended, waiting for its tools when it called any. */

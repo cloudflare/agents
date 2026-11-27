@@ -6820,6 +6820,31 @@ export class ThinkAgentToolParent extends Agent {
   }
 
   /** Launch a single real Think child against the current cap. */
+  /**
+   * Run a Think child whose model streams slowly, so the parent follows the
+   * child's run while it is still running, and return what the call gives.
+   */
+  async runSlowThinkChildForTest(): Promise<{
+    status: string;
+    summary?: string;
+    error?: string;
+  }> {
+    const runId = `slow-${crypto.randomUUID()}`;
+    const child = await this.subAgent(ThinkTestAgent, runId);
+    await child.useSlowModelForTest(["one ", "two ", "three "], 150);
+    const r = await this.runAgentTool(ThinkTestAgent, {
+      runId,
+      parentToolCallId: "slow-call",
+      input: "slow child",
+      inputPreview: "slow child"
+    });
+    return {
+      status: r.status,
+      ...(r.summary !== undefined && { summary: r.summary }),
+      ...(r.error !== undefined && { error: r.error })
+    };
+  }
+
   async runSingleThinkChildForTest(): Promise<{
     status: string;
     error?: string;

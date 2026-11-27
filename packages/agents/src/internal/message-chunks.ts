@@ -40,6 +40,7 @@ export function chunksOfMessage(message: UIMessage): UIMessageChunk[] {
         input?: unknown;
         output?: unknown;
         errorText?: string;
+        approval?: { id: string };
       };
       const toolName =
         tool.type === "dynamic-tool"
@@ -52,7 +53,13 @@ export function chunksOfMessage(message: UIMessage): UIMessageChunk[] {
         input: tool.input,
         ...(tool.type === "dynamic-tool" ? { dynamic: true } : {})
       } as UIMessageChunk);
-      if (tool.state === "output-available") {
+      if (tool.state === "approval-requested" && tool.approval) {
+        chunks.push({
+          type: "tool-approval-request",
+          approvalId: tool.approval.id,
+          toolCallId: tool.toolCallId
+        } as UIMessageChunk);
+      } else if (tool.state === "output-available") {
         chunks.push({
           type: "tool-output-available",
           toolCallId: tool.toolCallId,

@@ -1149,6 +1149,53 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   }
 
   /**
+   * @internal Wait until an operation's reply stream has more than `seen`
+   * chunks, or settles, or `signal` aborts. Resolves at once for an
+   * operation with no stream (not started yet, or its reply stored).
+   */
+  async operationChanged(
+    session: ThinkSessionId,
+    operationId: string,
+    seen: number,
+    signal?: AbortSignal
+  ): Promise<void> {
+    await this.lifecycle.ready();
+    const streamId = chatTurnStreamId(runIdOf(session, operationId));
+    if ((await this.#streams.status(streamId)) === null) return;
+    const stop = new AbortController();
+    const abort = () => stop.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    let read = 0;
+    try {
+      for await (const batch of this.#streams.readBatches(streamId, {
+        signal: stop.signal
+      })) {
+        read += batch.length;
+        if (read > seen) return;
+      }
+    } catch {
+      // Stopped, or the stream went away: either way, look again.
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      stop.abort();
+    }
+  }
+
+  /**
+   * @internal Replace fields of one key of an operation's metadata (one
+   * statement, no read), as `Tasks.patchMetadata` does. `false` when the
+   * operation does not exist or the bound would be passed.
+   */
+  patchOperationMetadata(
+    session: ThinkSessionId,
+    operationId: string,
+    key: string,
+    patch: Record<string, TaskJson | null>
+  ): boolean {
+    return this.#tasks.patchMetadata(runIdOf(session, operationId), key, patch);
+  }
+
+  /**
    * @internal An operation's status with its run's times, key and
    * metadata, for the harness-backed Think's submissions.
    */

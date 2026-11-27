@@ -119,6 +119,11 @@ type ThinkAgentToolTestStub = {
 };
 
 type ThinkAgentToolParentStub = DurableObjectStub & {
+  runSlowThinkChildForTest(): Promise<{
+    status: string;
+    summary?: string;
+    error?: string;
+  }>;
   runThinkChild(input: string, runId?: string): Promise<RunAgentToolResult>;
   runThinkChildWithInjectedUnrelatedError(
     input: string,
@@ -675,6 +680,14 @@ describe("Think agent tools", () => {
       agentType: "ThinkTestAgent",
       status: "completed",
       summary: "Hello from the assistant!"
+    });
+  });
+
+  it("follows a Think child that is still streaming when the parent attaches, to its result", async () => {
+    const parent = await freshParent();
+    expect(await parent.runSlowThinkChildForTest()).toEqual({
+      status: "completed",
+      summary: "one two three "
     });
   });
 
