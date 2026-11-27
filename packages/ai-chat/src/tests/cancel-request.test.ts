@@ -31,7 +31,12 @@ async function cancelMidStream(
     expect(await agent.isStreamHeldForTest(requestId)).toBe(true);
   }, BOUNDS);
   sendCancel(ws, requestId);
-  await waitUntilHandled(agent, MessageType.CF_AGENT_CHAT_REQUEST_CANCEL, 1);
+  await waitUntilHandled(
+    agent,
+    MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+    1,
+    BOUNDS.timeout
+  );
   await agent.releaseStreamForTest(requestId);
 }
 
@@ -135,7 +140,11 @@ describe("Cancel request", () => {
     sendChatRequest(ws, requestId, [userMessage], {
       failOnAbort: "before-response"
     });
-    await new Promise((r) => setTimeout(r, 200));
+    // Cancel once onChatMessage has started and waits on the signal.
+    const started = await getAgentByName(env.SlowStreamAgent, room);
+    await vi.waitFor(async () => {
+      expect(await started.getStartedRequestIds()).toContain(requestId);
+    }, BOUNDS);
     sendCancel(ws, requestId);
 
     const { messages, timedOut } = await collecting;
