@@ -3793,6 +3793,8 @@ export class ThinkTestAgent extends Think {
     keepRecovering?: boolean;
     /** Each model call writes new text, so each attempt makes progress. */
     progressing?: boolean;
+    /** `chatRecovery.maxRecoveryWork`: the work budget across attempts. */
+    maxRecoveryWork?: number;
   }): Promise<void> {
     this._progressingForTest = options.progressing === true;
     this._progressCallsForTest = 0;
@@ -3805,6 +3807,9 @@ export class ThinkTestAgent extends Think {
     this._exhaustedForTest = [];
     this.chatRecovery = {
       maxAttempts: options.maxAttempts,
+      ...(options.maxRecoveryWork !== undefined && {
+        maxRecoveryWork: options.maxRecoveryWork
+      }),
       onExhausted: (ctx: ChatRecoveryExhaustedContext) => {
         this._exhaustedForTest.push({
           reason: ctx.reason,

@@ -299,6 +299,7 @@ describe("chat recovery, through public behaviour", () => {
         maxAttempts: number;
         keepRecovering?: boolean;
         progressing?: boolean;
+        maxRecoveryWork?: number;
       },
       done: (progress: {
         recoveryCalls: unknown[];
@@ -377,6 +378,24 @@ describe("chat recovery, through public behaviour", () => {
       expect(progress.recoveryCalls).toHaveLength(2);
       expect(progress.exhausted.map((entry) => entry.reason)).toEqual([
         "max_attempts_exceeded"
+      ]);
+    }, 30_000);
+
+    it("seals a turn that keeps making progress once the work budget is spent", async () => {
+      const progress = await recoverUntil(
+        "work-budget",
+        {
+          afterParts: 25,
+          stalledCalls: 10,
+          maxAttempts: 10,
+          progressing: true,
+          maxRecoveryWork: 2
+        },
+        (p) => p.exhausted.length > 0
+      );
+
+      expect(progress.exhausted.map((entry) => entry.reason)).toEqual([
+        "work_budget_exceeded"
       ]);
     }, 30_000);
 
