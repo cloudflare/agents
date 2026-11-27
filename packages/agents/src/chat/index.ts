@@ -360,6 +360,7 @@ export {
   settleReplyBeforeRecovery,
   streamChunksFinished,
   stripTrailingReasoning,
+  requestMessages,
   toolPartHasSettledResult,
   unsettledToolCallIds,
   type RepairedTranscriptSink,

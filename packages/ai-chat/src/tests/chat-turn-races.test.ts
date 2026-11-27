@@ -1677,16 +1677,19 @@ describe("chat turn races", () => {
 
     expect(await agent.getChatMessageCallCountForTest()).toBe(1);
     expect(await agent.getEndsInReasoningAtModelCallForTest()).toEqual([]);
+    // Stored as it was: only the request leaves the reasoning out.
     const stored = (await agent.getPersistedMessages()) as ChatMessage[];
     expect(stored[1].parts.map((part) => part.type)).toEqual([
       "step-start",
-      "text"
+      "text",
+      "step-start",
+      "reasoning"
     ]);
-    expect(repaired).toEqual([1]);
+    expect(repaired).toEqual([]);
     ws.close(1000);
   });
 
-  it("a new question removes an earlier reply that held only reasoning, in every tab", async () => {
+  it("a new question keeps an earlier reply that held only reasoning, and leaves it out of the request", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
     const { ws: otherTab } = await connectChatWS(
@@ -1722,16 +1725,16 @@ describe("chat turn races", () => {
       unsubscribe();
     }
 
-    // The event carries the reply as it was stored, so an app can keep it.
-    expect(removedMessages).toEqual([cutOff]);
+    // A reply the model finished is the user's: nothing is removed.
+    expect(removedMessages).toEqual([]);
 
     const stored = (await agent.getPersistedMessages()) as ChatMessage[];
-    expect(stored.map((message) => message.id)).not.toContain("assistant-1");
-    expect(stored.slice(0, 2).map((message) => message.id)).toEqual([
+    expect(stored.slice(0, 3).map((message) => message.id)).toEqual([
       "user-1",
+      "assistant-1",
       "user-2"
     ]);
-    // The other tab is told with the whole list, so it drops the reply.
+    // No tab is sent a list without it.
     const lists = seenByOtherTab.filter(
       (
         m
@@ -1746,7 +1749,8 @@ describe("chat turn races", () => {
           m.messages.some((message) => message.id === "user-2") &&
           !m.messages.some((message) => message.id === "assistant-1")
       )
-    ).toBe(true);
+    ).toBe(false);
+    // The request has no message that ends in reasoning.
     expect(await agent.getEndsInReasoningAtModelCallForTest()).toEqual([]);
     ws.close(1000);
     otherTab.close(1000);

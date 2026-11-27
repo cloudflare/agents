@@ -937,7 +937,7 @@ describe("continueLastTurn", () => {
     expect(toolPart?.state).toBe("input-available");
   });
 
-  it("removes the reasoning a cut-off reply ends in before it continues it", async () => {
+  it("leaves the reasoning a reply ends in out of the request that continues it, and keeps it stored", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
 
@@ -979,9 +979,9 @@ describe("continueLastTurn", () => {
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const reply = messages.find((m) => m.id === "assistant-reasoning")!;
-    // The cut-off reasoning is gone, the tool result stays, and the
-    // continuation's answer follows it.
-    expect(reply.parts.some((part) => part.type === "reasoning")).toBe(false);
+    // Stored as it was, the tool result kept, and the continuation's answer
+    // follows it. (What the request holds: chat-turn-races.)
+    expect(reply.parts.some((part) => part.type === "reasoning")).toBe(true);
     expect(reply.parts[1]).toMatchObject({ state: "output-available" });
     expect(reply.parts.at(-1)).toMatchObject({ type: "text" });
   });
