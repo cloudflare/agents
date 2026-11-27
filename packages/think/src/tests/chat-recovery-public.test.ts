@@ -19,11 +19,14 @@ async function resetDuringTurn(
   name: string,
   chunksBeforeReset: number,
   answer?: { continue?: boolean; persist?: boolean },
-  options?: { holdRecovery?: boolean; openedStream?: boolean }
+  options?: { holdRecovery?: boolean; openedStream?: boolean; stash?: string }
 ) {
   const room = `${name}-${crypto.randomUUID()}`;
   const agent = () => getAgentByName(env.ThinkTestAgent, room);
   if (answer) await (await agent()).answerRecoveryForTest(answer);
+  if (options?.stash !== undefined) {
+    await (await agent()).stashInNextTurnForTest(options.stash);
+  }
   if (options?.holdRecovery) await (await agent()).holdRecoveryOnceForTest();
   const startedAt = Date.now();
   if (options?.openedStream) {
@@ -99,6 +102,7 @@ async function resetDuringTurn(
   // The next start recovers the turn and asks onChatRecovery.
   let calls: Array<{
     partialText: string;
+    recoveryData: string | null;
     streamId: string;
     createdAt: number;
     recoveryRootRequestId: string;
@@ -278,6 +282,16 @@ describe("chat recovery, through public behaviour", () => {
       expect(first?.streamId).not.toBe("");
       expect(first?.createdAt).toEqual(expect.any(Number));
       expect(first?.recoveryRootRequestId).toBe(requestId);
+    }, 30_000);
+
+    // Successor of think-session's "stashed data round-trips through fiber
+    // recovery".
+    it("hands onChatRecovery the data the turn stashed before a reset", async () => {
+      const { calls } = await resetDuringTurn("reset-stash", 2, undefined, {
+        stash: "notes that outlive the isolate"
+      });
+
+      expect(calls[0]?.recoveryData).toBe("notes that outlive the isolate");
     }, 30_000);
 
     it("dates a reset-interrupted turn by when it started, not by when it was recovered", async () => {

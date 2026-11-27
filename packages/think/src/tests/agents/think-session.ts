@@ -2718,6 +2718,12 @@ export class ThinkTestAgent extends Think {
     if (this._stashInBeforeTurnForTest !== undefined) {
       this.stash(this._stashInBeforeTurnForTest);
     }
+    // A stash a test asked of the next turn, held in storage.
+    const stashOnce = this.ctx.storage.kv.get<string>("test:stash-next-turn");
+    if (stashOnce !== undefined) {
+      this.ctx.storage.kv.delete("test:stash-next-turn");
+      this.stash(stashOnce);
+    }
     const hold = this._messengerTurnHold;
     if (hold) {
       this._messengerTurnHold = undefined;
@@ -4184,6 +4190,11 @@ export class ThinkTestAgent extends Think {
   /** What onChatRecovery answers from now on, across resets. */
   async answerRecoveryForTest(answer: ChatRecoveryOptions): Promise<void> {
     this.ctx.storage.kv.put(RECOVERY_ANSWER_KEY, answer);
+  }
+
+  /** The next turn stashes `data` in its beforeTurn. */
+  async stashInNextTurnForTest(data: string): Promise<void> {
+    this.ctx.storage.kv.put("test:stash-next-turn", data);
   }
 
   /** What onChatRecovery was told in this isolate, in order. */

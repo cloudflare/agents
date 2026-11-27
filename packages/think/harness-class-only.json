@@ -805,5 +805,14 @@
       "file": "chat-recovery-public.test.ts",
       "test": "chat recovery, through public behaviour > onChatRecovery's answer after a reset > answers the question again, from the start, when onChatRecovery says persist: false"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > stashed data round-trips through fiber recovery",
+    "reason": "an interrupted stream and its chat fiber row, with the stash in its snapshot, inserted in the class's shape, and recovery triggered by hand",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > onChatRecovery's context after a reset > hands onChatRecovery the data the turn stashed before a reset"
+    }
   }
 ]
