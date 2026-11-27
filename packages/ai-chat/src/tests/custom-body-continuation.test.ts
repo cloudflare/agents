@@ -1,9 +1,12 @@
 import { env } from "cloudflare:workers";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, onTestFinished, vi } from "vitest";
 import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
-import { connectChatWS } from "./test-utils";
+import { connectChatWS, waitUntilHandled } from "./test-utils";
 import { getAgentByName } from "agents";
+
+/** Bounds for waits on the agent, inside the 10 s test timeout. */
+const BOUNDS = { timeout: 5_000, interval: 20 };
 
 describe("Custom body forwarding during tool continuation", () => {
   it("should forward stored body to onChatMessage during auto-continuation", async () => {
@@ -55,8 +58,7 @@ describe("Custom body forwarding during tool continuation", () => {
     let done = await donePromise;
     expect(done).toBe(true);
 
-    // Verify initial request received body
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Verify initial request received body (captured before its done frame)
     const initialBody = await agentStub.getCapturedBody();
     expect(initialBody).toEqual({
       model: "gpt-4",
@@ -96,9 +98,10 @@ describe("Custom body forwarding during tool continuation", () => {
       })
     );
 
-    // Let the WebSocket message be processed and the continuation queued
-    // before waitForIdle snapshots _chatTurnQueue
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The continuation captures its request context again.
+    await vi.waitFor(async () => {
+      expect(await agentStub.getCapturedBody()).toBeDefined();
+    }, BOUNDS);
     await agentStub.waitForIdleForTest();
 
     // Step 5: Verify continuation received the same body
@@ -139,6 +142,10 @@ describe("Custom body forwarding during tool continuation", () => {
       ] as ChatMessage["parts"]
     };
 
+    // The first request is held in its model call until the second is
+    // queued behind it and the captured context is cleared.
+    await agentStub.holdNextModelCallForTest();
+    onTestFinished(() => agentStub.releaseModelCallForTest());
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
@@ -148,14 +155,16 @@ describe("Custom body forwarding during tool continuation", () => {
           body: JSON.stringify({
             messages: [userMessage, toolCallMessage],
             clientTools: [{ name: "changeBackgroundColor" }],
-            customField: "first-body",
-            delayMs: 1000
+            customField: "first-body"
           })
         }
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // The first request is running before the second arrives.
+    await vi.waitFor(async () => {
+      expect(await agentStub.isModelCallHeldForTest()).toBe(true);
+    }, BOUNDS);
 
     ws.send(
       JSON.stringify({
@@ -172,7 +181,11 @@ describe("Custom body forwarding during tool continuation", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // The second request waits behind the first, which is held: it
+    // captures its body only after the clear.
+    await vi.waitFor(async () => {
+      expect(await agentStub.queuedTurnCountForTest()).toBe(2);
+    }, BOUNDS);
     await agentStub.clearCapturedContext();
 
     ws.send(
@@ -185,9 +198,13 @@ describe("Custom body forwarding during tool continuation", () => {
       })
     );
 
-    // Let the WebSocket message be processed and the continuation queued
-    // before waitForIdle snapshots _chatTurnQueue
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // The result was received; the idle wait then covers its apply and the
+    // continuation decision, even when no model call follows.
+    await agentStub.releaseModelCallForTest();
+    await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
+    await vi.waitFor(async () => {
+      expect(await agentStub.hasPendingInteractionForTest()).toBe(false);
+    }, BOUNDS);
     await agentStub.waitForIdleForTest();
 
     // Both requests replied after the tool call, so the tool call's message
@@ -250,7 +267,7 @@ describe("Custom body forwarding during tool continuation", () => {
 
     // Clear chat
     ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await waitUntilHandled(agentStub, MessageType.CF_AGENT_CHAT_CLEAR, 1);
 
     // Persist a tool call and trigger continuation
     await agentStub.persistMessages([
@@ -285,9 +302,10 @@ describe("Custom body forwarding during tool continuation", () => {
       })
     );
 
-    // Let the WebSocket message be processed and the continuation queued
-    // before waitForIdle snapshots _chatTurnQueue
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The continuation ran: the initial request and it.
+    await vi.waitFor(async () => {
+      expect(await agentStub.getChatMessageCallCountForTest()).toBe(2);
+    }, BOUNDS);
     await agentStub.waitForIdleForTest();
 
     // Body should be undefined after chat clear
@@ -344,7 +362,6 @@ describe("Custom body forwarding during tool continuation", () => {
     expect(done).toBe(true);
     ws.removeEventListener("message", handler1);
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
     let capturedBody = await agentStub.getCapturedBody();
     expect(capturedBody).toEqual({ model: "gpt-4", temperature: 0.7 });
 
@@ -393,7 +410,6 @@ describe("Custom body forwarding during tool continuation", () => {
     expect(done).toBe(true);
     ws.removeEventListener("message", handler2);
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
     capturedBody = await agentStub.getCapturedBody();
     expect(capturedBody).toEqual({ model: "claude-3", maxTokens: 1000 });
 
