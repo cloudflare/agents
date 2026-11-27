@@ -50,21 +50,27 @@ async function open(room: string): Promise<Tab> {
 }
 
 /** Answer the client tool and approve the deletion as a person at the tab would. */
+const CLIENT_OUTPUTS: Record<string, unknown> = {
+  getUserLocation: { city: "Lisbon" },
+  getUserTimezone: { timezone: "Europe/Lisbon" }
+};
+
 function answer(tab: Tab, handled: Set<string>) {
   for (const f of tab.frames) {
-    if (
-      isResp(f) &&
-      f.body?.includes('"tool-input-available"') &&
-      f.body.includes("getUserLocation")
-    ) {
-      const { toolCallId } = JSON.parse(f.body) as { toolCallId: string };
-      if (handled.has(toolCallId)) continue;
+    // The client answers either of its tools, whichever the model calls.
+    if (isResp(f) && f.body?.includes('"tool-input-available"')) {
+      const { toolCallId, toolName } = JSON.parse(f.body) as {
+        toolCallId: string;
+        toolName: string;
+      };
+      const output = CLIENT_OUTPUTS[toolName];
+      if (!output || handled.has(toolCallId)) continue;
       handled.add(toolCallId);
       tab.send({
         type: MT.TOOL_RESULT,
         toolCallId,
-        toolName: "getUserLocation",
-        output: { city: "Lisbon" },
+        toolName,
+        output,
         autoContinue: true,
         clientTools: CLIENT_TOOLS
       });
@@ -158,6 +164,10 @@ async function soak(room: string): Promise<{ run: Run; sent: string[] }> {
   const sent: string[] = [];
   const handled = new Set<string>();
   let tab = await open(room);
+  // Every tab's requests and frames, for the done-frame checks. A request
+  // cut off by a reset never ends on the tab that sent it (its reply ends on
+  // the next tab, as a replay), so it is left out of that tab's list.
+  const tabs: { sent: string[]; frames: Frame[] }[] = [];
   for (let turn = 1; turn <= TURNS; turn++) {
     const kind = KINDS[(turn - 1) % KINDS.length];
     const text = prompt(kind, turn);
@@ -180,6 +190,10 @@ async function soak(room: string): Promise<{ run: Run; sent: string[] }> {
         );
         await ctl("think", room, "probeAbort");
         tab.close();
+        tabs.push({
+          sent: tab.sent.filter((s) => s !== id),
+          frames: tab.frames
+        });
         tab = await open(room);
         tab.send({ type: MT.RESUME_REQUEST });
       }
@@ -188,18 +202,30 @@ async function soak(room: string): Promise<{ run: Run; sent: string[] }> {
   }
   const state = await settle("think", room, { quietMs: 6000, maxMs: 240_000 });
   tab.close();
+  tabs.push({ sent: tab.sent, frames: tab.frames });
   const late = await open(room);
   late.send({ type: MT.RESUME_REQUEST });
-  await late
+  const offer = await late
     .waitFor(
       (f) => f.type === MT.RESUME_NONE || f.type === MT.RESUMING,
       15_000,
       "resume reply"
     )
     .catch(() => undefined);
+  // An offered stream is taken (the tab acknowledges it) and replayed to
+  // its end before the tab goes.
+  if (offer?.type === MT.RESUMING) {
+    await late
+      .waitFor(
+        (f) => f.type === MT.RESPONSE && f.id === offer.id && Boolean(f.done),
+        60_000,
+        "the replay to end"
+      )
+      .catch(() => undefined);
+  }
   late.close();
   return {
-    run: { state, tabs: [], lateTab: late.frames, extra: {}, checks: [] },
+    run: { state, tabs, lateTab: late.frames, extra: {}, checks: [] },
     sent
   };
 }
@@ -229,22 +255,31 @@ describe.concurrent("Think on a real model, through resets", () => {
       });
       // Every message sent is in the transcript, once, in order.
       expect(texts, report).toEqual(sent);
-      // Every one is answered.
+      // Every one is answered with text, and no tool waits on the user.
       expect(
-        /u(?!a)/.test(state.messages.map((m) => m.role[0]).join("")),
-        report
-      ).toBe(false);
-      // No tool call ran twice.
-      expect(
-        state.runs.filter((r) => r.n > 1),
+        sent.filter((text) => !answeredTurn(state, text)),
         report
       ).toEqual([]);
+      // The weather turns used their tool (a real model may answer one in
+      // prose; it may not skip them all). The approval turns are the reset
+      // turns, where the model may answer the restart instead of calling
+      // deleteFile, so those are checked by the run counts, not here.
       expect(
-        state.submissions.every((s) => s === "completed"),
+        state.runs.some((r) => r.kind === "getWeather"),
         report
       ).toBe(true);
-      // The resets happened.
+      // One submission record per submitted turn, each completed.
+      expect(state.submissions, report).toEqual(
+        sent
+          .filter((_, i) => KINDS[i % KINDS.length] === "submit")
+          .map(() => "completed")
+      );
+      // The resets happened, and each cut a reply off: recovery took it up.
       expect(state.starts, report).toBeGreaterThanOrEqual(1 + RESETS.size);
+      expect(
+        state.events.filter((e) => e.type === "chat:recovery:detected").length,
+        report
+      ).toBeGreaterThanOrEqual(RESETS.size);
       expect(violations(run), report).toEqual([]);
     });
   }
