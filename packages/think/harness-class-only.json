@@ -499,5 +499,23 @@
       "file": "submissions.test.ts",
       "test": "Think durable submissions > a submission whose isolate is evicted while it runs > stays running when a reset also cuts its recovery, then completes once"
     }
+  },
+  {
+    "file": "media-eviction.test.ts",
+    "test": "mediaEviction — aged media leaves the conversation (#1710) > evicts media a late update puts on a row the cache does not hold",
+    "reason": "Runs each pass by hand through Think's private _evictAgedMediaBestEffort seam.",
+    "successor": {
+      "file": "media-eviction.test.ts",
+      "test": "mediaEviction — a pass that runs on its own > evicts media a late update puts on a row the view does not hold"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — waitUntilStable > detects a pending CLIENT-tool interaction living ONLY in the in-flight accumulator (mid-stream, pre-persist)",
+    "reason": "Seeds Think's private in-flight accumulator and client tools (_turns).",
+    "successor": {
+      "file": "client-tools.test.ts",
+      "test": "Think — a client tool's call while its reply streams > waits on it before the reply is stored"
+    }
   }
 ]

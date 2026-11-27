@@ -17342,6 +17342,54 @@ export class ThinkMediaEvictionAgent extends Think {
    * runs over text rows, so its cursor is past them, then `c1` is hidden
    * under a summary and gets an image. Returns the second pass's result.
    */
+  /**
+   * The same late update, with passes that run on their own: rows whose
+   * pass leaves the cursor past them, then `c1` hidden under a
+   * summary and given an image by an update made straight to the session,
+   * then one refresh.
+   */
+  async lateMediaOnHiddenRowOnItsOwnForTest(): Promise<void> {
+    // `c4` carries an image, so a pass runs on its own, evicts it and
+    // moves the cursor past the older rows.
+    for (let i = 0; i < 10; i++) {
+      await this.appendMessageToHistory({
+        id: `c${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts:
+          i === 4
+            ? [
+                { type: "text", text: `message ${i}` },
+                {
+                  type: "file",
+                  mediaType: "image/png",
+                  url: `data:image/png;base64,${"A".repeat(BIG_MEDIA_CHARS)}`
+                }
+              ]
+            : [{ type: "text", text: `message ${i}` }]
+      } as UIMessage);
+    }
+    await this.syncMessagesFromStorage();
+    const deadline = Date.now() + 5_000;
+    while (await this.evictionPassQueuedForTest()) {
+      if (Date.now() > deadline) throw new Error("passes did not settle");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    await this.session.addCompaction("summary", "c0", "c3");
+    await this.syncMessagesFromStorage();
+    await this.session.updateMessage({
+      id: "c1",
+      role: "assistant",
+      parts: [
+        {
+          type: "file",
+          mediaType: "image/png",
+          url: `data:image/png;base64,${"A".repeat(BIG_MEDIA_CHARS)}`
+        }
+      ]
+    } as UIMessage);
+    await this.syncMessagesFromStorage();
+  }
+
   async lateMediaOnHiddenRowForTest(): Promise<number> {
     for (let i = 0; i < 10; i++) {
       await this.appendMessageToHistory({

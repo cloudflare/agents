@@ -28,6 +28,7 @@ type MediaEvictionStub = {
   getStoredMessageForTest(id: string): Promise<UIMessage | null>;
   seedLargeTextAboveMediaForTest(largeRows: number): Promise<void>;
   lateMediaOnHiddenRowForTest(): Promise<number>;
+  lateMediaOnHiddenRowOnItsOwnForTest(): Promise<void>;
   getContinuationRowCountForTest(): Promise<number>;
   readEvictedFileForTest(path: string): Promise<{
     byteLength: number;
@@ -669,6 +670,24 @@ describe("mediaEviction — a pass that runs on its own", () => {
         ).toContain("[evicted image/png,");
       },
       { timeout: 10_000, interval: 100 }
+    );
+  });
+
+  it("evicts media a late update puts on a row the view does not hold", async () => {
+    const agent = await evictionAgent(uniqueName("auto-late-hidden"));
+    await agent.setMediaEvictionForTest(AGED_POLICY);
+    await agent.lateMediaOnHiddenRowOnItsOwnForTest();
+    // The first pass evicted c4; the late image on c1 is below its cursor.
+    expect(JSON.stringify(await agent.getStoredMessageForTest("c4"))).toContain(
+      "[evicted image/png,"
+    );
+    await vi.waitFor(
+      async () => {
+        expect(
+          JSON.stringify(await agent.getStoredMessageForTest("c1"))
+        ).toContain("[evicted image/png,");
+      },
+      { timeout: 5_000, interval: 50 }
     );
   });
 

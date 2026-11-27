@@ -173,6 +173,7 @@ import {
 import { MODEL_TRUNCATION_STEP } from "../inference/model-messages";
 import { WorkspaceFiles } from "../workspace-files";
 import {
+  HYDRATION_MESSAGE_OVERHEAD_BYTES,
   cachedMessageBytes,
   ThinkTranscriptCache,
   type HydrationResult
@@ -491,6 +492,8 @@ export class Think<
       })
   });
   #context: Context | undefined;
+  /** Ends the view's subscription to the root session's change feed. */
+  #unsubscribeMirror: (() => void) | undefined;
   #handle: Session | undefined;
   /** Each submission's status reports, run one at a time in order. */
   readonly #submissionStatuses = new SubmissionStatusQueue();
@@ -856,6 +859,7 @@ export class Think<
         },
         onChunk: ({ chunk, operationId }) => {
           this.#streamed.add(operationId);
+          this.#noteLiveCall(operationId, chunk);
           // A snapshot reads a delta's text as `text`, as a stream part has it.
           const text = "delta" in chunk ? chunk.delta : undefined;
           // In order, one after another, as Think awaits each chunk's hooks.
@@ -878,9 +882,17 @@ export class Think<
           const continued = this.#continued.get(end.operationId);
           this.#continued.delete(end.operationId);
           const streamed = this.#streamed.delete(end.operationId);
+          this.#liveCalls.delete(end.operationId);
           this.#toolCalls.delete(end.operationId);
           const clearsAtStart = this.#clearsAtStart.get(end.operationId);
           this.#clearsAtStart.delete(end.operationId);
+          // A turn's end is a safe boundary: a view grown past its budget
+          // re-windows here, as Think's does after a chat request. After the
+          // turn's own bookkeeping, and best-effort: a read that fails leaves
+          // the view as it is, and the turn still reports.
+          await this.#transcript.refreshIfNeeded().catch((error: unknown) => {
+            console.warn("[Think] Could not re-window the transcript", error);
+          });
           // A clear that ran, or runs, while the turn was open.
           const clearedUnder =
             this.#clearing > 0 ||
@@ -1109,40 +1121,91 @@ export class Think<
           this.#transcript.replace([]);
           this.#lastTurnChannel = undefined;
         }
-        if (event.type === "message") {
-          // Apply it now, so a synchronous read right after a turn sees it;
-          // the re-read that follows picks up compaction and branching.
-          const messages = this.#transcript.messages;
-          const index = messages.findIndex(
-            (message) => message.id === event.message.id
-          );
-          // Every message the harness writes that this view lacks is a new
-          // one at the leaf: an append, which ages older messages. A row
-          // that grew may now hold media the eviction cursor has passed; a
-          // pass's own rewrites shrink rows and leave it alone, as on Think.
-          if (index === -1) {
-            this.#transcript.noteGrowth(cachedMessageBytes(event.message));
-            this.#mediaEviction.noteAppend();
-          } else if (
-            cachedMessageBytes(event.message) >
-            cachedMessageBytes(messages[index]!)
-          ) {
-            this.#mediaEviction.invalidate();
-          }
-          this.#transcript.replace(
-            index === -1
-              ? [...messages, event.message]
-              : messages.map((message, i) =>
-                  i === index ? event.message : message
-                )
-          );
+        // A message is applied by the root session's change feed below,
+        // which knows an append from an update, as on Think.
+        if (event.type === "message") this.#wakeStableWaiters();
+        // A reset, a delete or a compaction reaches the view through the
+        // change feed too (clear, delete, compaction): it re-reads there.
+        if (event.type === "reset" || event.type === "transcript") {
+          this.#wakeStableWaiters();
         }
-        if (
-          event.type === "message" ||
-          event.type === "reset" ||
-          event.type === "transcript"
-        ) {
-          void this.#sync().then(() => this.#wakeStableWaiters());
+      });
+      // As on Think, the view follows the root session's own change feed:
+      // every write, the harness's and one made straight to the session (an
+      // app's, or a late tool result on an older reply), reaches it and
+      // media eviction, told apart as an append or an update.
+      this.#unsubscribeMirror?.();
+      this.#unsubscribeMirror = (await this.#rootHandle()).mirror<UIMessage>({
+        get: () => this.#transcript.messages,
+        set: (messages) => this.#transcript.replace(messages),
+        transform: (message) => message as unknown as UIMessage,
+        intercept: async (event) => {
+          switch (event.type) {
+            case "append":
+              // An append under the view's tail extends it in place; a
+              // branch append moves the path, which a patch cannot express.
+              if (
+                !event.inserted ||
+                event.parentId === undefined ||
+                event.parentId ===
+                  (this.#transcript.messages.at(-1)?.id ?? null)
+              ) {
+                return false;
+              }
+              await this.#transcript.sync();
+              return true;
+            case "update":
+              // An update to a row the view does not hold (an older reply a
+              // late tool result lands on) may have put media on a row
+              // media eviction already examined.
+              if (
+                !this.#transcript.messages.some(
+                  (message) => message.id === event.message.id
+                )
+              ) {
+                this.#mediaEviction.rowChangedOutsideCache();
+              }
+              return false;
+            case "import":
+              this.#transcript.markStale();
+              return true;
+            case "clear":
+              this.#transcript.replace([]);
+              this.#transcript.coversActivePath = true;
+              return true;
+            // Think also refreshes its context's prompt on a compaction; on
+            // the harness-backed Think the harness's step loop owns the
+            // context and records the change itself.
+            case "delete":
+            case "compaction":
+            case "compact":
+              await this.#transcript.sync();
+              this.#wakeStableWaiters();
+              return true;
+            default:
+              return false;
+          }
+        },
+        onApplied: (event, message, previous) => {
+          if (event.type === "update") {
+            // A row that grew may now hold media the cursor has passed; a
+            // pass's own rewrites shrink rows and leave it alone.
+            // Charged against the budget as Think charges it.
+            const grew = previous
+              ? cachedMessageBytes(message) - cachedMessageBytes(previous)
+              : 0;
+            if (grew > 0) {
+              this.#transcript.noteGrowth(grew);
+              this.#mediaEviction.invalidate();
+            }
+            return;
+          }
+          // A budgeted refresh charges each message an overhead on top of
+          // its bytes, so growth is charged the same way.
+          this.#transcript.noteGrowth(
+            cachedMessageBytes(message) + HYDRATION_MESSAGE_OVERHEAD_BYTES
+          );
+          this.#mediaEviction.noteAppend();
         }
       });
       this.#onStartDegradations = [];
@@ -2101,6 +2164,48 @@ export class Think<
   }
 
   /**
+   * Each running operation's tool calls that have streamed and not had a
+   * result yet, by call id: what Think's in-flight accumulator holds before
+   * the reply is stored. Dropped at the operation's end.
+   */
+  readonly #liveCalls = new Map<
+    string,
+    Map<string, { toolName: string; approval: boolean }>
+  >();
+
+  /** Track a streamed tool call until its result streams too. */
+  #noteLiveCall(operationId: string, chunk: UIMessageChunk): void {
+    const calls = (): Map<string, { toolName: string; approval: boolean }> => {
+      let held = this.#liveCalls.get(operationId);
+      if (!held) {
+        held = new Map();
+        this.#liveCalls.set(operationId, held);
+      }
+      return held;
+    };
+    switch (chunk.type) {
+      case "tool-input-available":
+        calls().set(chunk.toolCallId, {
+          toolName: chunk.toolName,
+          approval: false
+        });
+        return;
+      case "tool-approval-request": {
+        const call = this.#liveCalls.get(operationId)?.get(chunk.toolCallId);
+        if (call) call.approval = true;
+        return;
+      }
+      case "tool-output-available":
+      case "tool-output-error":
+      case "tool-output-denied":
+        this.#liveCalls.get(operationId)?.delete(chunk.toolCallId);
+        return;
+      default:
+        return;
+    }
+  }
+
+  /**
    * Whether the latest message has a tool call waiting on a client, as on
    * Think: an approval, or a call with no result to a tool a client
    * answers. A call to any other tool was the server's to run; unanswered
@@ -2108,10 +2213,17 @@ export class Think<
    * reconnected, included).
    */
   protected hasPendingInteraction(): boolean {
+    const answerable = new Set(this.#unexecutedToolNames());
+    // A reply still streaming: its calls with no result yet, as Think's
+    // accumulator holds them.
+    for (const calls of this.#liveCalls.values()) {
+      for (const call of calls.values()) {
+        if (call.approval || answerable.has(call.toolName)) return true;
+      }
+    }
     const last = this.#transcript.messages.at(-1);
     const parts = last?.parts ?? [];
     if (!parts.some((part) => "toolCallId" in part)) return false;
-    const answerable = new Set(this.#unexecutedToolNames());
     return parts.some((part) => {
       if (!("toolCallId" in part)) return false;
       if (part.state === "approval-requested") return true;

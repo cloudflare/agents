@@ -742,6 +742,47 @@ describe("Think — a call to a tool the client sent", () => {
   });
 });
 
+describe("Think — a client tool's call while its reply streams", () => {
+  /** Resolve once the socket has carried the client tool's call. */
+  function callStreamed(ws: WebSocket): Promise<void> {
+    return new Promise((resolve) => {
+      const handler = (e: MessageEvent) => {
+        if (String(e.data).includes("tool-input-available")) {
+          ws.removeEventListener("message", handler);
+          resolve();
+        }
+      };
+      ws.addEventListener("message", handler);
+    });
+  }
+
+  async function heldReply() {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.setSlowClientToolStreamMode(true, 25, 40);
+    // The reply stays open after its tool call until the test releases it.
+    await agent.holdSlowClientToolStreamForTest();
+    onTestFinished(() => agent.releaseSlowClientToolStreamForTest());
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    const streamed = callStreamed(ws);
+    const requestId = sendChatRequest(ws, [makeUserMessage("do the thing")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    const done = waitForDoneId(ws, requestId, 10000);
+    await streamed;
+    return { agent, ws, done };
+  }
+
+  it("waits on it before the reply is stored", async () => {
+    const { agent, ws, done } = await heldReply();
+    expect(await agent.waitsOnClientForTest()).toBe(true);
+    await agent.releaseSlowClientToolStreamForTest();
+    await done;
+    await closeWS(ws);
+  });
+});
+
 // ── Auto-continuation ────────────────────────────────────────────
 
 describe("Think — auto-continuation", () => {
