@@ -425,9 +425,16 @@ export class Think<
   /** The in-memory message view, bounded by `hydrationByteBudget`. */
   readonly #transcript = new ThinkTranscriptCache({
     budget: () => this.hydrationByteBudget,
-    readAll: () => this.harness.session().messages(),
+    // As on Think, through the session `configureSession` returned, so an
+    // app's wrapping of its reads applies; before it exists, the harness's.
+    readAll: async () =>
+      this.session
+        ? ((await this.session.getHistory()) as UIMessage[])
+        : this.harness.session().messages(),
     readRecent: async (budget) => {
-      const recent = await (await this.#rootHandle()).getRecentHistory(budget);
+      const recent = this.session
+        ? await this.session.getRecentHistory(budget)
+        : await (await this.#rootHandle()).getRecentHistory(budget);
       return { ...recent, messages: recent.messages as UIMessage[] };
     },
     emitWindowed: (payload) => this._emit("chat:hydration:windowed", payload),
