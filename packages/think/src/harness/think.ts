@@ -69,7 +69,16 @@ import type { ExtensionConfig, OnStartDegradation } from "../turn-types";
 import { ThinkSkills } from "../skills-runtime";
 import { declaredOverrides } from "../overrides";
 import type { SkillScriptRunner, SkillSource } from "agents/skills";
-import { mcpConnectionsExtension, mcpExtension } from "agents/internal";
+import {
+  mcpConnectionsExtension,
+  mcpExtension,
+  registerDeliverySink
+} from "agents/internal";
+import {
+  WORKFLOW_NOTIFICATION_SINK,
+  sendWorkflowNotification,
+  workflowNotificationSink
+} from "../workflow-notifications";
 import {
   admittedSubmissionMetadata,
   cancelReason,
@@ -388,6 +397,19 @@ export class Think<
   constructor(ctx: AgentContext, env: Env) {
     snapshotDeclaredMembers(new.target.prototype);
     super(ctx, env);
+    registerDeliverySink(
+      this.tasks,
+      WORKFLOW_NOTIFICATION_SINK,
+      workflowNotificationSink(
+        (notification) =>
+          this.sendWorkflowEvent(
+            notification.workflowName as string & {},
+            notification.workflowId,
+            notification.event
+          ),
+        (error) => this.onError(error)
+      )
+    );
     const self = this;
     this.harness = new ThinkHarness({
       // The Agent's own Tasks, which Think's runs already use.
@@ -1481,6 +1503,11 @@ export class Think<
         requestId,
         idempotencyKey: inspection.idempotencyKey
       });
+    }
+    // The workflow that submitted it is told first, as on Think. A repeated
+    // terminal report joins the delivery while it is open.
+    if (isTerminalSubmissionStatus(inspection.status)) {
+      sendWorkflowNotification(this.tasks, inspection);
     }
     this._emit("submission:status", {
       submissionId,

@@ -3289,6 +3289,13 @@ describe("Think — saveMessages with external AbortSignal", () => {
     expect(await agent.saveRightAfterResetForTest()).toBe("completed");
   });
 
+  it("a submission made straight after a reset is not stopped by it", async () => {
+    const agent = await freshProgrammaticAgent("submit-after-reset");
+    expect(await agent.submitRightAfterResetForTest("sub-after-reset")).toBe(
+      "completed"
+    );
+  });
+
   it("tells a chat a second reset cut off that the chat was cleared", async () => {
     const agent = await freshProgrammaticAgent("chat-between-resets");
     expect(await agent.chatCutOffForTest("reset")).toEqual({

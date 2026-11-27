@@ -11605,6 +11605,25 @@ export class ThinkProgrammaticTestAgent extends Think {
     return result.status;
   }
 
+  /** Reset, submit in the same turn of the event loop, and wait for it. */
+  async submitRightAfterResetForTest(submissionId: string): Promise<string> {
+    this.resetTurnState();
+    await this.submitMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text: "after the reset" }]
+        }
+      ],
+      { submissionId }
+    );
+    const settled = await this.waitForSubmission(submissionId, {
+      timeoutMs: 10_000
+    });
+    return settled?.status ?? "missing";
+  }
+
   async recoverChatFiberForTest(requestId: string): Promise<void> {
     await this._handleInternalFiberRecovery({
       id: `fiber-${requestId}`,

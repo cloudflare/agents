@@ -303,9 +303,9 @@ import {
   legacyWorkflowNotification,
   migrateWorkflowNotificationTable,
   WORKFLOW_NOTIFICATION_SINK,
-  workflowNotificationId,
   workflowNotificationSink,
-  type WorkflowNotification
+  workflowPromptContext,
+  sendWorkflowNotification
 } from "./workflow-notifications";
 import {
   migrateLegacyRecoveredReplies,
@@ -1105,7 +1105,6 @@ export type SubmitMessagesOptions = {
   channel?: string;
 };
 
-const THINK_WORKFLOW_PROMPT_METADATA_KEY = "__thinkWorkflowPrompt";
 /** Queue callback that runs one connection-less continuation turn. */
 const CONNECTIONLESS_CONTINUATION_CALLBACK = "_cfRunConnectionlessContinuation";
 const CONNECTIONLESS_CONTINUATION_QUEUE_ID = "connectionless-continuation";
@@ -5420,60 +5419,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     );
   }
 
-  private _readWorkflowPromptContext(
-    metadata: Record<string, unknown> | null | undefined
-  ): ThinkWorkflowPromptContext | null {
-    const workflowPromptValue = metadata?.[THINK_WORKFLOW_PROMPT_METADATA_KEY];
-    if (
-      workflowPromptValue === null ||
-      typeof workflowPromptValue !== "object" ||
-      Array.isArray(workflowPromptValue)
-    ) {
-      return null;
-    }
-    const workflowPrompt = workflowPromptValue as Record<string, unknown>;
-    const workflowValue = workflowPrompt.workflow;
-    if (
-      workflowValue === null ||
-      typeof workflowValue !== "object" ||
-      Array.isArray(workflowValue)
-    ) {
-      return null;
-    }
-    const workflowRecord = workflowValue as Record<string, unknown>;
-    if (
-      typeof workflowRecord.name !== "string" ||
-      typeof workflowRecord.id !== "string" ||
-      typeof workflowRecord.stepName !== "string" ||
-      typeof workflowRecord.eventType !== "string"
-    ) {
-      return null;
-    }
-    const output = workflowPrompt.output;
-    const outputRecord =
-      output !== null && typeof output === "object" && !Array.isArray(output)
-        ? (output as Record<string, unknown>)
-        : null;
-    return {
-      workflow: {
-        name: workflowRecord.name,
-        id: workflowRecord.id,
-        stepName: workflowRecord.stepName,
-        eventType: workflowRecord.eventType
-      },
-      ...(outputRecord
-        ? {
-            output: {
-              schema: outputRecord.schema
-            }
-          }
-        : {}),
-      ...(typeof workflowPrompt.fingerprint === "string" && {
-        fingerprint: workflowPrompt.fingerprint
-      })
-    };
-  }
-
   /**
    * Tasks' report of a status change. A terminal one queues the
    * workflow event first: Tasks repeats a terminal report a reset cut
@@ -5495,7 +5440,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     if (
       isTerminalSubmissionStatus(inspection.status) &&
       !progress.workflowNotified &&
-      this._insertWorkflowNotification(inspection, record.result)
+      sendWorkflowNotification(this.tasks, inspection, record.result)
     ) {
       this._updateSubmissionProgress(submissionId, { workflowNotified: true });
     }
@@ -5581,40 +5526,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * Send the workflow event for a submission that just went terminal. A
    * repeat for the same submission and event type joins the open delivery.
    */
-  private _insertWorkflowNotification(
-    submission: ThinkSubmissionInspection,
-    output?: unknown
-  ): boolean {
-    const workflowPrompt = this._readWorkflowPromptContext(
-      submission.metadata ?? null
-    );
-    if (!workflowPrompt) return false;
-
-    const { status, error } = submission;
-    const payload = {
-      submissionId: submission.submissionId,
-      status,
-      ...(status === "completed" && { output }),
-      ...(error && { error })
-    };
-    void sendDelivery(
-      this.tasks,
-      WORKFLOW_NOTIFICATION_SINK,
-      workflowNotificationId(
-        submission.submissionId,
-        workflowPrompt.workflow.eventType
-      ),
-      {
-        workflowName: workflowPrompt.workflow.name,
-        workflowId: workflowPrompt.workflow.id,
-        event: { type: workflowPrompt.workflow.eventType, payload }
-      } satisfies WorkflowNotification
-    ).catch((error) => {
-      console.error("[Think] Failed to send workflow notification", error);
-    });
-    return true;
-  }
-
   /**
    * A queue item or scheduled retry of a workflow notification from the
    * released version: sent as a delivery, which retries on its own.
@@ -5884,7 +5795,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     this._submissionAbortControllers.set(submissionId, controller);
     let applied = false;
     try {
-      const workflowPrompt = this._readWorkflowPromptContext(row.metadata);
+      const workflowPrompt = workflowPromptContext(row.metadata);
       const result = await this._runProgrammaticMessagesTurn(
         requestId,
         messages,
@@ -10177,7 +10088,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
       onTurnStarted?.();
     };
     const workflowPrompt = recoveredSubmission
-      ? this._readWorkflowPromptContext(recoveredSubmission.metadata)
+      ? workflowPromptContext(recoveredSubmission.metadata)
       : null;
     return recoveredTurnAcceptanceContext.run(
       { agent: this, onAccepted, workflowPrompt: workflowPrompt ?? undefined },
