@@ -156,7 +156,7 @@ describe("ThinkContextOverflow", () => {
   });
 
   it("compacts before a step over budget and keeps the in-flight tail", async () => {
-    const { guard } = overflow({ proactive: { maxInputTokens: 100 } });
+    const { guard, emitted } = overflow({ proactive: { maxInputTokens: 100 } });
     const head: ModelMessage = { role: "user", content: "old" };
     const step: ModelMessage = { role: "assistant", content: "in flight" };
     guard.beginRun(1);
@@ -167,10 +167,16 @@ describe("ThinkContextOverflow", () => {
       { role: "user", content: "summary" },
       step
     ]);
-    // The default cap is one compaction per run.
+    // The default cap is one compaction per run: a later step doesn't
+    // compact again, but still gets the compacted head when its messages
+    // aren't the override (as on AI SDK 6).
+    expect(await guard.compactBeforeStep(stepEvent(95, [head, step]))).toEqual([
+      { role: "user", content: "summary" },
+      step
+    ]);
     expect(
-      await guard.compactBeforeStep(stepEvent(95, [head, step]))
-    ).toBeUndefined();
+      emitted.filter(([type]) => type === "chat:context:compacted")
+    ).toHaveLength(1);
     guard.beginRun(1);
     expect(await guard.compactBeforeStep(stepEvent(95, [head, step]))).toEqual([
       { role: "user", content: "summary" },
