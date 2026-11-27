@@ -784,6 +784,8 @@ export class Think<
         onRecovery: (context) => this.#onRecovery(context),
         beforeTurn: (turn) => this.#beforeTurn(turn),
         beforeToolCall: async (call) => {
+          // As in Think, the final-answer tool is plumbing: no hook sees it.
+          if (this.#isFinalAnswer(call)) return undefined;
           // The step's chunks reach extensions before its tool calls do.
           await this.#chunkHooks;
           // A call approved after a restart runs before any model call of
@@ -866,6 +868,7 @@ export class Think<
           return decision;
         },
         afterToolCall: async (result) => {
+          if (this.#isFinalAnswer(result)) return;
           const kept = this.#modelInputs.get(result.toolCallId);
           // From the decision to run it to its result, as Think times
           // `execute`: not the approval before it or the hooks after.
@@ -917,6 +920,19 @@ export class Think<
           await this.#endStep(operationId, message);
           const segment = stepSegments(message);
           const ended = { operationId, step, finishReason, segment, usage };
+          const calls = stepResultOf(message, segment).toolCalls;
+          // As in Think: a structured workflow turn that answers without
+          // its final-answer tool fails.
+          const final = this.#finalAnswer;
+          if (
+            final?.operationId === operationId &&
+            final.output === undefined &&
+            calls.length === 0
+          ) {
+            throw new Error(
+              `Model ended the turn without calling the ${final.name} tool`
+            );
+          }
           // A step that called tools ends once they ran, as an AI SDK step
           // does: at the next step, or at the turn's end.
           if (stepResultOf(message, segment).toolCalls.length > 0) {
@@ -2403,6 +2419,17 @@ export class Think<
       }
     | undefined;
 
+  /** Whether `call` is the running workflow turn's final-answer tool. */
+  #isFinalAnswer(call: {
+    readonly operationId: string;
+    readonly toolName: string;
+  }): boolean {
+    const final = this.#finalAnswer;
+    return (
+      final?.operationId === call.operationId && final.name === call.toolName
+    );
+  }
+
   /** The tools on offer, with the final-answer tool on a workflow turn. */
   #withFinalAnswer(tools: ToolSet): ToolSet {
     const final = this.#finalAnswer;
@@ -3843,7 +3870,7 @@ export class Think<
     // A narrowing channel limits the tools the model is offered, and a
     // selection cannot bring back a tool it removed.
     const selected = step.activeTools ?? config.activeTools;
-    const activeTools = channel?.tools
+    const chosenTools = channel?.tools
       ? (selected ?? Object.keys(tools)).filter((name) => name in tools)
       : selected;
     // A workflow turn that asked for structured output ends by calling the
@@ -3853,8 +3880,29 @@ export class Think<
       this.#finalAnswer?.operationId === turn.operationId
         ? this.#finalAnswer
         : undefined;
-    const toolChoice =
-      step.toolChoice ?? config.toolChoice ?? (final ? "required" : undefined);
+    // As in Think: with tools of its own the turn must call one each step,
+    // else the final-answer tool; and on its last permitted step, that one.
+    const lastStep =
+      final !== undefined &&
+      step.toolChoice === undefined &&
+      turn.step >= (config.maxSteps ?? this.maxSteps) - 1;
+    const pinned = final && { type: "tool" as const, toolName: final.name };
+    const toolChoice = lastStep
+      ? pinned
+      : (step.toolChoice ??
+        config.toolChoice ??
+        (final
+          ? Object.keys(tools).some((name) => name !== final.name)
+            ? "required"
+            : pinned
+          : undefined));
+    // A turn that names its active tools keeps the final-answer tool on.
+    const activeTools =
+      final && lastStep
+        ? [final.name]
+        : final && chosenTools
+          ? [...chosenTools, final.name]
+          : chosenTools;
     const callSettings = defined({
       topP: config.topP,
       topK: config.topK,
