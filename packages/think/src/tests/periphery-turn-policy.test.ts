@@ -50,7 +50,7 @@ describe("ThinkContextOverflow", () => {
       const { guard } = overflow({
         proactive: { maxInputTokens: 10, maxCompactions: 1 }
       });
-      guard.beginRun(original.length);
+      guard.beginRun(original);
       return guard;
     };
     // Before step 2: compacts, and sends the head with step 1.
@@ -159,7 +159,7 @@ describe("ThinkContextOverflow", () => {
     const { guard, emitted } = overflow({ proactive: { maxInputTokens: 100 } });
     const head: ModelMessage = { role: "user", content: "old" };
     const step: ModelMessage = { role: "assistant", content: "in flight" };
-    guard.beginRun(1);
+    guard.beginRun([head]);
     expect(await guard.compactBeforeStep(stepEvent(50, [head, step]))).toBe(
       undefined
     );
@@ -177,7 +177,7 @@ describe("ThinkContextOverflow", () => {
     expect(
       emitted.filter(([type]) => type === "chat:context:compacted")
     ).toHaveLength(1);
-    guard.beginRun(1);
+    guard.beginRun([head]);
     expect(await guard.compactBeforeStep(stepEvent(95, [head, step]))).toEqual([
       { role: "user", content: "summary" },
       step

@@ -3921,7 +3921,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     // re-summarize the (now-compacted) head. Captured from the FINAL messages
     // and tools — after `beforeTurn` may have overridden them — so the tail
     // splice stays correct even when the override changes the message count.
-    this.#overflow.beginRun(finalMessages.length);
+    this.#overflow.beginRun(finalMessages);
     this._activeTurnTools = mergedTools;
     this._recordUnexecutedTools(mergedTools);
 

@@ -103,15 +103,21 @@ export class ThinkContextOverflow {
    * Start a model run whose assembled messages number `baseline`. Resets
    * the proactive compaction cap.
    */
-  beginRun(baseline: number): void {
+  beginRun(messages: readonly ModelMessage[]): void {
+    const baseline = messages.length;
     this.#baseline = baseline;
     this.#runBaseline = baseline;
+    const last = messages.at(-1);
+    this.#lastInput = last === undefined ? undefined : JSON.stringify(last);
     this.#compactedHead = undefined;
     this.#proactiveCompactions = 0;
   }
 
   /** Where the run's own steps begin in the messages it started with. */
   #runBaseline = 0;
+
+  /** The last message the run started with, as JSON: its steps follow it. */
+  #lastInput: string | undefined;
 
   /** The head the last proactive compaction of this run built, if any. */
   #compactedHead: ModelMessage[] | undefined;
@@ -130,8 +136,20 @@ export class ThinkContextOverflow {
     );
   }
 
-  /** This run's in-flight steps, in the frame the step's messages are in. */
+  /**
+   * This run's in-flight steps: what follows the last message the run
+   * started with, wherever a compaction or a `beforeStep` rewrite put it.
+   * Without it, by the frame the step's messages are in.
+   */
   #inFlight(messages: readonly ModelMessage[]): ModelMessage[] {
+    const last = this.#lastInput;
+    if (last !== undefined) {
+      for (let at = messages.length - 1; at >= 0; at--) {
+        if (JSON.stringify(messages[at]) === last) {
+          return messages.slice(at + 1);
+        }
+      }
+    }
     return messages.slice(
       this.#carried(messages) ? this.#baseline : this.#runBaseline
     );

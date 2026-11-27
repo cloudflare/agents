@@ -850,7 +850,7 @@ export class OverflowRecoveryTestAgent extends Think {
   modelCalls = 0;
   proactiveMode = false;
   proactiveMultiFire = false;
-  stepMessages?: "append" | ModelMessage[];
+  stepMessages?: "append" | "prepend" | ModelMessage[];
   compactionNoOp = false;
   otherErrorOnRetry = false;
   compactionThrows = false;
@@ -887,6 +887,17 @@ export class OverflowRecoveryTestAgent extends Think {
   override beforeStep(
     ctx: PrepareStepContext
   ): (StepConfig & { messages: ModelMessage[] }) | void {
+    if (this.stepMessages === "prepend") {
+      return {
+        messages: [
+          { role: "user", content: "Prepended per-step context" },
+          ...ctx.messages.filter(
+            (m) =>
+              !(m.role === "user" && m.content === "Prepended per-step context")
+          )
+        ]
+      };
+    }
     if (this.stepMessages === "append") {
       return {
         messages: [
@@ -1262,8 +1273,10 @@ export class OverflowRecoveryTestAgent extends Think {
   async testProactiveMultiFire(
     message: string,
     maxCompactions = 2,
-    endWithAssistant = false
+    endWithAssistant = false,
+    stepMessages?: "prepend"
   ): Promise<OverflowChatResult> {
+    this.stepMessages = stepMessages;
     this.proactiveMode = true;
     this.proactiveMultiFire = true;
     this.compactionNoOp = false;
@@ -1293,6 +1306,22 @@ export class OverflowRecoveryTestAgent extends Think {
       role: "assistant",
       parts: [{ type: "text", text: "earlier answer" }]
     });
+    // A longer history than the compacted head, for a prompt beforeStep
+    // rewrites.
+    if (stepMessages === "prepend") {
+      for (let n = 0; n < 3; n++) {
+        await this.session.appendMessage({
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text: `older question ${n}` }]
+        });
+        await this.session.appendMessage({
+          id: crypto.randomUUID(),
+          role: "assistant",
+          parts: [{ type: "text", text: `older answer ${n}` }]
+        });
+      }
+    }
 
     const cb = new TestCollectingCallback();
     // Programmatic input may end with an assistant message of its own.
