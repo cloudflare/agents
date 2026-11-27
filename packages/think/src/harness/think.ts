@@ -93,7 +93,11 @@ import {
   ThinkTranscriptCache,
   type HydrationResult
 } from "../transcript-cache";
-import { Context, type ContextConfig } from "agents/context";
+import {
+  AgentContextProvider,
+  Context,
+  type ContextConfig
+} from "agents/context";
 import type {
   AddMessagesOptions,
   CancelSubmissionResult,
@@ -660,12 +664,22 @@ export class Think<
       this.session = await this.configureSession(
         new ThinkSession(handle, () => this.context)
       );
+      const sessionId = this.session.sessionId;
       this.#context = new Context(handle, {
         blocks: [
           ...(await this.configureContext()),
           ...this.session.internal_takePendingContext()
         ],
-        sql: this
+        sql: this,
+        // As on Think: the prompt a release froze (a custom store, or the
+        // `_system_prompt` row) is read, never written, so the turns sent
+        // before the upgrade are sent it.
+        promptStore:
+          this.session.internal_promptStore() ??
+          new AgentContextProvider(
+            this,
+            sessionId ? `_system_prompt_${sessionId}` : "_system_prompt"
+          )
       });
       await this.#context.load();
       if (this.extensionLoader) {
