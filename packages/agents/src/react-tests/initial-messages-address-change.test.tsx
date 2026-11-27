@@ -23,7 +23,12 @@ async function mountChat({
     setAddress?: (address: Address) => void;
     agentName?: string;
     identified?: boolean;
-    renders: { name: string; messageIds: string[] }[];
+    renders: {
+      name: string;
+      token: string;
+      identified: boolean;
+      messageIds: string[];
+    }[];
   } = { renders: [] };
   let committed!: () => void;
   const firstCommit = new Promise<void>((resolve) => {
@@ -54,6 +59,8 @@ async function mountChat({
     });
     controls.renders.push({
       name: agent.name,
+      token,
+      identified: agent.identified,
       messageIds: messages.map((message) => message.id)
     });
     return <div data-testid="ready">ready</div>;
@@ -231,20 +238,46 @@ describe("useAgentChat when the agent address changes", () => {
   });
 
   it("does not reload history when only the token changes (#1223)", async () => {
-    const getInitialMessages = vi.fn(async (_options: LoaderOptions) => []);
+    const getInitialMessages = vi.fn(async (options: LoaderOptions) =>
+      historyFor(options.name)
+    );
     const controls = await mountChat({
       initial: { name: "token-refresh", token: "token-a" },
       getInitialMessages
     });
-    await vi.waitFor(() => expect(getInitialMessages).toHaveBeenCalled());
-    await vi.waitFor(() => expect(controls.identified).toBe(true));
+    // The first address is connected and its history shown: its load is
+    // done.
+    await vi.waitFor(() =>
+      expect(controls.renders.at(-1)).toMatchObject({
+        token: "token-a",
+        identified: true,
+        messageIds: ["token-refresh-message"]
+      })
+    );
 
     getInitialMessages.mockClear();
+    const before = controls.renders.length;
     await act(async () => {
       controls.setAddress?.({ name: "token-refresh", token: "token-b" });
     });
-    await vi.waitFor(() => expect(controls.identified).toBe(true));
+    // The new token's socket has connected: it went down and is identified
+    // again, so a reload on reconnect would have been asked for by now.
+    await vi.waitFor(() => {
+      const after = controls.renders.slice(before);
+      const down = after.findIndex(
+        (render) => render.token === "token-b" && !render.identified
+      );
+      expect(down).toBeGreaterThanOrEqual(0);
+      expect(
+        after
+          .slice(down)
+          .some((render) => render.token === "token-b" && render.identified)
+      ).toBe(true);
+    });
 
     expect(getInitialMessages).not.toHaveBeenCalled();
+    expect(controls.renders.at(-1)?.messageIds).toEqual([
+      "token-refresh-message"
+    ]);
   });
 });
