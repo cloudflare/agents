@@ -292,6 +292,24 @@ describe("ThinkHarness turns", () => {
     expect(inspection.metadata).toBeUndefined();
   });
 
+  it("names no reply on an aborted operation's inspection when it stored none", async () => {
+    const stub = fresh();
+    // The reply announces itself and then waits before any content.
+    await stub.submit("stall empty, then in input", { operationId: "cut" });
+    await vi.waitFor(async () =>
+      expect(await stub.inFlightChunks()).toBeGreaterThan(0)
+    );
+    expect(await stub.abortWithReason("cut", "enough")).toBe(true);
+    await stub.releaseSlow();
+    await stub.wait("cut");
+    expect(await stub.messages()).toEqual(["user: stall empty, then in input"]);
+    const inspection = JSON.parse(await stub.inspectRecord("cut")) as {
+      status: string;
+      messageId?: string;
+    };
+    expect(inspection.messageId).toBeUndefined();
+  });
+
   it("tells withdrawn from aborted by the run, also when the caller's reason is one of those words", async () => {
     const stub = fresh();
     await stub.submit("gate", { operationId: "running" });
@@ -479,6 +497,16 @@ describe("ThinkHarness turns", () => {
     const result = await stub.prompt("hello");
     expect(result.status).toBe("done");
     expect(text(result)).toBe("echo: hello");
+  });
+
+  it("lets the app's classifier end a turn whose preparation hits a platform transient", async () => {
+    const stub = fresh();
+    await stub.classifyEveryErrorAsFail();
+    await stub.blipNextPreparation();
+    const result = await stub.prompt("hello");
+    expect(result.status).toBe("unanswered");
+    expect(reason(result)).toMatch(/Network connection lost/);
+    expect(await stub.modelCalls()).toBe(0);
   });
 
   it("takes a client tool declaration that is not a list as none", async () => {

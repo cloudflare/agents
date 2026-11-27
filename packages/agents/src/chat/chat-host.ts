@@ -36,6 +36,7 @@ import type { ChatRecoveryIncident } from "./recovery-incident";
 import { TaskSettlement } from "../tasks/settlement";
 import { TaskCancellation } from "../tasks/replay";
 import { frameText } from "./chat-frames";
+import { partialHasSettledToolResults } from "./recovery-codec";
 import { sendIfOpen } from "./connection";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
 import { responseSource } from "./reply-source";
@@ -601,6 +602,10 @@ export function chatTurnDefinition(
         ? { parentId: run.questionId }
         : {};
     const report = async (result: ChatTurnResult) => {
+      // A settled turn is not recovered: what it stashed for that goes.
+      if (step.checkpoint.get(STASH_CHECKPOINT) != null) {
+        step.checkpoint.set(STASH_CHECKPOINT, null);
+      }
       if (result.status !== "completed" && result.status !== "skipped") {
         send({
           body: result.error ?? "",
@@ -859,9 +864,19 @@ export function chatTurnDefinition(
           createdAt: step.createdAt
         });
       }
+      // `persist: false` drops what this run streamed unless it holds
+      // settled tool results: work that is not idempotent and must not run
+      // again. A reply it continues keeps its base either way.
+      const drop =
+        decision?.persist === false &&
+        !partialHasSettledToolResults(
+          (partial?.parts ?? []).slice(
+            baseMessage && base ? base.parts : 0
+          ) as never
+        );
       if (exhausted || decision?.continue === false) {
         // falls through below
-      } else if (decision?.persist === false) {
+      } else if (drop) {
         // Continue without what was streamed: the question is answered
         // again.
         await dropPartial();
@@ -870,7 +885,7 @@ export function chatTurnDefinition(
       if (exhausted || decision?.continue === false) {
         // Given up: what was streamed stays stored (unless the app said
         // not to keep it), and the turn ends as an error.
-        if (decision?.persist === false) await dropPartial();
+        if (drop) await dropPartial();
         const writer = await deps.streams.open(streamId, { tag: requestId });
         writer.error("interrupted");
         if (!evaluated?.exhausted) {

@@ -1678,13 +1678,26 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       // A cancelled attempt keeps the reply it streamed; its run has no
       // result to name it, so the inspection reads it from here.
       const keptId =
-        live.reply?.id ?? replyIdOf(live.partial.slice(live.discarded));
-      if (run.signal.aborted && keptId !== undefined) {
+        live.reply?.id ??
+        replyIdOf(
+          live.partial.slice(
+            Math.max(live.discarded, this.#discardedOf(run.id))
+          )
+        );
+      // Only a reply that was stored: a `start` names one before it has
+      // any parts, and a stop then stores nothing.
+      const stored =
+        run.signal.aborted && keptId !== undefined
+          ? await this.#handle(session)
+              .getMessage(keptId)
+              .catch(() => null)
+          : null;
+      if (stored) {
         // Best-effort: a failed write must not keep the attempt from
         // finishing, or the operations queued behind it would wait.
         try {
           this.#tasks.patchMetadata(run.id, KEPT_REPLY_KEY, {
-            messageId: keptId
+            messageId: stored.id
           });
         } catch (error) {
           console.warn("ThinkHarness could not record a kept reply", error);
@@ -1792,15 +1805,19 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const recovery = this.#options.recovery;
     const hooks = this.#options.hooks;
     return {
-      respond: async (call) =>
-        this.#respond(call, {
+      respond: async (call) => {
+        // What the definition dropped before asking again (`persist:
+        // false`) is not part of the reply.
+        live.discarded = this.#discardedOf(run.id);
+        return this.#respond(call, {
           run,
           session,
           operationId,
           built,
           placed,
           live
-        }),
+        });
+      },
       options: {
         recovery: {
           ...recovery?.chatRecovery,
@@ -1859,9 +1876,6 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             recoveryData: context.recoveryData
           });
           // What was streamed is dropped: the reply is not rebuilt from it.
-          if (typeof decision === "object" && decision.persist === false) {
-            live.discarded = live.partial.length;
-          }
           // An options object is the definition's own answer, as given.
           return decision === "abandon"
             ? { continue: false }
@@ -2231,12 +2245,18 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             steps,
             AbortSignal.any([signal, stall.signal]),
             call.signal
-          ).catch((error: unknown) => {
+          ).catch(async (error: unknown) => {
             // A platform transient (a storage blip, a lost connection) while
             // preparing the call is not the app's error: the turn is tried
-            // again within its budget, as Think does.
+            // again within its budget, as Think does, unless the app's
+            // classifier says otherwise, as for a model call's failure.
             if (isPlatformTransientError(error)) {
-              throw new ModelCallError("retry", error);
+              const kind = await this.#extensions.hook("classifyError", {
+                error
+              });
+              if (kind === undefined || kind === "retry") {
+                throw new ModelCallError("retry", error);
+              }
             }
             throw error;
           });
