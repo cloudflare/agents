@@ -30,10 +30,8 @@
 
 import type { UIMessage } from "ai";
 import { LifecycleCapability } from "agents/lifecycle";
-import {
-  MODEL_RECENT_WINDOW,
-  mediaEvictionCutoff
-} from "./inference/model-messages";
+import { MODEL_RECENT_WINDOW } from "agents/chat";
+import { mediaEvictionCutoff } from "./inference/model-messages";
 
 /** Nested tool-output walks stop here so hostile output cannot recurse forever. */
 const MAX_WALK_DEPTH = 8;

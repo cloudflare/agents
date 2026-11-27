@@ -6,13 +6,12 @@ import {
   drainInferenceStream,
   streamErrorToString
 } from "../inference/invocation";
+import { MODEL_RECENT_WINDOW, truncationKeepRecent } from "agents/chat";
 import {
-  MODEL_RECENT_WINDOW,
   ensureValidContinueCheckpoint,
   mediaEvictionCutoff,
   modelMessagesFromHistory,
   toProviderSafeExecutionOutcomeMessage,
-  truncationKeepRecent,
   withContextReminder
 } from "../inference/model-messages";
 import {

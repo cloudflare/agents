@@ -303,3 +303,42 @@ function isToolPart(part: { type: string }): boolean {
 function isProviderExecuted(part: object): boolean {
   return (part as { providerExecuted?: unknown }).providerExecuted === true;
 }
+
+/**
+ * The shortest recent-message span the model sees at FULL fidelity each turn
+ * (Think's `truncationStep` steps the cutoff above it).
+ *
+ * Both memory bounds are anchored to this window (#1710):
+ * - budgeted hydration (`hydrationByteBudget`) is a hard byte ceiling, so a
+ *   window of unusually large messages can be shorter than this; the model
+ *   then sees what fits rather than exhausting isolate memory;
+ * - media eviction never rewrites messages above the stepped truncation
+ *   cutoff (see Think's `mediaEvictionCutoff`), so the rows the model replays
+ *   at full fidelity are never stripped.
+ *
+ * @internal
+ */
+export const MODEL_RECENT_WINDOW = 4;
+
+/**
+ * `Infinity` never moves the cutoff; any other invalid step cuts every turn.
+ *
+ * @internal
+ */
+export function truncationStepSize(step: number): number {
+  if (step === Number.POSITIVE_INFINITY) return step;
+  return Number.isFinite(step) ? Math.max(1, Math.floor(step)) : 1;
+}
+
+/** @internal */
+export function truncationKeepRecent(
+  messageCount: number,
+  step: number
+): number {
+  const safeStep = truncationStepSize(step);
+  if (messageCount <= MODEL_RECENT_WINDOW) return MODEL_RECENT_WINDOW;
+  if (safeStep === Number.POSITIVE_INFINITY) return messageCount;
+  return (
+    MODEL_RECENT_WINDOW + ((messageCount - MODEL_RECENT_WINDOW) % safeStep)
+  );
+}

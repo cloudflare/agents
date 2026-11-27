@@ -486,6 +486,14 @@ export type ThinkHarnessOptions<TOOLS extends ToolSet = ToolSet> = {
   readonly model: PerSession<LanguageModel>;
   readonly system?: PerSession<string | undefined>;
   /**
+   * Send older messages truncated, as Think's `truncationStep` does: the
+   * cutoff moves by whole steps, so the prompt prefix is rewritten once per
+   * step. Unset, nothing is truncated.
+   *
+   * @internal The harness-backed Think passes its `truncationStep`.
+   */
+  readonly truncationStep?: PerSession<number | undefined>;
+  /**
    * Server tools, which the harness runs itself, one durable call at a
    * time, and tools without `execute`, which a client runs. A server tool
    * may carry `recovery: "rerun"` (see `ToolRecovery`).

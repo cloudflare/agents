@@ -8,26 +8,13 @@
 import type { ModelMessage, ToolSet, UIMessage } from "ai";
 import { convertToModelMessages } from "ai";
 import {
+  MODEL_RECENT_WINDOW,
   truncateOlderMessages,
   truncateOlderToolResults,
+  truncationKeepRecent,
+  truncationStepSize,
   type BeforeTurnRepairResult
 } from "agents/chat";
-
-/**
- * The shortest recent-message span the model sees at FULL fidelity each turn
- * (see `_assembleModelMessages` and {@link MODEL_TRUNCATION_STEP}).
- *
- * Both memory bounds are anchored to this window (#1710):
- * - budgeted hydration (`hydrationByteBudget`) is a hard byte ceiling, so a
- *   window of unusually large messages can be shorter than this; the model
- *   then sees what fits rather than exhausting isolate memory;
- * - media eviction never rewrites messages above the stepped truncation
- *   cutoff (see {@link mediaEvictionCutoff}), so the rows the model replays
- *   at full fidelity are never stripped.
- *
- * @internal
- */
-export const MODEL_RECENT_WINDOW = 4;
 
 /**
  * Default `truncationStep`. Read-time truncation cuts the history at a
@@ -41,29 +28,6 @@ export const MODEL_RECENT_WINDOW = 4;
  * @internal
  */
 export const MODEL_TRUNCATION_STEP = 8;
-
-/**
- * `Infinity` never moves the cutoff; any other invalid step cuts every turn.
- *
- * @internal
- */
-function truncationStepSize(step: number): number {
-  if (step === Number.POSITIVE_INFINITY) return step;
-  return Number.isFinite(step) ? Math.max(1, Math.floor(step)) : 1;
-}
-
-/** @internal */
-export function truncationKeepRecent(
-  messageCount: number,
-  step: number
-): number {
-  const safeStep = truncationStepSize(step);
-  if (messageCount <= MODEL_RECENT_WINDOW) return MODEL_RECENT_WINDOW;
-  if (safeStep === Number.POSITIVE_INFINITY) return messageCount;
-  return (
-    MODEL_RECENT_WINDOW + ((messageCount - MODEL_RECENT_WINDOW) % safeStep)
-  );
-}
 
 /**
  * Index below which media eviction may rewrite messages: the stepped
