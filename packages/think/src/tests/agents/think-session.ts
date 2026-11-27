@@ -14037,6 +14037,15 @@ export class ThinkAsyncHookTestAgent extends Think {
 // ── ThinkRecoveryTestAgent ──────────────────────────────────
 // Tests chatRecovery, fiber wrapping, onChatRecovery hook.
 
+const HOOK_CALLS_KEY = "test:hook-calls";
+type HookCallForTest = {
+  requestId: string;
+  status: string;
+  messageId: string;
+  recovered: boolean;
+};
+const RESET_IN_HOOK_KEY = "test:reset-in-hook";
+
 export class ThinkRecoveryTestAgent extends Think {
   /** The recorded end of `requestId` (the recent terminals), or null. */
   recentTerminalForTest(requestId: string): unknown {
@@ -14090,13 +14099,47 @@ export class ThinkRecoveryTestAgent extends Think {
     owedHook?: unknown;
   } | null = null;
 
-  override onChatResponse(result: ChatResponseResult): void {
+  override async onChatResponse(result: ChatResponseResult): Promise<void> {
     this._chatResponses.push({
       requestId: result.requestId,
       status: result.status,
       messageId: result.message.id,
       ...(result.recovered !== undefined && { recovered: result.recovered })
     });
+    // Kept across a reset, for the tests that reset inside this hook.
+    const calls =
+      this.ctx.storage.kv.get<Array<Record<string, unknown>>>(HOOK_CALLS_KEY) ??
+      [];
+    this.ctx.storage.kv.put(HOOK_CALLS_KEY, [
+      ...calls,
+      {
+        requestId: result.requestId,
+        status: result.status,
+        messageId: result.message.id,
+        recovered: result.recovered === true
+      }
+    ]);
+    if (this.ctx.storage.kv.get<boolean>(RESET_IN_HOOK_KEY)) {
+      this.ctx.storage.kv.delete(RESET_IN_HOOK_KEY);
+      await this.ctx.storage.sync();
+      this.ctx.abort("test: forced reset");
+    }
+  }
+
+  /** Reset the isolate inside the next response hook, as an eviction would. */
+  async resetInNextResponseHookForTest(): Promise<void> {
+    this.ctx.storage.kv.put(RESET_IN_HOOK_KEY, true);
+  }
+
+  /** Reset this agent's isolate, as an eviction does. */
+  async resetRecoveryIsolateForTest(): Promise<void> {
+    await this.ctx.storage.sync();
+    this.ctx.abort("test: forced reset");
+  }
+
+  /** Every response hook call, kept across resets. */
+  async hookCallsForTest(): Promise<HookCallForTest[]> {
+    return this.ctx.storage.kv.get<HookCallForTest[]>(HOOK_CALLS_KEY) ?? [];
   }
 
   async getChatResponsesForTest(): Promise<

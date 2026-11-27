@@ -270,6 +270,78 @@ describe("recovery × failed final persist (#1997)", () => {
 });
 
 describe("recovery × onChatResponse after a reset (#2266)", () => {
+  it("does not run the response hook again after a reset that follows a completed turn", async () => {
+    const name = `hook-no-replay-${crypto.randomUUID()}`;
+    let agent = await freshRecoveryAgent(name);
+    await agent.testRunTurnWait("hello");
+    await agent.resetRecoveryIsolateForTest().catch(() => undefined);
+
+    agent = await freshRecoveryAgent(name);
+    // The restarted agent settles with nothing owed.
+    expect(await agent.waitUntilStableForTest()).toBe(true);
+    expect(await agent.hookCallsForTest()).toEqual([
+      expect.objectContaining({ status: "completed", recovered: false })
+    ]);
+  }, 30_000);
+
+  it("runs the response hook again after a reset cuts it off, without running the turn again", async () => {
+    const name = `hook-real-reset-${crypto.randomUUID()}`;
+    let agent = await freshRecoveryAgent(name);
+    await agent.resetInNextResponseHookForTest();
+    await agent.testRunTurnWait("hello").catch(() => undefined);
+
+    // The restarted agent owes the hook of a turn it had already answered.
+    agent = await freshRecoveryAgent(name);
+    const deadline = Date.now() + 15_000;
+    let calls = await agent.hookCallsForTest();
+    while (calls.length < 2 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      calls = await agent.hookCallsForTest();
+    }
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    expect(calls).toEqual([
+      expect.objectContaining({ status: "completed", recovered: false }),
+      expect.objectContaining({
+        status: "completed",
+        messageId: messages[1].id,
+        recovered: true
+      })
+    ]);
+  }, 30_000);
+
+  it("runs an RPC chat's response hook again after a reset cuts it off, without running the turn again", async () => {
+    const name = `hook-real-reset-rpc-${crypto.randomUUID()}`;
+    let agent = await freshRecoveryAgent(name);
+    await agent.resetInNextResponseHookForTest();
+    await agent.testChat("hello").catch(() => undefined);
+
+    // The restarted agent owes the hook of a turn it had already answered.
+    agent = await freshRecoveryAgent(name);
+    const deadline = Date.now() + 15_000;
+    let calls = await agent.hookCallsForTest();
+    while (calls.length < 2 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      calls = await agent.hookCallsForTest();
+    }
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    expect(calls).toEqual([
+      expect.objectContaining({ status: "completed", recovered: false }),
+      expect.objectContaining({
+        status: "completed",
+        messageId: messages[1].id,
+        recovered: true
+      })
+    ]);
+  }, 30_000);
+
   it("fires the response hook once for a turn persisted before the reset", async () => {
     const agent = await freshRecoveryAgent(`hook-reset-${crypto.randomUUID()}`);
     await agent.resetBeforeNextResponseHookForTest();

@@ -1011,7 +1011,11 @@ export class Think<
                     ? "aborted"
                     : "error",
               ...(end.status === "unanswered" &&
-                end.reason !== undefined && { error: end.reason })
+                end.reason !== undefined && { error: end.reason }),
+              // As on Think: a hook delivered after a restart for a turn
+              // whose reply was stored before it (no model call here).
+              ...(continued === undefined &&
+                end.message !== undefined && { recovered: true })
             });
           } finally {
             this.#respondingContext = undefined;
