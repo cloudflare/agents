@@ -86,6 +86,9 @@ type ThinkSubmissionTestStub = {
   getMessagesForTest(): Promise<UIMessage[]>;
   setFinalAnswerResponseForTest(args: unknown): Promise<void>;
   getFinalAnswerCallsForTest(): Promise<string>;
+  giveUpRecoveryForTest(): Promise<void>;
+  holdChunksAfterForTest(after: number): Promise<void>;
+  isChunkStreamHeldForTest(): Promise<boolean>;
   getAfterToolNamesForTest(): Promise<string[]>;
   getBeforeToolNamesForTest(): Promise<string[]>;
   setTurnConfigOverride(config: Record<string, unknown> | null): Promise<void>;
@@ -2208,6 +2211,54 @@ describe("Think durable submissions", () => {
       }
     });
   });
+
+  it("stores no final-answer part from a reply cut off after its final-answer call", async () => {
+    const name = crypto.randomUUID();
+    const agent = await freshAgent(name);
+    await agent.giveUpRecoveryForTest();
+    await agent.setFinalAnswerResponseForTest({ title: "cut" });
+    await agent.holdChunksAfterForTest(0);
+    await agent.testSubmitMessages("answer, then be cut off", {
+      submissionId: "sub-final-cut",
+      metadata: {
+        [workflowPromptMetadataKey]: {
+          workflow: {
+            name: "TEST_WORKFLOW",
+            id: "workflow-final-cut",
+            stepName: "draft-report",
+            eventType: "think-prompt-final-cut"
+          },
+          output: {
+            schema: {
+              type: "object",
+              properties: { title: { type: "string" } },
+              required: ["title"],
+              additionalProperties: false
+            }
+          },
+          fingerprint: "fingerprint"
+        }
+      }
+    });
+    await vi.waitFor(
+      async () => expect(await agent.isChunkStreamHeldForTest()).toBe(true),
+      { timeout: 10_000 }
+    );
+    await agent.resetIsolateForTest().catch(() => {});
+    const restarted = await freshAgent(name);
+    // Recovery gives up and keeps the partial, which had only the call.
+    await vi.waitFor(
+      async () => {
+        const submission =
+          await restarted.inspectSubmissionForTest("sub-final-cut");
+        expect(submission?.status).not.toBe("running");
+        expect(submission?.status).not.toBe("pending");
+      },
+      { timeout: 20_000 }
+    );
+    const stored = JSON.stringify(await restarted.getStoredMessages());
+    expect(stored).not.toContain("think_final_answer");
+  }, 40_000);
 
   it("keeps the final-answer call from the tool hooks", async () => {
     const agent = await freshAgent();

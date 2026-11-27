@@ -9355,7 +9355,9 @@ function createDurablePauseMockModel(
 // without a network round-trip.
 function createFinalAnswerMockModel(
   args: unknown,
-  onCall?: (call: { toolChoice: unknown; tools: string[] }) => void
+  onCall?: (call: { toolChoice: unknown; tools: string[] }) => void,
+  /** Waits after the final-answer call streamed, before the finish. */
+  hold?: ChunkHoldForTest | null
 ): LanguageModel {
   return {
     specificationVersion: "v3",
@@ -9384,7 +9386,7 @@ function createFinalAnswerMockModel(
       const input = JSON.stringify(args);
       const id = "final-answer-call";
       const stream = new ReadableStream({
-        start(controller) {
+        async start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
           controller.enqueue({ type: "tool-input-start", id, toolName });
           controller.enqueue({ type: "tool-input-delta", id, delta: input });
@@ -9395,6 +9397,10 @@ function createFinalAnswerMockModel(
             toolName,
             input
           });
+          if (hold) {
+            hold.reached = true;
+            await hold.released;
+          }
           controller.enqueue({
             type: "finish",
             finishReason: v3FinishReason("tool-calls"),
@@ -11253,8 +11259,10 @@ export class ThinkProgrammaticTestAgent extends Think {
       );
     }
     if (this._finalAnswerResponse !== undefined) {
-      return createFinalAnswerMockModel(this._finalAnswerResponse, (call) =>
-        this._finalAnswerCalls.push(call)
+      return createFinalAnswerMockModel(
+        this._finalAnswerResponse,
+        (call) => this._finalAnswerCalls.push(call),
+        this._chunkHold
       );
     }
     // A hold kept for the isolate after a reset: taken once, by the first
@@ -11633,6 +11641,20 @@ export class ThinkProgrammaticTestAgent extends Think {
   /** The tools `afterToolCall` heard of, in order. */
   async getAfterToolNamesForTest(): Promise<string[]> {
     return this._afterToolNames;
+  }
+
+  /** Recovery gives up after a reset, keeping the partial (in storage). */
+  async giveUpRecoveryForTest(): Promise<void> {
+    this.ctx.storage.kv.put("test:give-up-recovery", true);
+  }
+
+  override async onChatRecovery(
+    ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions | void> {
+    if (this.ctx.storage.kv.get<boolean>("test:give-up-recovery")) {
+      return { persist: true, continue: false };
+    }
+    return super.onChatRecovery(ctx);
   }
 
   private _turnConfigForTest: TurnConfig | null = null;
