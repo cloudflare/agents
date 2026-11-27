@@ -2003,4 +2003,50 @@ describe("chatTurnDefinition", () => {
       expect(list).toBeLessThan(end);
     });
   });
+
+  it("the model's own error chunk reaches the tabs as an error frame after the stored partial, then the end", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const sent: Array<Record<string, unknown>> = [];
+      const tab = {
+        id: "tab-1",
+        readyState: 1,
+        send: (text: string) => sent.push(JSON.parse(text))
+      };
+      await chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          kv: instance.kv,
+          session: "s1",
+          webSockets: { getConnections: () => [tab] } as never
+        },
+        {
+          respond: async () =>
+            (async function* () {
+              yield { type: "start", messageId: "a1" } as never;
+              yield { type: "text-start", id: "t1" } as never;
+              yield { type: "text-delta", id: "t1", delta: "Partial" } as never;
+              yield { type: "error", errorText: "quota exceeded" } as never;
+            })()
+        }
+      )({ trigger: "server" }, laterAttempt("ib-1", 1));
+      const kinds = sent.map((frame) =>
+        frame.type === "cf_agent_chat_messages"
+          ? "messages"
+          : frame.done === true
+            ? "done"
+            : frame.error === true
+              ? "error"
+              : "chunk"
+      );
+      expect(kinds.slice(-3)).toEqual(["messages", "error", "done"]);
+      expect(sent.at(-2)).toMatchObject({
+        body: "quota exceeded",
+        error: true
+      });
+    });
+  });
 });

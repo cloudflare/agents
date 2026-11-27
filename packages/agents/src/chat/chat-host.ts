@@ -574,16 +574,22 @@ async function messageOf(
       }
     })
   );
-  for await (const snapshot of readUIMessageStream({
-    stream,
-    ...(message && { message }),
-    terminateOnError: true,
-    onError: (error) => {
-      failure ??= { error };
+  try {
+    for await (const snapshot of readUIMessageStream({
+      stream,
+      ...(message && { message }),
+      terminateOnError: true,
+      onError: (error) => {
+        failure ??= { error };
+      }
+    })) {
+      last = snapshot;
+      each?.(snapshot);
     }
-  })) {
-    last = snapshot;
-    each?.(snapshot);
+  } catch (error) {
+    // The reader throws the error chunk's text as its own error: the
+    // model's error is the one kept.
+    throw failure?.error ?? error;
   }
   if (failure) throw failure.error;
   return last;
@@ -967,7 +973,11 @@ export function chatTurnDefinition(
     };
     // The reply this turn stored, when it stored one.
     let finalReply: UIMessage | undefined;
-    const report = async (result: ChatTurnResult) => {
+    const report = async (
+      result: ChatTurnResult,
+      /** The model's own error chunk ended it: sent as an error frame. */
+      inBand = false
+    ) => {
       // A stored reply that waits on no call has no batch left to continue.
       if (
         result.messageId !== undefined &&
@@ -1013,6 +1023,14 @@ export function chatTurnDefinition(
       };
       if (result.messageId !== undefined && result.status !== "aborted") {
         await sendTranscript(true);
+      }
+      if (inBand && result.error !== undefined) {
+        send({
+          body: result.error,
+          done: false,
+          error: true,
+          ...(continuation && { continuation: true })
+        });
       }
       if (result.status !== "completed" && result.status !== "skipped") {
         send({
@@ -1670,12 +1688,15 @@ export function chatTurnDefinition(
                   } as UIMessageChunk)
                 : chunk;
             const next = host.hooks?.transformChunk?.(own, parts) ?? own;
-            // An in-band error is stored only if it ends the turn.
-            if (next.type !== "error") {
-              record(next);
-              seen.push(next);
-              checkAnswered();
+            // An in-band error is stored only if it ends the turn, and the
+            // tabs get it as an error frame when the turn ends.
+            if (next.type === "error") {
+              controller.enqueue(next);
+              return;
             }
+            record(next);
+            seen.push(next);
+            checkAnswered();
             send({
               body: JSON.stringify(next),
               done: false,
@@ -1765,12 +1786,15 @@ export function chatTurnDefinition(
         // A failed reply keeps what it streamed too, and the tabs see it
         // stored before the error frame.
         const kept = await keepSoFar(text);
-        return report({
-          requestId,
-          status: "error",
-          error: text,
-          ...(kept && { messageId: kept })
-        });
+        return report(
+          {
+            requestId,
+            status: "error",
+            error: text,
+            ...(kept && { messageId: kept })
+          },
+          error instanceof InBandStreamError
+        );
       }
     }
 
