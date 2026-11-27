@@ -865,5 +865,62 @@
       "file": "chat-recovery-public.test.ts",
       "test": "chat recovery, through public behaviour > recovers a continuation a reset cut off after a tool answer: the tool's result once, then the text to its end"
     }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > runs an interrupted submission again when its messages were not applied",
+    "reason": "a `running` row seeded with no `messagesAppliedAt` (`insertSubmissionForTest`) and the class's recovery and drain called directly",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > runs it again, its question stored once, when the reset comes before its messages are stored"
+    }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > checks stored messages for a submission claimed before a restart",
+    "reason": "a `running` row seeded with message ids and one message written beside it (`insertSubmissionForTest`, `persistAssistantMessageForTest`): the class's own evidence for whether messages were applied",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > while a submission runs > a cancel says its messages were not stored while it starts, and were once its reply streams"
+    }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > reports whether a cancelled submission's messages were applied",
+    "reason": "two `running` rows seeded with and without `messagesAppliedAt` (`insertSubmissionForTest`)",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > while a submission runs > a cancel says its messages were not stored while it starts, and were once its reply streams"
+    }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > records the message id of an assistant persisted from orphaned chunks",
+    "reason": "a seeded `running` row and chunks persisted by the class's private orphan persistence (`_persistOrphanedStream`)",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > finishes it once: one question, one reply, and the submission completed"
+    }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > does not settle a reused submission id with the deleted submission's result",
+    "reason": "pending rows seeded under one id (`insertSubmissionForTest`) and cancelled without a turn",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > while a submission runs > a reused id is not settled with the result of the submission deleted before it"
+    }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > does not complete an overflow segment when its retry crashes pre-stream (successor accepted: false)",
+    "reason": "the class's stream-segment stamps for a retry and its successor request (`seedSubmissionStreamForTest`, `moveSubmissionRequestForTest`), read by its recovery: a form the harness's turn record has no counterpart for",
+    "mechanicsOnly": true
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > does not complete an overflow segment when its retry crashes pre-stream (successor accepted: true)",
+    "reason": "the class's stream-segment stamps for a retry and its successor request (`seedSubmissionStreamForTest`, `moveSubmissionRequestForTest`), read by its recovery: a form the harness's turn record has no counterpart for",
+    "mechanicsOnly": true
   }
 ]
