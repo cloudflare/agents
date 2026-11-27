@@ -1655,9 +1655,15 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       // result to name it, so the inspection reads it from here.
       const keptId = live.reply?.id ?? replyIdOf(live.partial);
       if (run.signal.aborted && keptId !== undefined) {
-        this.#tasks.patchMetadata(run.id, KEPT_REPLY_KEY, {
-          messageId: keptId
-        });
+        // Best-effort: a failed write must not keep the attempt from
+        // finishing, or the operations queued behind it would wait.
+        try {
+          this.#tasks.patchMetadata(run.id, KEPT_REPLY_KEY, {
+            messageId: keptId
+          });
+        } catch (error) {
+          console.warn("ThinkHarness could not record a kept reply", error);
+        }
       }
       if (this.#live.get(session) === live) this.#live.delete(session);
       finish();
@@ -1678,11 +1684,18 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       return outcomeOf({}, stored ? asUIMessage(stored) : undefined);
     }
     // The definition gave up on an interrupted turn, past the budget or as
-    // `onRecovery` chose: its partial is finished as any given-up reply is
-    // (open tool calls failed, its stream dropped), with the reason
-    // `interrupted`.
+    // `onRecovery` chose. It stored the partial itself, with its cut-off
+    // tool calls repaired: that reply is kept as it is, and only the turn's
+    // stream, which nothing will resume, is dropped.
     if (result.error === TURN_NOT_CONTINUED || chatRecoveryGaveUp(run)) {
-      return this.#giveUp(run, session, "interrupted", live);
+      const streams = this.#streams.__DO_NOT_USE_WILL_BREAK__sync();
+      const streamId = chatTurnStreamId(run.id);
+      if (streams.getStream(streamId)) streams.deleteUnchecked(streamId);
+      return {
+        status: "unanswered",
+        reason: "interrupted",
+        ...(live.reply && { messageId: live.reply.id })
+      };
     }
     return this.#giveUp(run, session, result.error ?? result.status, live);
   }
@@ -2910,9 +2923,13 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       // A cancelled run has no result to carry the reply it left: its
       // inspection reads it from here.
       if (message && record.status === "aborted") {
-        this.#tasks.patchMetadata(record.runId, KEPT_REPLY_KEY, {
-          messageId: message.id
-        });
+        try {
+          this.#tasks.patchMetadata(record.runId, KEPT_REPLY_KEY, {
+            messageId: message.id
+          });
+        } catch (error) {
+          console.warn("ThinkHarness could not record a kept reply", error);
+        }
       }
     }
     this.#events.emit(session, {

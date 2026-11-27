@@ -464,6 +464,14 @@ describe("ThinkHarness turns", () => {
     expect(text(result)).toBe("echo: transient once");
   });
 
+  it("tries a turn again after a platform transient while its model call is prepared", async () => {
+    const stub = fresh();
+    await stub.blipNextPreparation();
+    const result = await stub.prompt("hello");
+    expect(result.status).toBe("done");
+    expect(text(result)).toBe("echo: hello");
+  });
+
   it("takes a client tool declaration that is not a list as none", async () => {
     const stub = fresh();
     expect(await stub.declareMalformedClientTools()).toBe("done");
@@ -1239,6 +1247,17 @@ describe("ThinkHarness durability", () => {
     });
     expect((await stub.messages())[1]).toMatch(/^assistant: x+/);
     expect(await stub.harnessStreamIds()).toEqual([]);
+  });
+
+  it("keeps the repaired reply of a turn whose recovery gave up, not a replay of its stream", async () => {
+    const stub = fresh();
+    await stub.setStallTimeout(50);
+    await stub.abandonRecovery();
+    const receipt = await stub.submit("stall in safe input");
+    expect((await stub.wait(receipt.operationId)).status).toBe("unanswered");
+    // The definition repaired the cut-off call; giving up keeps that.
+    const reply = (await stub.messages())[1];
+    expect(reply).toBe("assistant: [gate_safe output-error]");
   });
 
   it("tells the model a call whose input a stall cut off did not run, even for a tool safe to rerun", async () => {

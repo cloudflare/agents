@@ -307,6 +307,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
           : "continue";
       },
       beforeTurn: async ({ toolSet, session, system: built, signal }) => {
+        // A platform blip while the call is prepared, once.
+        if (this.ctx.storage.kv.get<boolean>(PREPARE_BLIP_KEY)) {
+          this.ctx.storage.kv.put(PREPARE_BLIP_KEY, false);
+          throw new Error("Network connection lost.");
+        }
         // A hook that waits on I/O, given the operation's signal.
         if (this.ctx.storage.kv.get<boolean>(WAIT_ON_SIGNAL_KEY)) {
           this.ctx.storage.kv.put(SIGNAL_SEEN_KEY, "waiting");
@@ -1212,6 +1217,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.ctx.storage.kv.get<string | null>(RECOVERY_PARTIAL_KEY);
   }
 
+  /** The next model call's preparation hits a platform transient once. */
+  blipNextPreparation(): void {
+    this.ctx.storage.kv.put(PREPARE_BLIP_KEY, true);
+  }
+
   /** From now on, `onRecovery` gives every interrupted turn up. */
   abandonRecovery(): void {
     this.ctx.storage.kv.put(ABANDON_KEY, true);
@@ -2057,6 +2067,7 @@ function downgradeToStore(
 }
 /** The table suffix of the instances the harness composes. */
 const ABANDON_KEY = "test:abandon-recovery";
+const PREPARE_BLIP_KEY = "test:prepare-blip";
 const HARNESS_SUFFIX = "__c_think_2dharness";
 
 /** The table prefix ThinkHarness keeps its records under in the shared store. */
