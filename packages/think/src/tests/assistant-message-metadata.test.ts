@@ -356,4 +356,20 @@ describe("Think — server-authored assistant-message metadata", () => {
       ws.close(1000);
     }
   );
+
+  it("calls the writer once for the turn's start and once for its finish, around a tool round", async () => {
+    const agent = await getAgentByName(
+      env.ThinkRewriteContextTestAgent,
+      `meta-once-${crypto.randomUUID()}`
+    );
+    await agent.logMessageMetadataForTest();
+    const result = await agent.testChat("call the tool");
+    expect(result.done).toBe(true);
+    // One tool round, then the answer: still one start and one finish,
+    // neither of them a continuation.
+    expect(await agent.getMessageMetadataCallsForTest()).toEqual([
+      { type: "start", continuation: false },
+      { type: "finish", continuation: false }
+    ]);
+  });
 });
