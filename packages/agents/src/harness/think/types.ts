@@ -455,6 +455,15 @@ export type ThinkHarnessHooks = {
    * parts out of the transcript. A reply left with no parts is not stored.
    */
   readonly storedReply?: (message: UIMessage) => UIMessage;
+  /**
+   * @internal The turn's model loop ended with an answer. Throw to fail the
+   * operation with the error's message instead.
+   */
+  readonly beforeTurnEnd?: (context: {
+    readonly session: ThinkSessionId;
+    readonly operationId: string;
+    readonly message?: UIMessage;
+  }) => void | Promise<void>;
   /** After an operation settles. */
   readonly onTurnEnd?: (context: ThinkTurnEndContext) => void | Promise<void>;
   /** Observe a model call's error, before it is classified. */

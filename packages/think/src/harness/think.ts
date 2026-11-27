@@ -720,6 +720,16 @@ export class Think<
       hooks: {
         // As in Think: a workflow turn's final-answer tool is plumbing,
         // never stored. A reply that held only it is not stored at all.
+        // As in Think: a structured workflow turn that ends without its
+        // final-answer tool's answer fails.
+        beforeTurnEnd: ({ operationId }) => {
+          const final = this.#finalAnswer;
+          if (final?.operationId === operationId && !final.output) {
+            throw new Error(
+              `Model ended the turn without calling the ${final.name} tool`
+            );
+          }
+        },
         storedReply: (message) => {
           const kept = withoutFinalAnswerParts(message);
           return kept === message ||
@@ -866,19 +876,7 @@ export class Think<
           await this.#endStep(operationId, message);
           const segment = stepSegments(message);
           const ended = { operationId, step, finishReason, segment, usage };
-          const calls = stepResultOf(message, segment).toolCalls;
-          // As in Think: a structured workflow turn that answers without
-          // its final-answer tool fails.
-          const final = this.#finalAnswer;
-          if (
-            final?.operationId === operationId &&
-            final.output === undefined &&
-            calls.length === 0
-          ) {
-            throw new Error(
-              `Model ended the turn without calling the ${final.name} tool`
-            );
-          }
+
           // A step that called tools ends once they ran, as an AI SDK step
           // does: at the next step, or at the turn's end.
           if (stepResultOf(message, segment).toolCalls.length > 0) {
