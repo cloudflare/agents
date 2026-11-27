@@ -100,7 +100,6 @@ import {
 import {
   DEFAULT_ACTION_TIMEOUT_MS,
   actionApprovalInputErrorEnvelope,
-  actionContextWithoutReply,
   actionErrorEnvelope,
   approvedActionInputs,
   compileActionTools,
@@ -327,15 +326,17 @@ import {
   pendingDecisions,
   registerDecisionTask,
   registerEffectTask,
-  runEffectOnce,
-  stableHash,
   stableStringify,
   sweepDecisions,
   sweepEffects,
   type DecisionInput,
-  type DecisionVerdict,
-  type EffectOutcome
+  type DecisionVerdict
 } from "./action-ledger";
+import {
+  runLedgeredAction,
+  type ActionLedgerEvent,
+  type LedgeredActionArgs
+} from "./action-run";
 import type { TaskJson, TaskStep } from "agents/tasks";
 import {
   cancelReason,
@@ -708,32 +709,6 @@ function stableJsonEqual(left: unknown, right: unknown): boolean {
   return stableStringify(left) === stableStringify(right);
 }
 
-function actionPendingErrorEnvelope(): {
-  error: { name: string; message: string };
-} {
-  return {
-    error: {
-      name: "ActionPendingError",
-      message:
-        "A prior attempt of this action is in an unknown state; not re-executed. Manual reconciliation may be required."
-    }
-  };
-}
-
-function actionKeyConflictEnvelope(
-  actionName: string,
-  key: string
-): {
-  error: { name: string; message: string };
-} {
-  return {
-    error: {
-      name: "ActionKeyConflict",
-      message: `Idempotency key "${key}" for action "${actionName}" was reused with different input. This is a programming error; do not retry.`
-    }
-  };
-}
-
 type StreamResultStatus = {
   status: Exclude<SaveMessagesResult["status"], "skipped">;
   error?: string;
@@ -1039,41 +1014,6 @@ type ActionLedgerRetentionConfig = {
   pendingMs: number | false;
   maxSweepRows: number;
 };
-
-type ActionLedgerEvent =
-  | {
-      type: "action:ledger:replayed";
-      payload: { action: string; key: string; inputHash: string };
-    }
-  | {
-      type: "action:ledger:pending";
-      payload: { action: string; key: string; inputHash: string };
-    }
-  | {
-      type: "action:ledger:conflict";
-      payload: { action: string; key: string; inputHash: string };
-    }
-  | {
-      type: "action:ledger:serialize_failed";
-      payload: { action: string; key: string };
-    }
-  | {
-      type: "action:ledger:settled";
-      payload: { action: string; key: string; inputHash: string };
-    }
-  | {
-      type: "action:ledger:reclaimed";
-      payload: {
-        action: string;
-        key: string;
-        inputHash: string;
-        ageMs: number;
-      };
-    }
-  | {
-      type: "action:ledger:swept";
-      payload: { settled: number; pending: number };
-    };
 
 type ActionPauseEvent =
   | {
@@ -4089,117 +4029,23 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     emit.call(this, event.type, event.payload);
   }
 
-  /**
-   * Run an action's `execute` through the action ledger: same-isolate
-   * coalescing, durable claim/replay, settle-on-success, release-on-failure.
-   * Shared by the inline server-action path and the durable-pause-on-approve
-   * path so an action's side effect is replay-safe regardless of how it is
-   * dispatched. `runAction` must already apply timeout/abort and
-   * `prepareActionOutputForModel`.
-   */
-  private async _runLedgeredAction(args: {
-    toolName: string;
-    idempotencyKey: ActionIdempotencyKey<unknown> | undefined;
-    input: unknown;
-    ctx: ActionContext;
-    runAction: () => Promise<unknown>;
-    /**
-     * What to answer for a claim another attempt left that its lease lets
-     * be taken over later (an explicit key with a finite lease). Without
-     * it, that claim answers `ActionPendingError`.
-     */
-    onReclaimableInDoubt?: () => unknown;
-  }): Promise<unknown> {
-    const { toolName, idempotencyKey, input, ctx, runAction } = args;
-    const key = await this._resolveActionLedgerKey(
-      toolName,
-      idempotencyKey,
-      input,
-      actionContextWithoutReply(ctx)
-    );
-    // A failed run takes back the reply attachments it recorded.
-    const attachmentCount = this._activeTurnReplyAttachments.length;
-    // The effect runs inside its task; the caller's connection and request
-    // stay ambient for it, as when it ran inline.
-    const caller = agentContext.getStore();
-    const run = async () => {
-      try {
-        return await (caller
-          ? agentContext.run(caller, runAction)
-          : runAction());
-      } catch (error) {
-        this._activeTurnReplyAttachments.length = attachmentCount;
-        throw error;
-      }
-    };
-    if (!key) return await run();
-
-    let outcome: EffectOutcome;
-    try {
-      outcome = await runEffectOnce(this.tasks, this._effects, {
-        key,
-        name: toolName,
-        input,
-        // An explicit `idempotencyKey` is the developer's assertion that
-        // retrying the keyed side effect is safe, so only those claims may be
-        // taken over when stale. Fallback `tool:${toolCallId}` keys never are.
-        reclaimAfterMs:
-          idempotencyKey !== undefined
-            ? this.actionLedgerPendingRetryLeaseMs
-            : false,
-        run
-      });
-    } catch (error) {
-      return actionErrorEnvelope(error);
-    }
-    const event = { action: toolName, key, inputHash: stableHash(input) };
-    switch (outcome.status) {
-      case "replayed":
-        this._emitActionLedgerEvent({
-          type: "action:ledger:replayed",
-          payload: event
-        });
-        return outcome.value;
-      case "in-doubt": {
-        this._emitActionLedgerEvent({
-          type: "action:ledger:pending",
-          payload: event
-        });
-        if (
-          args.onReclaimableInDoubt &&
-          idempotencyKey !== undefined &&
-          this.actionLedgerPendingRetryLeaseMs !== false
-        ) {
-          return args.onReclaimableInDoubt();
+  /** Run an action's `execute` through the action ledger (see `runLedgeredAction`). */
+  private _runLedgeredAction(args: LedgeredActionArgs): Promise<unknown> {
+    return runLedgeredAction(
+      {
+        tasks: this.tasks,
+        effects: this._effects,
+        pendingRetryLeaseMs: this.actionLedgerPendingRetryLeaseMs,
+        emit: (event) => this._emitActionLedgerEvent(event),
+        attachments: {
+          count: () => this._activeTurnReplyAttachments.length,
+          truncate: (n) => {
+            this._activeTurnReplyAttachments.length = n;
+          }
         }
-        return actionPendingErrorEnvelope();
-      }
-      case "conflict":
-        this._emitActionLedgerEvent({
-          type: "action:ledger:conflict",
-          payload: event
-        });
-        return actionKeyConflictEnvelope(toolName, key);
-      case "unrecorded":
-        this._emitActionLedgerEvent({
-          type: "action:ledger:serialize_failed",
-          payload: { action: toolName, key }
-        });
-        return outcome.value;
-      case "reclaimed":
-        this._emitActionLedgerEvent({
-          type: "action:ledger:reclaimed",
-          payload: { ...event, ageMs: outcome.ageMs }
-        });
-        break;
-      case "ran":
-        break;
-    }
-    this._emitActionLedgerEvent({
-      type: "action:ledger:settled",
-      payload: event
-    });
-    return outcome.value;
+      },
+      args
+    );
   }
 
   /**
@@ -5221,25 +5067,6 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
   }
 
   // ── Action ledger ────────────────────────────────────────────────
-
-  private async _resolveActionLedgerKey(
-    actionName: string,
-    spec: ActionIdempotencyKey<unknown> | undefined,
-    input: unknown,
-    ctx: ActionContext
-  ): Promise<string | null> {
-    if (spec !== undefined) {
-      const key =
-        typeof spec === "function" ? await spec({ input, ctx }) : spec;
-      if (key.length === 0) {
-        throw new Error(
-          `Action "${actionName}" returned an empty idempotency key`
-        );
-      }
-      return `action:${actionName}:${key}`;
-    }
-    return ctx.toolCallId ? `tool:${ctx.toolCallId}` : null;
-  }
 
   /**
    * Delete expired effect runs and abandoned decisions, per the
