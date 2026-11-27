@@ -503,6 +503,79 @@ describe("Think durable submissions", () => {
     expect(done?.messageId).toBeDefined();
   });
 
+  // With a submission that is really running (its reply held), not a row
+  // written as `running`: the successors of the tests below that seed one.
+  describe("while a submission runs", () => {
+    /** A submission whose reply waits after its first chunk. */
+    async function running(agent: ThinkSubmissionTestStub, id: string) {
+      await agent.setDelayedChunkResponse(["a ", "b ", "c "], 50);
+      await agent.holdChunksAfterForTest(1);
+      onTestFinished(() => agent.releaseChunksForTest());
+      await agent.testSubmitMessages(`run ${id}`, { submissionId: id });
+      await chunkStreamHeld(agent);
+    }
+
+    it("lists it as running, and the one that waits behind it as pending", async () => {
+      const agent = await freshAgent();
+      await running(agent, "sub-really-running");
+      await agent.testSubmitMessages("wait behind it", {
+        submissionId: "sub-really-queued"
+      });
+
+      await expect(
+        agent.listSubmissionsForTest({ status: "running", limit: 1 })
+      ).resolves.toMatchObject([{ submissionId: "sub-really-running" }]);
+      await expect(
+        agent.listSubmissionsForTest({ status: "pending", limit: 1 })
+      ).resolves.toMatchObject([{ submissionId: "sub-really-queued" }]);
+    });
+
+    it("a bulk delete that asks for every status deletes only the finished one", async () => {
+      const agent = await freshAgent();
+      await agent.testSubmitMessages("finish first", {
+        submissionId: "sub-bulk-completed"
+      });
+      await expect(
+        agent.waitForSubmissionForTest("sub-bulk-completed", {
+          timeoutMs: 10_000
+        })
+      ).resolves.toMatchObject({ status: "completed" });
+      await running(agent, "sub-bulk-running");
+      await agent.testSubmitMessages("wait behind it", {
+        submissionId: "sub-bulk-pending"
+      });
+
+      await expect(
+        agent.deleteSubmissionsForTest({
+          status: ["pending", "running", "completed"],
+          limit: 10
+        })
+      ).resolves.toBe(1);
+      await expect(
+        agent.inspectSubmissionForTest("sub-bulk-completed")
+      ).resolves.toBeNull();
+      await expect(
+        agent.inspectSubmissionForTest("sub-bulk-running")
+      ).resolves.toMatchObject({ status: "running" });
+      await expect(
+        agent.inspectSubmissionForTest("sub-bulk-pending")
+      ).resolves.toMatchObject({ status: "pending" });
+    });
+
+    it("a cancel says its messages were applied", async () => {
+      const agent = await freshAgent();
+      await running(agent, "sub-really-applied");
+
+      await expect(
+        agent.cancelSubmissionForTest("sub-really-applied")
+      ).resolves.toMatchObject({
+        outcome: "cancelled",
+        previousStatus: "running",
+        messagesApplied: true
+      });
+    });
+  });
+
   // Through a real eviction, as an app sees it: the successors of the tests
   // below that seed a `running` row with the class's own recovery facts.
   describe("a submission whose isolate is evicted while it runs", () => {
