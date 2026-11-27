@@ -440,6 +440,53 @@ function chunksOf(
 const runningTurn = new AsyncLocalStorage<string>();
 
 /**
+ * `source`, read inside the turn's context: a host that produces its reply
+ * as it is read (its hooks and tools run then) runs that code there too.
+ * A `Response` or an object with `toUIMessageStream` is left as it is: what
+ * `respond` started for it is inside already.
+ */
+function insideTurn(
+  requestId: string,
+  source: ChatModelStream | undefined
+): ChatModelStream | undefined {
+  if (source instanceof ReadableStream) {
+    const reader = source.getReader();
+    return new ReadableStream<UIMessageChunk>({
+      async pull(controller) {
+        const next = await runningTurn.run(requestId, () => reader.read());
+        if (next.done) controller.close();
+        else controller.enqueue(next.value);
+      },
+      cancel: (reason) =>
+        runningTurn.run(requestId, () => reader.cancel(reason))
+    });
+  }
+  if (source && Symbol.asyncIterator in source) {
+    const chunks = source;
+    return {
+      [Symbol.asyncIterator]() {
+        const iterator = runningTurn.run(requestId, () =>
+          chunks[Symbol.asyncIterator]()
+        );
+        return {
+          next: () => runningTurn.run(requestId, () => iterator.next()),
+          return: (value?: unknown) =>
+            runningTurn.run(
+              requestId,
+              async () =>
+                (await iterator.return?.(value)) ?? {
+                  done: true as const,
+                  value: undefined
+                }
+            )
+        };
+      }
+    };
+  }
+  return source;
+}
+
+/**
  * The request id of the chat turn the caller runs inside: set while the
  * turn definition calls the host's `respond`, and seen by everything that
  * call starts. `undefined` anywhere else. A host uses it to refuse what
@@ -725,7 +772,10 @@ export function chatTurnDefinition(
     let reply: UIMessage | undefined;
     let overflowTried = false;
     for (;;) {
-      const source = await runningTurn.run(requestId, () => host.respond(call));
+      const source = insideTurn(
+        requestId,
+        await runningTurn.run(requestId, () => host.respond(call))
+      );
       if (!source) {
         writer?.close({ discard: true });
         return report({ requestId, status: "skipped" });

@@ -343,6 +343,49 @@ describe("chatTurnDefinition", () => {
     });
   });
 
+  it.each(["a stream", "an async iterable"] as const)(
+    "names the running turn to a reply produced as it is read: %s",
+    async (kind) => {
+      const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+        await instance.lifecycle.start();
+        const seen: Array<string | undefined> = [];
+        const chunks = [
+          { type: "start", messageId: "a1" },
+          { type: "text-start", id: "t1" },
+          { type: "text-delta", id: "t1", delta: "Hi" },
+          { type: "text-end", id: "t1" },
+          { type: "finish" }
+        ];
+        const result = await definitionOf(instance, {
+          respond: async () => {
+            if (kind === "a stream") {
+              let next = 0;
+              return new ReadableStream({
+                // Each chunk is made when it is asked for.
+                pull(controller) {
+                  seen.push(runningChatTurn());
+                  if (next < chunks.length) {
+                    controller.enqueue(chunks[next++] as never);
+                  } else controller.close();
+                }
+              });
+            }
+            return (async function* () {
+              for (const chunk of chunks) {
+                seen.push(runningChatTurn());
+                yield chunk as never;
+              }
+            })();
+          }
+        })({ trigger: "server" }, laterAttempt(`run-read-${kind}`, 1));
+        expect(result).toMatchObject({ status: "completed" });
+        expect(seen.length).toBeGreaterThanOrEqual(chunks.length);
+        expect(new Set(seen)).toEqual(new Set([`run-read-${kind}`]));
+      });
+    }
+  );
+
   it("asks the model again once after making room for a context overflow", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
