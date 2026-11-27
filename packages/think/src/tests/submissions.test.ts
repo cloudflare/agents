@@ -562,6 +562,36 @@ describe("Think durable submissions", () => {
       ).resolves.toMatchObject({ status: "pending" });
     });
 
+    it("a turn reset ends it skipped, and the one that waits behind it", async () => {
+      const agent = await freshAgent();
+      await running(agent, "sub-reset-running");
+      await agent.testSubmitMessages("wait behind it", {
+        submissionId: "sub-reset-queued"
+      });
+
+      await agent.resetTurnStateForTest();
+
+      for (const id of ["sub-reset-running", "sub-reset-queued"]) {
+        await expect(
+          agent.waitForSubmissionForTest(id, { timeoutMs: 10_000 })
+        ).resolves.toMatchObject({
+          status: "skipped",
+          error: "Submission was skipped by turn reset."
+        });
+      }
+      // A filter for skipped finds them, to list and to delete.
+      const listed = await agent.listSubmissionsForTest({ status: "skipped" });
+      expect(
+        listed.map((submission) => submission.submissionId).sort()
+      ).toEqual(["sub-reset-queued", "sub-reset-running"]);
+      await expect(
+        agent.deleteSubmissionsForTest({ status: "skipped" })
+      ).resolves.toBe(2);
+      await expect(
+        agent.listSubmissionsForTest({ status: "skipped" })
+      ).resolves.toEqual([]);
+    });
+
     it("a cancel says its messages were applied", async () => {
       const agent = await freshAgent();
       await running(agent, "sub-really-applied");

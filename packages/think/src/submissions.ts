@@ -277,6 +277,9 @@ export type SubmissionOutcome = {
   output?: TaskJson;
 };
 
+/** What a submission a turn reset ended reports as its error. */
+export const SKIPPED_BY_RESET = "Submission was skipped by turn reset.";
+
 /** A cancel reason as the text a cancelled submission reports. */
 export function cancelReason(reason: unknown): string | undefined {
   if (reason === undefined) return undefined;
