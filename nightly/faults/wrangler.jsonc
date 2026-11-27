@@ -11,10 +11,12 @@
     "code_update_strategy": { "mode": "immediate" },
     "bindings": [
       { "class_name": "ProbeChat", "name": "ProbeChat" },
-      { "class_name": "ProbeThink", "name": "ProbeThink" }
+      { "class_name": "ProbeThink", "name": "ProbeThink" },
+      { "class_name": "ProbeHub", "name": "ProbeHub" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["ProbeChat", "ProbeThink"] }
+    { "tag": "v1", "new_sqlite_classes": ["ProbeChat", "ProbeThink"] },
+    { "tag": "v2", "new_sqlite_classes": ["ProbeHub"] }
   ]
 }

@@ -27,7 +27,7 @@ import type {
   StreamCallback,
   TurnConfig
 } from "@cloudflare/think";
-import { getAgentByName, routeAgentRequest } from "agents";
+import { Agent, getAgentByName, routeAgentRequest } from "agents";
 import { genericObservability } from "agents/observability";
 import type { Observability, ObservabilityEvent } from "agents/observability";
 import { createOpenAI } from "@ai-sdk/openai";
@@ -42,6 +42,7 @@ type Env = {
   BUILD: string;
   ProbeChat: DurableObjectNamespace<ProbeChat>;
   ProbeThink: DurableObjectNamespace<ProbeThink>;
+  ProbeHub: DurableObjectNamespace<ProbeHub>;
 };
 
 // ── Script ────────────────────────────────────────────────────────────────
@@ -586,6 +587,13 @@ function bump(sql: SqlFn, key: string): number {
   return n;
 }
 
+/** How many instances of this object have started (a reset starts a new one). */
+function readCount(sql: SqlFn, key: string): number {
+  tables(sql);
+  const rows = sql`SELECT v FROM probe_cfg WHERE k = ${key}` as { v: string }[];
+  return rows[0] ? Number(rows[0].v) : 0;
+}
+
 function userMessage(text: string): UIMessage {
   return {
     id: `srv-${crypto.randomUUID()}`,
@@ -717,6 +725,7 @@ export class ProbeChat extends AIChatAgent<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     applyRuntimeConfig(this, readConfig(this.s), this.s);
+    bump(this.s, "starts");
   }
   private get s(): SqlFn {
     return this.sql.bind(this) as SqlFn;
@@ -783,6 +792,7 @@ export class ProbeChat extends AIChatAgent<Env> {
     return {
       messages: this.messages,
       schedules: (await this.listSchedules()).length,
+      starts: readCount(this.s, "starts"),
       ...readLog(this.s)
     };
   }
@@ -812,6 +822,7 @@ export class ProbeThink extends Think<Env> {
     super(ctx, env);
     const cfg = readConfig(this.s);
     applyRuntimeConfig(this, cfg, this.s);
+    bump(this.s, "starts");
     this.contextOverflow = cfg.overflow ? { reactive: true } : undefined;
   }
   private get s(): SqlFn {
@@ -918,6 +929,7 @@ export class ProbeThink extends Think<Env> {
     return {
       messages: await this.getMessages(),
       schedules: (await this.listSchedules()).length,
+      starts: readCount(this.s, "starts"),
       ...readLog(this.s)
     };
   }
@@ -1014,6 +1026,27 @@ function describeError(error: unknown): string {
   return parts.join(" <- ");
 }
 
+// ── Facets ─────────────────────────────────────────────────────────────────
+
+/** A hub whose ProbeChat and ProbeThink children are facet sub-agents. */
+export class ProbeHub extends Agent<Env> {
+  async probeChild(
+    kind: "chat" | "think",
+    name: string,
+    method: string,
+    args: unknown[]
+  ): Promise<unknown> {
+    const child =
+      kind === "chat"
+        ? await this.subAgent(ProbeChat, name)
+        : await this.subAgent(ProbeThink, name);
+    const call = (
+      child as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>
+    )[method];
+    return call(...args);
+  }
+}
+
 // ── Worker entry ───────────────────────────────────────────────────────────
 
 export default {
@@ -1025,18 +1058,30 @@ export default {
       return new Response("Not found", { status: 404 });
     }
     if (url.pathname === "/ready") return new Response(`ready:${env.BUILD}`);
-    const m = url.pathname.match(/^\/ctl\/(chat|think)\/([^/]+)\/(\w+)$/);
+    const m = url.pathname.match(
+      /^\/ctl\/(chat|think|fchat|fthink)\/([^/]+)\/(\w+)$/
+    );
     if (m) {
       const [, cls, room, method] = m;
       const args =
         request.method === "POST" ? ((await request.json()) as unknown[]) : [];
       try {
+        if (!method.startsWith("probe"))
+          throw new Error(`not a probe method: ${method}`);
+        if (cls === "fchat" || cls === "fthink") {
+          const hub = await getAgentByName(env.ProbeHub, `h-${room}`);
+          const value = await hub.probeChild(
+            cls === "fchat" ? "chat" : "think",
+            room,
+            method,
+            args
+          );
+          return Response.json({ ok: true, value: value ?? null });
+        }
         const stub =
           cls === "chat"
             ? await getAgentByName(env.ProbeChat, room)
             : await getAgentByName(env.ProbeThink, room);
-        if (!method.startsWith("probe"))
-          throw new Error(`not a probe method: ${method}`);
         const call = (
           stub as unknown as Record<
             string,

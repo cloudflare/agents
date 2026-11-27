@@ -4,7 +4,12 @@
 
 import type { UIMessage } from "ai";
 
-export type Cls = "chat" | "think" | "agent";
+export type Cls = "chat" | "think" | "fchat" | "fthink" | "agent";
+
+/** A Think agent, at the root or as a facet. */
+export const isThink = (cls: Cls) => cls === "think" || cls === "fthink";
+/** The class runs as a facet sub-agent of a hub (`fchat`, `fthink`). */
+const isFacet = (cls: Cls) => cls === "fchat" || cls === "fthink";
 
 /** The deployed probe Worker. */
 export function baseUrl(): string {
@@ -72,6 +77,8 @@ export type ProbeEvent = {
   reason?: string;
 };
 export type ProbeState = {
+  /** Instances of the object that have started. */
+  starts: number;
   messages: UIMessage[];
   schedules: number;
   events: ProbeEvent[];
@@ -135,6 +142,8 @@ export async function ctl(
 const AGENT_PATH: Record<Cls, string> = {
   chat: "probe-chat",
   think: "probe-think",
+  fchat: "probe-chat",
+  fthink: "probe-think",
   agent: "probe-agent"
 };
 
@@ -158,7 +167,8 @@ export class Tab {
 
   async open(): Promise<this> {
     const ws = new WebSocket(
-      `${baseUrl().replace(/^http/, "ws")}/agents/${AGENT_PATH[this.cls]}/${this.room}?key=${encodeURIComponent(probeKey())}`
+      // A facet is reached through its hub: /agents/probe-hub/h-<room>/sub/<class>/<room>.
+      `${baseUrl().replace(/^http/, "ws")}/agents/${isFacet(this.cls) ? `probe-hub/h-${this.room}/sub/` : ""}${AGENT_PATH[this.cls]}/${this.room}?key=${encodeURIComponent(probeKey())}`
     );
     this.ws = ws;
     await new Promise<void>((resolve, reject) => {
