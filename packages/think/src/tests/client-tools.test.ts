@@ -2881,6 +2881,118 @@ describe("Think — client tool schemas", () => {
   });
 });
 
+// Successors of "Think — client tool schemas", through the tools each turn
+// is offered (`beforeTurn`'s `ctx.tools`), not the class's stored registry.
+describe("Think — the client tools a turn is offered", () => {
+  async function chatTurn(
+    ws: WebSocket,
+    text: string,
+    extra?: Record<string, unknown>
+  ) {
+    const done = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage(text)], extra);
+    await done;
+  }
+
+  it("offers the model the client tools a tab's request declares", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    await agent.setTextOnlyMode(true);
+
+    await chatTurn(ws, "hello", {
+      clientTools: [
+        { name: "tool_a", description: "Tool A" },
+        {
+          name: "tool_b",
+          description: "Tool B",
+          parameters: { type: "object" }
+        }
+      ]
+    });
+
+    expect(await agent.getLastTurnToolNames()).toEqual(
+      expect.arrayContaining(["tool_a", "tool_b"])
+    );
+    await closeWS(ws);
+  });
+
+  it("offers the continuation the client tools its tool result declares", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    await agent.setTextOnlyMode(true);
+    const toolCallId = "tc-offered-update";
+    await agent.persistToolCallMessage([
+      makeUserMessage("hello"),
+      makeToolMessage(toolCallId, "client_action", "input-available")
+    ]);
+
+    const done = waitForDone(ws);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId,
+        toolName: "client_action",
+        output: "result",
+        autoContinue: true,
+        clientTools: [{ name: "new_tool", description: "New tool" }]
+      })
+    );
+    await done;
+
+    expect(await agent.getLastTurnToolNames()).toContain("new_tool");
+    await closeWS(ws);
+  });
+
+  it("offers a server turn the tab's client tools, and none once the chat is cleared", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    await agent.setTextOnlyMode(true);
+    await chatTurn(ws, "hello", {
+      clientTools: [{ name: "tool_a", description: "Tool A" }]
+    });
+
+    await agent.saveMessagesForTest("from the server");
+    expect(await agent.getLastTurnToolNames()).toContain("tool_a");
+
+    ws.send(JSON.stringify({ type: MSG_CHAT_CLEAR }));
+    await handled(agent, MSG_CHAT_CLEAR);
+    await agent.saveMessagesForTest("from the server, after the clear");
+    expect(await agent.getLastTurnToolNames()).not.toContain("tool_a");
+    await closeWS(ws);
+  });
+
+  it.each([
+    ["an empty clientTools", { clientTools: [] }],
+    ["no clientTools key", undefined]
+  ] as const)(
+    "offers no earlier client tools to a request with %s",
+    async (_label, extra) => {
+      const room = crypto.randomUUID();
+      const agent = await freshAgent(room);
+      const { ws } = await connectWS(room);
+      await collectMessages(ws, 3);
+      await agent.setTextOnlyMode(true);
+      await chatTurn(ws, "hello", {
+        clientTools: [{ name: "tool_a", description: "Tool A" }]
+      });
+      expect(await agent.getLastTurnToolNames()).toContain("tool_a");
+
+      await chatTurn(ws, "hello again", extra);
+      expect(await agent.getLastTurnToolNames()).not.toContain("tool_a");
+      // Nor does a server turn after it.
+      await agent.saveMessagesForTest("from the server");
+      expect(await agent.getLastTurnToolNames()).not.toContain("tool_a");
+      await closeWS(ws);
+    }
+  );
+});
+
 describe("Think — before-turn repair", () => {
   it("a continuation turn keeps the client tool call its reply still waits on, and does not call the model", async () => {
     const room = crypto.randomUUID();
