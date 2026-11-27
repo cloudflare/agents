@@ -229,7 +229,8 @@ describe("detached agent-tool runs on Tasks", () => {
     ).toEqual([
       expect.objectContaining({
         kind: "interrupted",
-        reason: "budget-exceeded"
+        reason: "budget-exceeded",
+        childStillRunning: false
       })
     ]);
   });
@@ -258,7 +259,8 @@ describe("detached agent-tool runs on Tasks", () => {
     ).toEqual([
       expect.objectContaining({
         kind: "interrupted",
-        reason: "budget-exceeded"
+        reason: "budget-exceeded",
+        childStillRunning: false
       })
     ]);
   });

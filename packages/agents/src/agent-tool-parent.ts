@@ -1670,7 +1670,12 @@ export class AgentToolParent {
   ): TaskJson {
     const delivered = step.checkpoint.get("gaveUp");
     if (delivered !== undefined && typeof delivered === "object") {
-      return { ...(delivered as Record<string, TaskJson>), delivered: true };
+      // The child is known stopped now: the run is over.
+      return {
+        ...(delivered as Record<string, TaskJson>),
+        childStillRunning: false,
+        delivered: true
+      };
     }
     return this._detachedGiveUpResult(meta, runId, false, true);
   }
