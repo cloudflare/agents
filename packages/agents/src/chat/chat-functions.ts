@@ -12,7 +12,9 @@ import type { Connection } from "agents";
 import type { UIMessage } from "ai";
 import {
   chatTurnStreamId,
-  heldQuestionsOf,
+  continueRequestsOf,
+  dropHeldQuestions,
+  holdQuestions,
   liveTurnsOf,
   parkedIn,
   releaseParked,
@@ -137,7 +139,7 @@ export async function cancelTurn(
             deps.session ??
             "") === sessionId
       );
-    if (ahead) heldQuestionsOf(deps.streams, sessionId).push(...questions);
+    if (ahead) await holdQuestions(deps, sessionId, questions);
     else {
       const session = deps.sessions.session(sessionId);
       for (const question of questions) {
@@ -152,6 +154,7 @@ export async function cancelTurn(
 export async function clearChat(deps: ChatDeps, lane: ChatLane): Promise<void> {
   await deps.tasks.clear(lane.lane, "chat cleared");
   await deps.sessions.session(deps.session ?? "").clearMessages();
+  await dropHeldQuestions(deps, deps.session ?? "");
 }
 
 /** A client's answer to a tool call. */
@@ -170,13 +173,8 @@ export type ToolAnswer =
       approvalId?: string;
     };
 
-/** Replies whose batch an answer asked to continue, once it is answered. */
-const continueRequests = new WeakMap<object, Set<string>>();
-
 function continueWanted(deps: ChatDeps): Set<string> {
-  let wanted = continueRequests.get(deps.streams);
-  if (!wanted) continueRequests.set(deps.streams, (wanted = new Set()));
-  return wanted;
+  return continueRequestsOf(deps.streams);
 }
 
 /** Tool answers being applied now, by chat, in this isolate. */
@@ -272,12 +270,17 @@ async function applyAnswer(
       if (replyId !== undefined && wanted.has(replyId)) {
         live.whenAnswered(() => {
           if (!wanted.delete(replyId)) return;
-          void submitTurn(
+          submitTurn(
             deps,
             lane,
             { trigger: "tool-answer", replyId },
             { idempotencyKey: `continue:${live.requestId}` }
-          );
+          ).catch((error: unknown) => {
+            console.error(
+              "[chat] could not continue after a tool answer:",
+              error
+            );
+          });
         });
       }
       return true;

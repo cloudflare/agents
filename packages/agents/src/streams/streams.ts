@@ -93,6 +93,8 @@ export interface StreamsOptions {
  * `lifecycle.ready()`, so the caller owns startup ordering.
  */
 export interface StreamsSyncInternal {
+  /** The largest chunk, serialized, this capability stores (`maxChunkBytes`). */
+  readonly maxChunkBytes: number;
   /** Idempotent DDL — safe to call before the Lifecycle starts. */
   ensureTables(): void;
   getStream(streamId: string): StreamRow | undefined;
@@ -594,6 +596,7 @@ export class Streams extends LifecycleCapability {
 
   #buildSyncAperture(): StreamsSyncInternal {
     return {
+      maxChunkBytes: this.#maxChunkBytes,
       ensureTables: () => this.#ensureTables(),
       counter: (name) => {
         if (this.#countersTable === false) return 0;
