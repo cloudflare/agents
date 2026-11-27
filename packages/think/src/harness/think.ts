@@ -485,6 +485,8 @@ export class Think<
         defaultModel?: LanguageModel;
         /** The messages `beforeTurn` rewrote the turn's prompt to, if any. */
         messages?: TurnConfig["messages"];
+        /** How many parts of a continued reply the rewrite already had. */
+        replyParts?: number;
       }
     | undefined;
   /**
@@ -2674,17 +2676,40 @@ export class Think<
     // turn's reply added since.
     if (first && config.messages && this.#ownTurn) {
       this.#ownTurn.messages = config.messages;
+      // A continued reply's parts so far are in the rewritten prompt's
+      // source already: a later call adds only what this turn adds.
+      const continued = turn.messages.at(-1);
+      this.#ownTurn.replyParts =
+        turn.continuation && continued?.role === "assistant"
+          ? continued.parts.length
+          : 0;
     }
     const rewritten = this.#ownTurn?.messages;
-    const latest = turn.messages.at(-1);
+    // This turn's reply, and what follows it (a context reminder), as the
+    // harness projects them for this call.
+    let replyAt = turn.messages.length - 1;
+    while (replyAt >= 0 && turn.messages[replyAt].role !== "assistant") {
+      replyAt--;
+    }
+    const ownReply = replyAt >= 0 ? turn.messages[replyAt] : undefined;
+    const added =
+      ownReply && !first
+        ? [
+            {
+              ...ownReply,
+              parts: ownReply.parts.slice(this.#ownTurn?.replyParts ?? 0)
+            },
+            ...turn.messages.slice(replyAt + 1)
+          ].filter((m) => m.parts.length > 0)
+        : [];
     const turnMessages =
       rewritten === undefined
         ? undefined
-        : first || latest?.role !== "assistant"
+        : added.length === 0
           ? rewritten
           : [
               ...rewritten,
-              ...(await convertToModelMessages([latest], {
+              ...(await convertToModelMessages(added, {
                 tools,
                 ignoreIncompleteToolCalls: true
               }))
