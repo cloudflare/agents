@@ -2865,7 +2865,11 @@ export class Think<
 
   #classify(error: unknown): ThinkErrorClass {
     const classification = this.classifyChatError(error);
-    return classification === "context_overflow" ? "context-overflow" : "fail";
+    return classification === "context_overflow"
+      ? "context-overflow"
+      : classification === "transient"
+        ? "retry"
+        : "fail";
   }
 
   /** The root session's Sessions handle, which the harness hands over on first use. */
