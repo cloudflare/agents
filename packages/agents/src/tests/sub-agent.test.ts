@@ -627,7 +627,8 @@ describe("SubAgent", () => {
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
     await agent.insertLegacyRootSchedule("sched-handover", "old-sched", "kept");
-    await runDurableObjectAlarm(agent);
+    // The insert re-armed the alarm for now, so it runs on its own. A
+    // forced run beside it would be a second drive (see #3305).
 
     await vi.waitFor(async () => {
       expect(await agent.subAgentScheduleLog("sched-handover")).toEqual([
@@ -644,7 +645,8 @@ describe("SubAgent", () => {
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
     await agent.insertLegacyRootQueueItem("handover-child", "old-item", "kept");
-    await runDurableObjectAlarm(agent);
+    // The insert re-armed the alarm for now, so it runs on its own. A
+    // forced run beside it would be a second drive (see #3305).
 
     await vi.waitFor(async () => {
       expect(await agent.subAgentScheduleLog("handover-child")).toEqual([
@@ -661,7 +663,8 @@ describe("SubAgent", () => {
     await agent.failNextAdoptsForTest(1);
     const before = Date.now();
     await agent.insertLegacyRootQueueItem("handover-fails", "kept-item", "v");
-    await runDurableObjectAlarm(agent);
+    // The insert re-armed the alarm for now, so it runs on its own. A
+    // forced run beside it would be a second drive (see #3305).
 
     // Not given up as a failure of its own: still on the root, for a later
     // try, and nothing ran.
@@ -738,7 +741,8 @@ describe("SubAgent", () => {
     await agent.failNextAdoptsForTest(1);
     const before = Date.now();
     await agent.insertLegacyRootSchedule("sched-fail", "old-fail", "v");
-    await runDurableObjectAlarm(agent);
+    // The insert re-armed the alarm for now, so it runs on its own. A
+    // forced run beside it would be a second drive (see #3305).
 
     await vi.waitFor(async () => {
       const payload = (await agent.rootJobPayload("old-fail")) as {
