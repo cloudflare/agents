@@ -733,5 +733,110 @@
       "file": "attachment-consumption.test.ts",
       "test": "attachment consumption (Phase 5) > delivers a turn's attachments to its channel, skipping the ones it cannot render"
     }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > uses the subclass submission recovery stale window",
+    "reason": "a `running` row and a fiber row seeded 30 minutes old in the class's shape (`insertSubmissionForTest`, `insertRecoverableFiberForTest`), judged by the class's start-up reconciliation (`recoverSubmissionsForTest`)",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > ends in error, without asking the model again, when its turn started longer ago than the stale window"
+    }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > does not let recovered continuation overwrite a cancelled submission",
+    "reason": "a seeded `running` row and the class's recovery continue callback called directly (`continueRecoveredChatForTest`)",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > stays aborted when it is cancelled while its reply is being recovered"
+    }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > preserves a successful tool result across an exact storage reset and never re-executes the tool",
+    "reason": "a seeded `running` row over a transcript with a finished tool call, recovered by the class's start-up reconciliation",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > keeps a tool's result and does not run the tool again"
+    }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > completes recovered chat fiber submissions through scheduled continuation",
+    "reason": "how the class's start-up reconciliation decides a `running` submission is still owned by a recovery: a seeded row and the class's fiber-recovery callback (`recoverChatFiberForTest`), which schedules a continuation. On the harness a recovery is another attempt of the submission's own run, so there is no second record to read; the behaviour is `is never reported as failed while its reply is being recovered`",
+    "mechanicsOnly": true
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > does not error running submissions while recovered continuation is scheduled",
+    "reason": "how the class's start-up reconciliation decides a `running` submission is still owned by a recovery: a seeded schedule row for the continuation (`scheduleRecoveredContinuationForTest`). On the harness a recovery is another attempt of the submission's own run, so there is no second record to read; the behaviour is `is never reported as failed while its reply is being recovered`",
+    "mechanicsOnly": true
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > does not error running submissions while a recovered retry is pending on tasks with the original request identity",
+    "reason": "how the class's start-up reconciliation decides a `running` submission is still owned by a recovery: a seeded recovery Task run under the original request id. On the harness a recovery is another attempt of the submission's own run, so there is no second record to read; the behaviour is `is never reported as failed while its reply is being recovered`",
+    "mechanicsOnly": true
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > does not error running submissions while a recovered retry is pending on legacy-schedule with the original request identity",
+    "reason": "how the class's start-up reconciliation decides a `running` submission is still owned by a recovery: a seeded legacy schedule row under the original request id. On the harness a recovery is another attempt of the submission's own run, so there is no second record to read; the behaviour is `is never reported as failed while its reply is being recovered`",
+    "mechanicsOnly": true
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > does not error running submissions while a recovered retry is pending on tasks with the successor request identity",
+    "reason": "how the class's start-up reconciliation decides a `running` submission is still owned by a recovery: a seeded recovery Task run under a successor request id. On the harness a recovery is another attempt of the submission's own run, so there is no second record to read; the behaviour is `is never reported as failed while its reply is being recovered`",
+    "mechanicsOnly": true
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > does not error running submissions while a recovered retry is pending on legacy-schedule with the successor request identity",
+    "reason": "how the class's start-up reconciliation decides a `running` submission is still owned by a recovery: a seeded legacy schedule row under a successor request id. On the harness a recovery is another attempt of the submission's own run, so there is no second record to read; the behaviour is `is never reported as failed while its reply is being recovered`",
+    "mechanicsOnly": true
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > does not let an unrelated recovered retry protect a running submission",
+    "reason": "how the class's start-up reconciliation decides a `running` submission is still owned by a recovery: a seeded recovery retry for another request. On the harness a recovery is another attempt of the submission's own run, so there is no second record to read; the behaviour is `is never reported as failed while its reply is being recovered`",
+    "mechanicsOnly": true
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > does not let a terminal recovery Task protect a running submission",
+    "reason": "how the class's start-up reconciliation decides a `running` submission is still owned by a recovery: a seeded recovery Task run that already ended. On the harness a recovery is another attempt of the submission's own run, so there is no second record to read; the behaviour is `is never reported as failed while its reply is being recovered`",
+    "mechanicsOnly": true
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > leaves a retry stamp recoverable while a durable retry owns the submission",
+    "reason": "how the class's start-up reconciliation decides a `running` submission is still owned by a recovery: the class's retry stamp on the submission row. On the harness a recovery is another attempt of the submission's own run, so there is no second record to read; the behaviour is `is never reported as failed while its reply is being recovered`",
+    "mechanicsOnly": true
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > settles on start a parked submission whose recovered turn already stamped its outcome",
+    "reason": "how the class's start-up reconciliation decides a `running` submission is still owned by a recovery: the class's outcome stamp on a parked row. On the harness a recovery is another attempt of the submission's own run, so there is no second record to read; the behaviour is `is never reported as failed while its reply is being recovered`",
+    "mechanicsOnly": true
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > filters list and bulk delete before applying limits and cutoffs",
+    "reason": "pending and completed rows seeded with chosen creation and completion times (`insertSubmissionForTest`)",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > while a submission runs > a status filter applies before the limit and the cutoff, to list and to delete"
+    }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > applies list limits across multiple statuses after sorting",
+    "reason": "pending and completed rows seeded with chosen creation times (`insertSubmissionForTest`)",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > while a submission runs > a limit over several statuses takes the newest of them all"
+    }
   }
 ]
