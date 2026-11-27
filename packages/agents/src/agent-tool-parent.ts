@@ -239,7 +239,10 @@ export class AgentToolParent {
       );
     }
 
-    const task = this.host.tasks.peek(runId);
+    const peeked = this.host.tasks.peek(runId);
+    // A run a clear left behind (a reset cut the clear off) is gone: the id
+    // starts a new run, as after a clear that finished.
+    const task = peeked && this._dropIfCleared(peeked) ? undefined : peeked;
     if (task?.definition === AGENT_TOOL_TASK && !detached) {
       // A re-issue of an awaited run, typically chat recovery re-running the
       // dispatching turn with the same run id. An open run is joined. A

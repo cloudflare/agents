@@ -170,6 +170,13 @@ describe("detached agent-tool runs on Tasks", () => {
     });
   });
 
+  it("starts the same run id afresh after a clear a reset cut off", async () => {
+    const agent = await parent("detached-clear-cut-redispatch");
+    expect(await agent.redispatchAfterCutOffClearForTest("run-again-id")).toBe(
+      "completed"
+    );
+  });
+
   it("drops a run a clear cancelled when a reset stopped the clear before it deleted the run", async () => {
     const agent = await parent("detached-clear-cut-off");
     await agent.startDetachedForTest("run-clear-cut", {
