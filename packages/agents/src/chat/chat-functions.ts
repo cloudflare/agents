@@ -561,8 +561,10 @@ async function applyAnswer(
     );
     // The newest message that holds the call decides: an answer it no
     // longer takes (a repeated decision) does not land on an older one.
+    // A decision that names its approval goes on to the request it names.
     if (!applied) {
       if (
+        !(answer.kind === "approval" && answer.approvalId !== undefined) &&
         message.parts.some(
           (part) =>
             (part as { toolCallId?: unknown }).toolCallId === answer.toolCallId
