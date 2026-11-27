@@ -1048,6 +1048,79 @@ describe("chat recovery, through public behaviour", () => {
   // onChatRecovery", #1730/#2613): a recovery attempt the platform cuts
   // (here, a reset while onChatRecovery is running) does not end the turn:
   // the next start runs the recovery again, and no terminal is sent.
+  // Successor of think-session's "continues a cut-off turn whose stream a
+  // reconnecting tab closed before recovery ran": the tab's resume closes
+  // the cut-off stream first, and the recovery still continues the reply.
+  it("continues a reset-cut reply whose stream a reconnecting tab closed before the recovery decided", async () => {
+    const first = await resetDuringTurn("tab-closed-first", 2, undefined, {
+      holdRecovery: true
+    });
+    const agent = first.agent;
+    await vi.waitFor(
+      async () => {
+        expect((await (await agent()).recoveryHoldForTest()).held).toBe(true);
+      },
+      { timeout: 15_000, interval: 50 }
+    );
+    const cutOff = first.calls[0]?.partialText ?? "";
+    expect(cutOff.length).toBeGreaterThan(0);
+
+    // A tab reconnects and resumes, as useChat does, while onChatRecovery
+    // waits: its ack closes the stream nobody is producing.
+    const res = await exports.default.fetch(
+      `http://example.com/agents/think-test-agent/${first.room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const ws = res.webSocket;
+    if (!ws) throw new Error("no socket");
+    let resumed = false;
+    ws.addEventListener("message", (event) => {
+      const frame = JSON.parse(String(event.data)) as {
+        type?: string;
+        id?: string;
+        done?: boolean;
+      };
+      if (frame.type === "cf_agent_stream_resuming") {
+        ws.send(
+          JSON.stringify({ type: "cf_agent_stream_resume_ack", id: frame.id })
+        );
+      }
+      if (frame.type === "cf_agent_use_chat_response" && frame.done) {
+        resumed = true;
+      }
+    });
+    ws.accept();
+    ws.send(JSON.stringify({ type: "cf_agent_stream_resume_request" }));
+    await vi.waitFor(() => expect(resumed).toBe(true), {
+      timeout: 10_000,
+      interval: 20
+    });
+
+    await (await agent()).releaseRecoveryHoldForTest();
+    await vi.waitFor(
+      async () => {
+        expect(await (await agent()).stableWithinForTest(2_000)).toBe(true);
+      },
+      { timeout: 20_000, interval: 100 }
+    );
+    ws.close();
+
+    const messages = (await (await agent()).getMessages()) as Array<{
+      role: string;
+      parts: Array<{ type: string; text?: string }>;
+    }>;
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    const text = messages[1]?.parts
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .join("");
+    // Continued: the partial, then more after it.
+    expect(text.startsWith(cutOff)).toBe(true);
+    expect(text.length).toBeGreaterThan(cutOff.length);
+  }, 60_000);
+
   // Successor of think-session's "re-reconstructing the same interrupted
   // stream is idempotent (no duplicate, no loss)": the same cut-off reply is
   // recovered twice (a second reset cuts the first recovery), and with
