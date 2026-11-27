@@ -37,3 +37,18 @@ Deploys the probe Worker built on the latest release of `agents`, `@cloudflare/a
 cd nightly
 pnpm run upgrade
 ```
+
+## harnesses
+
+The Pi harness (`agents/harness/pi`) and the OpenCode harness (`agents/harness/opencode`), with the real wake timings (a 30 s heartbeat brings a reset object back). Two suites, each on its own deployment, run at once (`--project pi`, `--project opencode`); together about 15 minutes, each under 30. A scripted model runs the fault cases, so a failure is never the model. The tools report what they run to a separate witness object; after a reset or a code update the suite reads the witness and leaves the probe alone, so only the harness's own wake job can bring the probe back.
+
+- Pi: a replay-safe tool cut off by a reset runs again, once; a tool not marked safe is reported to the model as interrupted and not run again; a tool run cut off by a code update finishes; a call parked on a 40 s deadline is finished by the alarm with nothing touching the object; a codemode script cut off mid-script is replayed (its journaled call is not run again, the replay-safe gate is); a browser tool call runs on a real Browser Rendering session; a twenty-turn conversation on Workers AI, with two resets, answers every question it was asked.
+- OpenCode (it runs inside the Durable Object, no container): a run cut off mid model call, by a reset or by a code update, is replayed and ends once; a five-turn conversation on Workers AI with a tool and a reset carries each turn's tool output.
+
+Every room ends with nothing pending and no alarm.
+
+```sh
+cd nightly
+pnpm run harnesses                       # both suites
+pnpm run harnesses --project opencode    # one
+```
