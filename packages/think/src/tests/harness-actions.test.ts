@@ -17,6 +17,9 @@ type ActionsStub = {
   attachmentsForTest(requestId?: string): Promise<unknown[]>;
   pendingApprovals(executionId?: string): Promise<PendingApproval[]>;
   approveExecution(executionId: string): Promise<unknown>;
+  grantContext(): Promise<
+    { trigger: string | null; hasSignal: boolean } | undefined
+  >;
   rejectExecution(
     executionId: string,
     reason?: string,
@@ -135,6 +138,15 @@ describe("harness-backed Think: actions that need a human", () => {
 
     const answer = await think.rejectExecution(pending.executionId, "too much");
     expect(answer).toMatchObject({ status: "rejected", reason: "too much" });
+  });
+
+  it("tells authorizeTurn what started the turn, and gives it the turn's signal", async () => {
+    const think = await agent();
+    await think.say("charge 5");
+    expect(await think.grantContext()).toEqual({
+      trigger: expect.any(String),
+      hasSignal: true
+    });
   });
 
   it("lists the same descriptor after a restart, from the action and its input", async () => {
