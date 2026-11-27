@@ -17586,7 +17586,35 @@ export class ThinkRewriteContextTestAgent extends ThinkToolsTestAgent {
     return this._reasoningPrompts;
   }
 
+  private _lookupOnContinue = false;
+  private _lookupPrompts: string[] = [];
+
+  /**
+   * echo, then text; a continuation then calls `lookup`, then text. The
+   * continuation's `beforeTurn` rewrites to the messages it got.
+   */
+  async lookupOnContinueForTest(): Promise<void> {
+    this._lookupOnContinue = true;
+  }
+
+  async getLookupPrompts(): Promise<string[]> {
+    return this._lookupPrompts;
+  }
+
+  override getTools(): ToolSet {
+    if (!this._lookupOnContinue) return this.#writingTools();
+    return {
+      ...this.#writingTools(),
+      lookup: tool({
+        description: "Look something up",
+        inputSchema: z.object({}),
+        execute: async () => "looked up"
+      })
+    };
+  }
+
   override getModel(): LanguageModel {
+    if (this._lookupOnContinue) return this.#lookupModel();
     if (!this._hiddenReasoning) return super.getModel();
     let calls = 0;
     return {
@@ -17647,6 +17675,53 @@ export class ThinkRewriteContextTestAgent extends ThinkToolsTestAgent {
     } as LanguageModel;
   }
 
+  #lookupModel(): LanguageModel {
+    return {
+      specificationVersion: "v3",
+      provider: "test",
+      modelId: "mock-lookup-on-continue",
+      supportedUrls: {},
+      doGenerate() {
+        throw new Error("doGenerate not implemented");
+      },
+      doStream: (options: Record<string, unknown>) => {
+        const prompt = JSON.stringify(
+          (options as { prompt?: unknown[] }).prompt ?? []
+        );
+        this._lookupPrompts.push(prompt);
+        const call = !prompt.includes("tc-echo-1")
+          ? { id: "tc-echo-1", name: "echo", input: '{"message":"hi"}' }
+          : this._keepHistory && !prompt.includes("tc-lookup-1")
+            ? { id: "tc-lookup-1", name: "lookup", input: "{}" }
+            : undefined;
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: "stream-start", warnings: [] });
+            if (call) {
+              controller.enqueue({
+                type: "tool-call",
+                toolCallId: call.id,
+                toolName: call.name,
+                input: call.input
+              });
+            } else {
+              controller.enqueue({ type: "text-start", id: "t" });
+              controller.enqueue({ type: "text-delta", id: "t", delta: "ok" });
+              controller.enqueue({ type: "text-end", id: "t" });
+            }
+            controller.enqueue({
+              type: "finish",
+              finishReason: v3FinishReason(call ? "tool-calls" : "stop"),
+              usage: v3Usage(10, 5)
+            });
+            controller.close();
+          }
+        });
+        return Promise.resolve({ stream });
+      }
+    } as LanguageModel;
+  }
+
   async continueForTest(): Promise<string> {
     return (await this.runTurn({ continuation: true })).status;
   }
@@ -17658,7 +17733,7 @@ export class ThinkRewriteContextTestAgent extends ThinkToolsTestAgent {
     });
   }
 
-  override getTools(): ToolSet {
+  #writingTools(): ToolSet {
     return {
       echo: tool({
         description: "Echo a message back",

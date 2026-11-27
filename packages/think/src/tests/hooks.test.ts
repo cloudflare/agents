@@ -416,6 +416,24 @@ describe("Think — beforeStep hook", () => {
     expect(prompts[1]).toContain("signed-thought");
   });
 
+  it("sends a continued rewritten turn's earlier tool call once", async () => {
+    const agent = await getAgentByName(
+      env.ThinkRewriteContextTestAgent,
+      `hook-bt-rewrite-cont-${crypto.randomUUID()}`
+    );
+    await agent.lookupOnContinueForTest();
+    await agent.testChat("the first ask");
+    await agent.rewriteKeepingHistoryForTest();
+    await agent.continueForTest();
+    const prompts = await agent.getLookupPrompts();
+    // echo, its answer; then the continuation's lookup call, and the call
+    // after lookup.
+    expect(prompts).toHaveLength(4);
+    const count = (prompt: string) => prompt.split('"tc-echo-1"').length - 1;
+    expect(count(prompts[2])).toBeGreaterThan(0);
+    expect(count(prompts[3])).toBe(count(prompts[2]));
+  });
+
   it("keeps the messages beforeTurn rewrote for every model call of the turn", async () => {
     const agent = await freshToolAgent("hook-bt-rewrite");
     await agent.rewriteTurnMessagesForTest();
