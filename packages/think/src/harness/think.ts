@@ -1938,9 +1938,21 @@ export class Think<
     );
   }
 
-  /** Whether `operationId` is a new reply, from its record after a restart. */
-  async #restoreNewReply(operationId: string): Promise<void> {
-    if (this.#newReplies.has(operationId)) return;
+  /**
+   * Whether a turn this isolate did not start is a new reply, from its
+   * record: one read, made only for a turn that could be one (not marked a
+   * continuation, answering a history that ends with a reply).
+   */
+  async #restoreNewReply(turn: ThinkTurnContext): Promise<void> {
+    const { operationId } = turn;
+    if (
+      turn.continuation ||
+      this.#newReplies.has(operationId) ||
+      this.#turns.has(operationId) ||
+      turn.messages.at(-1)?.role !== "assistant"
+    ) {
+      return;
+    }
     const inspection = await this.harness.inspection(
       this.harness.session().id,
       operationId
@@ -3371,7 +3383,7 @@ export class Think<
     // The turn's channel, from the stamp on its latest user message, as
     // Think resolves it for a new, continued or recovered turn.
     if (this.#turnChannel?.operationId !== turn.operationId) {
-      await this.#restoreNewReply(turn.operationId);
+      await this.#restoreNewReply(turn);
       // A context reminder the harness adds as a message of its own is not
       // the turn's user message.
       const history = turn.messages.filter(

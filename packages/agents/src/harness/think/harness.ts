@@ -2067,10 +2067,17 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         // While the latest reply still waits on a client (a client tool's
         // call, an approval), there is nothing to answer yet: the client's
         // answer continues that reply.
-        const built = await this.#build(session);
+        // As on Think, from the client tools the session's client declared:
+        // no build for it.
+        const declared = await handle.internal_config(CLIENT_TOOLS_KEY);
+        const parsed: unknown = declared === null ? [] : JSON.parse(declared);
         const clientTools = new Set(
-          Object.keys(built.tools).filter(
-            (name) => !isServerTool(built.tools, name)
+          (Array.isArray(parsed) ? parsed : []).flatMap((tool: unknown) =>
+            tool !== null &&
+            typeof tool === "object" &&
+            typeof (tool as { name?: unknown }).name === "string"
+              ? [(tool as { name: string }).name]
+              : []
           )
         );
         if (continuationWaitsOnClient([latest], clientTools)) {
