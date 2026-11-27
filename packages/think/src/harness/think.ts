@@ -2067,7 +2067,15 @@ export class Think<
       partialParts: parts,
       recoveryData: null,
       messages: [...this.messages],
-      createdAt: Date.now()
+      // When the operation was accepted, as Think gives the turn's start,
+      // so an app can refuse stale work.
+      createdAt:
+        (
+          await this.harness.inspection(
+            this.harness.session().id,
+            context.operationId
+          )
+        )?.createdAt ?? Date.now()
     });
     return decision?.continue === false ? "abandon" : "continue";
   }
