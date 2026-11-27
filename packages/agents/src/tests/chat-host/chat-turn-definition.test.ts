@@ -1641,4 +1641,50 @@ describe("chatTurnDefinition", () => {
       });
     });
   });
+
+  it("a model that answers after the turn was cleared sends the tabs nothing of it", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const sent: Array<Record<string, unknown>> = [];
+      const tab = {
+        id: "tab-1",
+        readyState: 1,
+        send: (text: string) => sent.push(JSON.parse(text))
+      };
+      const stop = new AbortController();
+      const result = await chatTurnDefinition(
+        {
+          tasks: instance.tasks,
+          streams: instance.streams,
+          sessions: instance.sessions,
+          kv: instance.kv,
+          session: "s1",
+          webSockets: { getConnections: () => [tab] } as never
+        },
+        {
+          // The model ignores its signal: the chat is cleared meanwhile,
+          // then it answers.
+          respond: async () => {
+            stop.abort(new TaskCancellation(CHAT_CLEARED));
+            return new ReadableStream({
+              start(controller) {
+                controller.enqueue({ type: "start", messageId: "a1" } as never);
+                controller.enqueue({ type: "text-start", id: "t1" } as never);
+                controller.enqueue({
+                  type: "text-delta",
+                  id: "t1",
+                  delta: "late"
+                } as never);
+                controller.close();
+              }
+            });
+          }
+        }
+      )({ trigger: "server" }, laterAttempt("cl-2", 1, stop.signal));
+      expect(result).toMatchObject({ status: "aborted" });
+      expect(sent.filter((frame) => frame.done !== true)).toEqual([]);
+      expect(await instance.sessions.session("s1").getHistory()).toEqual([]);
+    });
+  });
 });

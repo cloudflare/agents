@@ -1084,6 +1084,18 @@ export function chatTurnDefinition(
         writer?.close({ discard: true });
         return report({ requestId, status: "skipped" });
       }
+      // Stopped or cleared while the model was asked: nothing it sends is
+      // the turn's (a model that ignores its signal answers anyway).
+      if (step.signal.aborted && !writer) {
+        void Promise.resolve(source)
+          .then((value) =>
+            value instanceof Response
+              ? value.body?.cancel()
+              : (value as ReadableStream).cancel?.()
+          )
+          .catch(() => {});
+        return report({ requestId, status: "aborted" });
+      }
       const out = (writer ??= await deps.streams.open(streamId, {
         tag: requestId
       }));
@@ -1219,6 +1231,8 @@ export function chatTurnDefinition(
               live.delete(liveKey);
           },
           transform(chunk, controller) {
+            // After a stop or a clear, what the model still sends is dropped.
+            if (step.signal.aborted) return;
             // Every reply has an id: a continuation keeps the reply's, a new
             // reply keeps the model's or gets one from the run.
             if (!started) offerStream();
