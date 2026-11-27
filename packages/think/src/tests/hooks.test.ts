@@ -2124,8 +2124,8 @@ describe("Think — host bridge methods", () => {
     const agent = await freshAgent(room);
     const ws = await connectWS("ThinkTestAgent", room);
     try {
-      const transcript = (id: string) =>
-        new Promise<void>((resolve, reject) => {
+      const transcript = (id: string) => {
+        const seen = new Promise<void>((resolve, reject) => {
           const timer = setTimeout(
             () => reject(new Error(`no transcript with ${id}`)),
             5000
@@ -2146,6 +2146,11 @@ describe("Think — host bridge methods", () => {
           };
           ws.addEventListener("message", handler);
         });
+        // Awaited below; a failed write before it must not leave the
+        // timer's rejection unhandled.
+        seen.catch(() => {});
+        return seen;
+      };
       const note = (id: string): UIMessage => ({
         id,
         role: "user",
@@ -2156,7 +2161,9 @@ describe("Think — host bridge methods", () => {
         await agent.addMessagesExpectingError([note("before-a-turn")])
       ).toBeNull();
       await before;
-      await agent.testChat("Hello");
+      const turn = await agent.testChat("Hello");
+      expect(turn.done).toBe(true);
+      expect(turn.error).toBeUndefined();
       const after = transcript("after-a-turn");
       expect(
         await agent.addMessagesExpectingError([note("after-a-turn")])
