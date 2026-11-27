@@ -12074,8 +12074,12 @@ export class ThinkProgrammaticTestAgent extends Think {
    * non-zero between tests means a controller leaked.
    */
   async getAbortControllerCount(): Promise<number> {
-    return (this as unknown as { _turns: { aborts: { size: number } } })._turns
-      .aborts.size;
+    const turns = (this as unknown as { _turns?: { aborts: { size: number } } })
+      ._turns;
+    // The harness-backed Think (`pnpm test:harness`) keeps no controller
+    // registry: what would leak is a turn still running.
+    if (!turns) return this.activeTurn === undefined ? 0 : 1;
+    return turns.aborts.size;
   }
 
   async getStoredMessages(): Promise<UIMessage[]> {

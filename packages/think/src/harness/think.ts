@@ -1423,6 +1423,19 @@ export class Think<
     await this.harness.session().abort(requestId);
   }
 
+  /** Stop every turn, running or waiting; each ends `aborted`. */
+  protected abortAllRequests(): void {
+    void this.keepAliveWhile(() => this.harness.session().abort());
+  }
+
+  /**
+   * Stop every turn, running or waiting, and keep the transcript. A
+   * `clearMessages` resets the session as well.
+   */
+  protected resetTurnState(): void {
+    void this.keepAliveWhile(() => this.harness.session().abort());
+  }
+
   async cancelAllChats(): Promise<void> {
     await this.harness.session().abort();
   }
