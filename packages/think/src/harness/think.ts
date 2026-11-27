@@ -2535,12 +2535,24 @@ export class Think<
     // Think's released config, as it is: the turn definition's recovery
     // budget honours its fields.
     if (config === true) return { stallTimeoutMs };
+    const { onExhausted, shouldKeepRecovering } = config;
     return {
       ...(config.maxAttempts !== undefined && {
         maxAttempts: config.maxAttempts
       }),
       stallTimeoutMs,
-      chatRecovery: config
+      chatRecovery: {
+        ...config,
+        // The definition names a turn by its run; an app knows it by its
+        // request (the operation) id, as on Think.
+        ...(onExhausted && {
+          onExhausted: (ctx) => onExhausted(withOperationIds(ctx))
+        }),
+        ...(shouldKeepRecovering && {
+          shouldKeepRecovering: (ctx) =>
+            shouldKeepRecovering(withOperationIds(ctx))
+        })
+      }
     };
   }
 
@@ -3251,6 +3263,30 @@ export class Think<
       cancel: () => end()
     });
   }
+}
+
+/** A run id (`["", operationId]`) as the operation id it names. */
+function operationIdOf(id: string): string {
+  if (!id.startsWith("[")) return id;
+  try {
+    const parsed: unknown = JSON.parse(id);
+    return Array.isArray(parsed) && typeof parsed[1] === "string"
+      ? parsed[1]
+      : id;
+  } catch {
+    return id;
+  }
+}
+
+/** A recovery context with its ids as the operation ids an app knows. */
+function withOperationIds<
+  T extends { requestId: string; recoveryRootRequestId: string }
+>(ctx: T): T {
+  return {
+    ...ctx,
+    requestId: operationIdOf(ctx.requestId),
+    recoveryRootRequestId: operationIdOf(ctx.recoveryRootRequestId)
+  };
 }
 
 /**
