@@ -2130,6 +2130,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                 break;
               }
               chunks.push(chunk);
+              if (model.hideReasoning && chunk.type.startsWith("reasoning")) {
+                continue;
+              }
               yield chunk;
             }
           } catch (error) {
@@ -2243,6 +2246,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     stopSignal: AbortSignal
   ): Promise<{
     readonly stream: AsyncIterable<UIMessageChunk>;
+    /**
+     * Whether the call's reasoning stays out of the turn's stream: the
+     * loop's own reply keeps it, for the next call (a provider's signed
+     * reasoning), as the AI SDK keeps it between steps.
+     */
+    readonly hideReasoning: boolean;
     readonly error: () => unknown;
     /** The call's token usage, once its stream ended. */
     readonly usage: () => Promise<LanguageModelUsage | undefined>;
@@ -2369,12 +2378,13 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const stream = result.toUIMessageStream({
       originalMessages: [] as UIMessage[],
       generateMessageId: () => messageId,
-      ...(config.sendReasoning === false && { sendReasoning: false }),
+
       // The participant who started the turn runs its client tools.
       messageMetadata: ({ part }) =>
         part.type === "start" && owner !== undefined ? { owner } : undefined
     });
     return {
+      hideReasoning: config.sendReasoning === false,
       stream: (async function* () {
         try {
           for await (const chunk of stream) yield chunk;
