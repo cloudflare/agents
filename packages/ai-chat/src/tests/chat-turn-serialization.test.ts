@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it, onTestFinished } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
 import { MessageType } from "../types";
@@ -12,6 +12,37 @@ import {
 
 function connectSlowStream(room: string) {
   return connectChatWS(`/agents/slow-stream-agent/${room}`);
+}
+
+/** Bounds for waits on the agent, inside the 10 s test timeout. */
+const BOUNDS = { timeout: 3_000, interval: 20 };
+
+/** Hold `requestId`'s stream after its first chunk, and wait until held. */
+async function holdStream(
+  agent: {
+    holdStreamForTest(id: string): Promise<void>;
+    isStreamHeldForTest(id: string): Promise<boolean>;
+    releaseStreamForTest(id: string): Promise<void>;
+  },
+  requestId: string,
+  send: () => void
+): Promise<void> {
+  await agent.holdStreamForTest(requestId);
+  onTestFinished(() => agent.releaseStreamForTest(requestId));
+  send();
+  await vi.waitFor(async () => {
+    expect(await agent.isStreamHeldForTest(requestId)).toBe(true);
+  }, BOUNDS);
+}
+
+/** Wait until `count` turns are queued, the running one included. */
+async function queued(
+  agent: { queuedTurnCountForTest(): Promise<number> },
+  count: number
+): Promise<void> {
+  await vi.waitFor(async () => {
+    expect(await agent.queuedTurnCountForTest()).toBe(count);
+  }, BOUNDS);
 }
 
 function delay(ms: number) {
@@ -99,13 +130,13 @@ describe("AIChatAgent chat turn serialization", () => {
       }
     });
 
-    sendChatRequest(ws, "req-turn-1", [firstUserMessage], {
-      format: "plaintext",
-      chunkCount: 8,
-      chunkDelayMs: 100
-    });
-
-    await delay(60);
+    await holdStream(agentStub, "req-turn-1", () =>
+      sendChatRequest(ws, "req-turn-1", [firstUserMessage], {
+        format: "plaintext",
+        chunkCount: 8,
+        chunkDelayMs: 100
+      })
+    );
 
     sendChatRequest(
       ws,
@@ -125,10 +156,11 @@ describe("AIChatAgent chat turn serialization", () => {
       }
     );
 
-    await delay(100);
+    await queued(agentStub, 2);
 
     expect(await agentStub.getStartedRequestIds()).toEqual(["req-turn-1"]);
     expect(await agentStub.isChatTurnActiveForTest()).toBe(true);
+    await agentStub.releaseStreamForTest("req-turn-1");
 
     await waitUntil(async () => {
       const started = await agentStub.getStartedRequestIds();
@@ -153,35 +185,44 @@ describe("AIChatAgent chat turn serialization", () => {
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
-    // ~1.6s total stream time. The "still streaming" assertions below fire
-    // at t≈160ms and t≈260ms; this leaves >1s of headroom so the test
-    // doesn't depend on the host meeting `chunkDelayMs` exactly under load.
-    sendChatRequest(ws, "req-save-1", [firstUserMessage], {
-      format: "plaintext",
-      chunkCount: 8,
-      chunkDelayMs: 200
-    });
-
-    await delay(60);
+    // The first request is held mid-stream while the save queues behind it.
+    await holdStream(agentStub, "req-save-1", () =>
+      sendChatRequest(ws, "req-save-1", [firstUserMessage], {
+        format: "plaintext",
+        chunkCount: 8,
+        chunkDelayMs: 200
+      })
+    );
 
     const savePromise = agentStub.saveSyntheticUserMessage(
       "Scheduled follow-up"
     );
-    const waitForIdlePromise = agentStub.waitForIdleForTest();
+    const waitForIdlePromise = agentStub.waitForIdleStartsForTest();
 
-    await delay(100);
+    await queued(agentStub, 2);
 
     expect(await agentStub.getStartedRequestIds()).toEqual(["req-save-1"]);
     expect(await agentStub.isChatTurnActiveForTest()).toBe(true);
-    await expect(
-      Promise.race([
-        waitForIdlePromise.then(() => "idle"),
-        delay(100).then(() => "pending")
-      ])
-    ).resolves.toBe("pending");
+    // The idle wait has not settled: a round trip to the agent, while the
+    // turn is held, comes back first.
+    let idleSettled = false;
+    // Rejections are the awaited promise's to report, not this observer's.
+    void waitForIdlePromise.then(
+      () => {
+        idleSettled = true;
+      },
+      () => {}
+    );
+    expect(await agentStub.isStreamHeldForTest("req-save-1")).toBe(true);
+    expect(idleSettled).toBe(false);
 
+    await agentStub.releaseStreamForTest("req-save-1");
     await savePromise;
-    await waitForIdlePromise;
+    // It settled only once both turns had run, not early.
+    expect(await waitForIdlePromise).toEqual({
+      started: [expect.any(String), expect.any(String)],
+      active: false
+    });
 
     const started = await agentStub.getStartedRequestIds();
     expect(started[0]).toBe("req-save-1");
@@ -257,13 +298,16 @@ describe("AIChatAgent chat turn serialization", () => {
 
     // The active turn waits on the model and writes no reply, so the tool
     // call messages stay the latest ones.
+    // Held until both results are in.
+    await agentStub.holdNextResponseForTest();
+    onTestFinished(() => agentStub.releaseResponseForTest());
     sendChatRequest(ws, "req-coalesced-tool-turn", [firstUserMessage], {
       format: "sse",
-      responseDelayMs: 800,
       chunkCount: 0
     });
-
-    await delay(120);
+    await vi.waitFor(async () => {
+      expect(await agentStub.isResponseHeldForTest()).toBe(true);
+    }, BOUNDS);
     expect(await agentStub.isChatTurnActiveForTest()).toBe(true);
 
     await agentStub.persistToolCallMessage(
@@ -297,6 +341,17 @@ describe("AIChatAgent chat turn serialization", () => {
     );
 
     await waitUntilHandled(agentStub, MessageType.CF_AGENT_TOOL_RESULT, 2);
+    // Handling starts each update without awaiting it: both are applied
+    // while the turn is still held.
+    await vi.waitFor(async () => {
+      expect(
+        await agentStub.toolOutputsAppliedForTest([
+          "call_tool_1",
+          "call_tool_2"
+        ])
+      ).toBe(true);
+    }, BOUNDS);
+    await agentStub.releaseResponseForTest();
     await agentStub.waitForIdleForTest();
 
     expect(await agentStub.getStartedRequestIds()).toEqual([

@@ -2634,6 +2634,23 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     return [...this._startedRequestIds];
   }
 
+  /** Whether every tool call in `toolCallIds` has its output applied. */
+  toolOutputsAppliedForTest(toolCallIds: string[]): boolean {
+    const applied = new Set<string>();
+    for (const message of this.messages) {
+      for (const part of message.parts) {
+        if (
+          "toolCallId" in part &&
+          "state" in part &&
+          part.state === "output-available"
+        ) {
+          applied.add(part.toolCallId as string);
+        }
+      }
+    }
+    return toolCallIds.every((id) => applied.has(id));
+  }
+
   private _requestBodies = new Map<
     string,
     Record<string, unknown> | undefined
@@ -2664,6 +2681,21 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   async waitForIdleForTest(): Promise<boolean> {
     await this["_turns"].waitForIdle();
     return true;
+  }
+
+  /**
+   * Wait for idle and report, from inside the agent at the moment it
+   * settled, the turns started so far and whether one is still active.
+   */
+  async waitForIdleStartsForTest(): Promise<{
+    started: string[];
+    active: boolean;
+  }> {
+    await this["_turns"].waitForIdle();
+    return {
+      started: [...this._startedRequestIds],
+      active: this.isChatTurnActiveForTest()
+    };
   }
 
   waitUntilStableForTest(options?: { timeout?: number }): Promise<boolean> {
