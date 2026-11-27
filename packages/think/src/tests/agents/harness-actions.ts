@@ -20,6 +20,7 @@ const COUNT_KEY = "test:charged";
 const GRANT_KEY = "test:grant";
 const REWRITE_KEY = "test:rewrite";
 const SWEEP_KEY = "test:sweep-settled";
+const GRANT_CONTEXT_KEY = "test:grant-context";
 
 function finish(controller: ReadableStreamDefaultController, reason: string) {
   controller.enqueue({
@@ -132,7 +133,11 @@ export class ThinkHarnessActionsAgent extends Think {
     };
   }
 
-  override authorizeTurn(_ctx: TurnContext): ActionAuthorizationDecision {
+  override authorizeTurn(ctx: TurnContext): ActionAuthorizationDecision {
+    this.ctx.storage.kv.put(GRANT_CONTEXT_KEY, {
+      trigger: ctx.trigger ?? null,
+      hasSignal: ctx.abortSignal instanceof AbortSignal
+    });
     const grant = this.ctx.storage.kv.get<string[]>(GRANT_KEY);
     return grant === undefined
       ? true
@@ -182,6 +187,11 @@ export class ThinkHarnessActionsAgent extends Think {
         "toolCallId" in part && "output" in part ? [part.output] : []
       )
     );
+  }
+
+  /** What `authorizeTurn` was last told about its turn. */
+  grantContext(): { trigger: string | null; hasSignal: boolean } | undefined {
+    return this.ctx.storage.kv.get(GRANT_CONTEXT_KEY);
   }
 
   async say(text: string): Promise<void> {

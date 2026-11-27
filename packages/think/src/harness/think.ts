@@ -2883,7 +2883,11 @@ export class Think<
                 : resolveDefault());
           },
           continuation: context.continuation,
-          requestId: context.requestId
+          requestId: context.requestId,
+          // As in Think: the grant sees what started the turn, and its
+          // signal, so it can stop its own I/O when the turn stops.
+          trigger: context.trigger,
+          abortSignal: context.abortSignal
         }) as unknown as TurnContext
     );
     // Then `beforeStep`, before each model call, as the AI SDK's
