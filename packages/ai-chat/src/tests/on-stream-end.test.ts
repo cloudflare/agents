@@ -220,6 +220,10 @@ describe("onChatResponse hook", () => {
     const room = crypto.randomUUID();
     const { ws } = await connectResponseAgent(room);
     const done = waitForDone(ws, "req-abort");
+    const streamed: unknown[] = [];
+    ws.addEventListener("message", (e: MessageEvent) => {
+      streamed.push(JSON.parse(e.data as string));
+    });
 
     // Don't pass useAbortSignal — we want the framework's reader.cancel()
     // to handle the abort, not the stream closing itself via controller.close()
@@ -229,7 +233,22 @@ describe("onChatResponse hook", () => {
       chunkDelayMs: 50
     });
 
-    await new Promise((r) => setTimeout(r, 200));
+    // Cancel mid-stream: once its first chunk is out.
+    await vi.waitFor(
+      () => {
+        expect(
+          streamed.some(
+            (m) =>
+              isUseChatResponseMessage(m) &&
+              m.id === "req-abort" &&
+              !m.done &&
+              typeof m.body === "string" &&
+              m.body.length > 0
+          )
+        ).toBe(true);
+      },
+      { timeout: 5000, interval: 20 }
+    );
 
     ws.send(
       JSON.stringify({
@@ -400,7 +419,8 @@ describe("onChatResponse with continuation", () => {
       })
     );
     expect(await contDone).toBe(true);
-    await new Promise((r) => setTimeout(r, 300));
+    // onChatResponse runs after the done frame, outside the turn.
+    await waitForResults(agentStub, 2);
 
     // Step 4: Verify onChatResponse results
     const results =
@@ -481,7 +501,7 @@ describe("onChatResponse with continuation", () => {
         continuation: true,
         body: expectedError
       });
-      await new Promise((r) => setTimeout(r, 300));
+      await waitForResults(agentStub, 2);
 
       const results =
         (await agentStub.getChatResponseResults()) as ChatResponseResult[];
@@ -517,12 +537,17 @@ describe("onChatResponse error resilience", () => {
     );
 
     expect(await done).toBe(true);
-    await new Promise((r) => setTimeout(r, 200));
 
     const agentStub = await getAgentByName(env.ResponseThrowingAgent, room);
 
-    // onChatResponse was called (it set _streamCompleted before throwing)
-    expect(await agentStub.getStreamCompleted()).toBe(true);
+    // onChatResponse was called (it set _streamCompleted before throwing);
+    // it runs after the done frame.
+    await vi.waitFor(
+      async () => {
+        expect(await agentStub.getStreamCompleted()).toBe(true);
+      },
+      { timeout: 5000, interval: 20 }
+    );
 
     // Message should still be persisted despite the hook throwing
     const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
@@ -578,7 +603,6 @@ describe("onChatResponse error resilience", () => {
     );
 
     expect(await done).toBe(true);
-    await new Promise((r) => setTimeout(r, 200));
 
     // Client should have received the error flag on the done message
     const errorDone = allMessages.find(
@@ -589,6 +613,16 @@ describe("onChatResponse error resilience", () => {
     ) as { error?: boolean } | undefined;
     expect(errorDone).toBeDefined();
     expect(errorDone!.error).toBe(true);
+
+    // The hook ran for the failed request (it marks the stream, then
+    // throws); it runs after the done frame.
+    const agentStub = await getAgentByName(env.ResponseThrowingAgent, room);
+    await vi.waitFor(
+      async () => {
+        expect(await agentStub.getStreamCompleted()).toBe(true);
+      },
+      { timeout: 5000, interval: 20 }
+    );
 
     // Agent should still be healthy
     const done2 = waitForDone(ws, "req-after-err");
@@ -636,7 +670,6 @@ describe("Reader error propagation", () => {
     });
 
     expect(await done).toBe(true);
-    await new Promise((r) => setTimeout(r, 200));
 
     // Client should see error:true on the done message
     const errorDone = allMessages.find(
@@ -690,8 +723,7 @@ describe("onChatResponse fires outside turn lock", () => {
 
     expect(await done).toBe(true);
 
-    await agentStub.waitForIdleForTest();
-    await new Promise((r) => setTimeout(r, 500));
+    await waitForResults(agentStub, 2);
 
     const results =
       (await agentStub.getChatResponseResults()) as ChatResponseResult[];
@@ -738,8 +770,7 @@ describe("onChatResponse fires outside turn lock", () => {
 
     expect(await done).toBe(true);
 
-    await agentStub.waitForIdleForTest();
-    await new Promise((r) => setTimeout(r, 1000));
+    await waitForResults(agentStub, 4);
 
     const results =
       (await agentStub.getChatResponseResults()) as ChatResponseResult[];
@@ -787,8 +818,7 @@ describe("onChatResponse fires outside turn lock", () => {
     );
     expect(await done).toBe(true);
 
-    await agentStub.waitForIdleForTest();
-    await new Promise((r) => setTimeout(r, 500));
+    await waitForResults(agentStub, 2);
 
     // Agent should handle more requests after drain
     const done2 = waitForDone(ws, "req-after-drain");
@@ -814,7 +844,7 @@ describe("onChatResponse fires outside turn lock", () => {
     expect(await done2).toBe(true);
 
     // This new request should also trigger onChatResponse
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForResults(agentStub, 3);
     const results =
       (await agentStub.getChatResponseResults()) as ChatResponseResult[];
     // 2 from drain chain + 1 from the new request = 3
