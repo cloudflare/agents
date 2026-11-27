@@ -430,8 +430,9 @@ describe("Think — beforeStep hook", () => {
     // after lookup.
     expect(prompts).toHaveLength(4);
     const count = (prompt: string) => prompt.split('"tc-echo-1"').length - 1;
-    expect(count(prompts[2])).toBeGreaterThan(0);
-    expect(count(prompts[3])).toBe(count(prompts[2]));
+    // The echo call and its result, once each.
+    expect(count(prompts[2])).toBe(2);
+    expect(count(prompts[3])).toBe(2);
   });
 
   it("keeps the messages beforeTurn rewrote for every model call of the turn", async () => {
