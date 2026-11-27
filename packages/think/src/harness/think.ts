@@ -1973,6 +1973,14 @@ export class Think<
     if (wait.input === undefined && !wait.continuation) {
       throw new TypeError("runTurn: supply either input or continuation: true");
     }
+    // As saveMessages: a turn stopped before it starts builds nothing.
+    const cut = await this.#cutOffByStop(wait.signal);
+    if (cut) {
+      return {
+        ...cutOffBeforeStart(cut),
+        continuation: wait.continuation === true
+      };
+    }
     const session = this.harness.session();
     let receipt;
     if (wait.continuation) receipt = await session.continue();
