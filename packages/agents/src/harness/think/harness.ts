@@ -3172,19 +3172,22 @@ async function* untilAborted<T>(
     if (signal.aborted) onAbort();
     else signal.addEventListener("abort", onAbort, { once: true });
   });
+  let finished = false;
   try {
     for (;;) {
       const next = await Promise.race([iterator.next(), aborted]);
-      if (next === "aborted") {
-        // Release the source without waiting on it.
-        void iterator.return?.().catch(() => {});
+      if (next === "aborted") return;
+      if (next.done) {
+        finished = true;
         return;
       }
-      if (next.done) return;
       yield next.value;
     }
   } finally {
     signal.removeEventListener("abort", onAbort);
+    // Aborted, or left by the caller (an in-band error): release the
+    // source without waiting on it.
+    if (!finished) void iterator.return?.().catch(() => {});
   }
 }
 
