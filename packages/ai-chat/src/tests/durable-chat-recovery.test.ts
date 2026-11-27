@@ -456,6 +456,44 @@ describe("onChatRecovery", () => {
     expect(await agentStub.getRunFiberCountForTest()).toBe(0);
   });
 
+  it("leaves nothing of an earlier version's recovery behind when it carries its cut-off turn", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.persistMessages([
+      { id: "u-live", role: "user", parts: [{ type: "text", text: "Hi" }] },
+      {
+        id: "a-live",
+        role: "assistant",
+        parts: [{ type: "text", text: "Partial" }]
+      }
+    ] as ChatMessage[]);
+    // The earlier version had opened an incident for the turn and was
+    // about to continue it.
+    await agentStub.seedIncidentForTest({
+      incidentId: "req-live:",
+      requestId: "req-live",
+      recoveryKind: "continue",
+      attempt: 1,
+      maxAttempts: 10,
+      status: "scheduled",
+      firstSeenAt: Date.now(),
+      lastAttemptAt: Date.now()
+    });
+    await agentStub.insertInterruptedFiber("__cf_internal_chat_turn:req-live");
+    await agentStub.triggerFiberRecovery();
+    await vi.waitFor(async () =>
+      expect(await agentStub.openChatLaneRunsForTest()).toBe(0)
+    );
+
+    // The reply was continued, and no incident or recovering status of the
+    // earlier version's is left.
+    expect(await storedAssistantText(agentStub)).toContain(
+      "Continued response."
+    );
+    expect(await agentStub.getChatRecoveryIncidentsForTest()).toEqual([]);
+    expect(await agentStub.getChatRecoveringForTest()).toBeNull();
+  });
+
   it("does not carry a turn an earlier version left cut off when the conversation moved on", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);

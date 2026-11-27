@@ -4303,7 +4303,10 @@ export class AIChatAgent<
     );
   }
 
-  /** Drop the recovery incidents a release kept for `requestId`. */
+  /**
+   * Drop what an earlier version kept about the recovery of `requestId`:
+   * its incident records and the chat's recovering status.
+   */
   private async _forgetReleasedIncidents(requestId: string): Promise<void> {
     const incidents = await this.ctx.storage.list<{
       requestId?: string;
@@ -4317,6 +4320,9 @@ export class AIChatAgent<
       )
       .map(([key]) => key);
     if (keys.length > 0) await this.ctx.storage.delete(keys);
+    // The earlier version may have said the chat is recovering: the turn
+    // is an ordinary one from here, and says so itself if it is cut off.
+    await this._setChatRecovering(false);
   }
 
   private _resolveAIChatRecoveryStream(
