@@ -6,6 +6,7 @@
  * result in `harness-compat.md`. When every test passes, this class
  * replaces `../think.ts`.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   Agent,
   type AgentContext,
@@ -387,6 +388,9 @@ function saveResult(result: ThinkOperationResult): SaveMessagesResult {
   };
 }
 
+/** The turn whose tool call is running here, for the work it starts. */
+const turnOfToolCall = new AsyncLocalStorage<string>();
+
 export class Think<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
@@ -763,7 +767,8 @@ export class Think<
         const frozen = (await this.#context?.freezeSystemPrompt()) ?? "";
         return frozen ? undefined : this.getSystemPrompt();
       },
-      tools: async () => this.#withFinalAnswer(await this.getTools()),
+      tools: async () =>
+        this.#inTurnOfCall(this.#withFinalAnswer(await this.getTools())),
       // The harness cuts older messages as Think does, by its step.
       truncationStep: () => this.truncationStep,
       // A turn's `beforeTurn` may set its own, as in Think.
@@ -1985,7 +1990,7 @@ export class Think<
   /** The channel of the running turn, if it resolved to one. */
   get activeChannel(): ChannelContext | undefined {
     const turn = this.#turnChannel;
-    return turn && turn.operationId === this.#running?.requestId
+    return turn && turn.operationId === this.activeTurn?.requestId
       ? turn.context
       : undefined;
   }
@@ -2039,7 +2044,34 @@ export class Think<
   get activeTurn():
     | { requestId: string; trigger: string; continuation: boolean }
     | undefined {
-    return this.#running;
+    // As on Think: work a tool started belongs to that tool's turn, so it
+    // doesn't see a later turn that runs when it does.
+    const own = turnOfToolCall.getStore();
+    return own === undefined || own === this.#running?.requestId
+      ? this.#running
+      : undefined;
+  }
+
+  /**
+   * The tools, each `execute` run in its turn's context: what it starts and
+   * leaves running reads that turn, not the one running later.
+   */
+  #inTurnOfCall(tools: ToolSet): ToolSet {
+    const wrapped: ToolSet = {};
+    for (const [name, original] of Object.entries(tools)) {
+      const execute = original.execute;
+      wrapped[name] = execute
+        ? {
+            ...original,
+            // The turn running the call, read when it runs.
+            execute: (...args: Parameters<typeof execute>) =>
+              turnOfToolCall.run(this.#running?.requestId ?? "", () =>
+                execute(...args)
+              )
+          }
+        : original;
+    }
+    return wrapped;
   }
 
   /** The running operations whose model has streamed; dropped at their end. */

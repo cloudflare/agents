@@ -1,5 +1,5 @@
 import { stableHash } from "../action-ledger";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { env, exports } from "cloudflare:workers";
 import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
@@ -1685,6 +1685,23 @@ describe("Think — ToolCallDecision honored by wrapped execute", () => {
     expect(probe.persisted).toBe(true);
   });
 
+  it("stores a message a tool adds with addMessages by the time the call returns", async () => {
+    const agent = await freshToolAgent("dec-add-messages-public");
+    await agent.setEchoExecuteMode("add-messages");
+    const result = await agent.testChat("call echo");
+    expect(result.done).toBe(true);
+
+    // Durable the moment addMessages returns, inside the tool's execute.
+    expect((await agent.getMidTurnAddProbe()).persisted).toBe(true);
+    const texts = ((await agent.getStoredMessages()) as UIMessage[]).flatMap(
+      (message) =>
+        message.parts.flatMap((part) =>
+          part.type === "text" ? [part.text] : []
+        )
+    );
+    expect(texts).toContain("injected during execute");
+  });
+
   it("replays an aged tool output through a validating toModelOutput (#2014)", async () => {
     // A fresh object each run: a retry must not inherit the last attempt's
     // transcript, which moved the truncation cutoff.
@@ -2761,6 +2778,70 @@ describe("Think — beforeTurn config overrides", () => {
 });
 
 describe("a tool-call id reused across replies", () => {
+  // Two replies that both ask to approve `call_1`; a tab answers over its
+  // WebSocket, by the approval's id or with none.
+  async function reusedRequests(room: string) {
+    const agent = await freshAgent(room);
+    const request = (approvalId: string) =>
+      ({
+        type: "tool-calculate",
+        toolCallId: "call_1",
+        state: "approval-requested",
+        input: {},
+        approval: { id: approvalId }
+      }) as unknown as UIMessage["parts"][number];
+    const text = (t: string) =>
+      [{ type: "text", text: t }] as UIMessage["parts"];
+    await agent.persistTestMessage({
+      id: "u1",
+      role: "user",
+      parts: text("one")
+    });
+    await agent.persistTestMessage({
+      id: "a1",
+      role: "assistant",
+      parts: [request("approval_a")]
+    });
+    await agent.persistTestMessage({
+      id: "u2",
+      role: "user",
+      parts: text("two")
+    });
+    await agent.persistTestMessage({
+      id: "a2",
+      role: "assistant",
+      parts: [request("approval_b")]
+    });
+    const state = async (id: string) =>
+      (
+        ((await agent.getStoredMessages()) as UIMessage[]).find(
+          (m) => m.id === id
+        )?.parts[0] as { state?: string } | undefined
+      )?.state;
+    return { state };
+  }
+
+  it("answers the latest request a tab's decision names, by id or with none, and leaves the older one", async () => {
+    for (const approvalId of ["approval_b", undefined]) {
+      const room = `reused-ws-${crypto.randomUUID()}`;
+      const { state } = await reusedRequests(room);
+      const ws = await connectWS("ThinkTestAgent", room);
+      ws.send(
+        JSON.stringify({
+          type: MSG_TOOL_APPROVAL,
+          toolCallId: "call_1",
+          approved: false,
+          ...(approvalId !== undefined && { approvalId })
+        })
+      );
+      await vi.waitFor(async () =>
+        expect(await state("a2")).toBe("output-denied")
+      );
+      expect(await state("a1")).toBe("approval-requested");
+      ws.close();
+    }
+  });
+
   it("applies an approval to the request its approval id names", async () => {
     const agent = await freshAgent(`reused-approval-${crypto.randomUUID()}`);
     const request = (approvalId: string, a: number) =>
