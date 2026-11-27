@@ -1,8 +1,9 @@
-import { env } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import { subscribe } from "agents/observability";
 import { describe, expect, it } from "vitest";
+import type { UIMessage } from "ai";
 import type {
   OnStartDegradationForTest,
   TestChatResult
@@ -60,6 +61,70 @@ type PointerHydrationStub = {
 
 function uniqueName(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+type SocketStub = {
+  deliverNextReconcileOverSocketForTest(): Promise<void>;
+  incomingToSendForTest(): Promise<UIMessage[] | null>;
+  incomingSentForTest(): Promise<void>;
+};
+
+/**
+ * Run a reconciliation fixture with its client transcript sent the public
+ * way: as a tab's chat request over a socket. Returns the fixture's result.
+ */
+async function overSocket<T>(
+  room: string,
+  agent: SocketStub,
+  fixture: () => Promise<T>
+): Promise<T> {
+  await agent.deliverNextReconcileOverSocketForTest();
+  const result = fixture();
+  let incoming: UIMessage[] | null = null;
+  const deadline = Date.now() + 60_000;
+  while (!incoming && Date.now() < deadline) {
+    incoming = await agent.incomingToSendForTest();
+    if (!incoming) await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (!incoming) throw new Error("the fixture built no client transcript");
+  const res = await exports.default.fetch(
+    `http://example.com/agents/think-windowed-hydration-agent/${room}`,
+    { headers: { Upgrade: "websocket" } }
+  );
+  const ws = res.webSocket;
+  if (!ws) throw new Error("no socket");
+  ws.accept();
+  const id = crypto.randomUUID();
+  const done = new Promise<void>((resolve) => {
+    ws.addEventListener("message", (event) => {
+      const frame = JSON.parse(String(event.data)) as {
+        type?: string;
+        id?: string;
+        done?: boolean;
+      };
+      if (
+        frame.type === "cf_agent_use_chat_response" &&
+        frame.id === id &&
+        frame.done
+      ) {
+        resolve();
+      }
+    });
+  });
+  ws.send(
+    JSON.stringify({
+      type: "cf_agent_use_chat_request",
+      id,
+      init: {
+        method: "POST",
+        body: JSON.stringify({ messages: incoming })
+      }
+    })
+  );
+  await done;
+  ws.close();
+  await agent.incomingSentForTest();
+  return result;
 }
 
 describe("hydrationByteBudget — windowed hydration (#1710)", () => {
@@ -279,6 +344,115 @@ describe("hydrationByteBudget — windowed hydration (#1710)", () => {
     await evictDurableObject(env.ThinkWindowedHydrationAgent.getByName(name));
     expect(await agent.reconcileOnLongPathForTest()).toBe("m200005");
   }, 120_000);
+
+  describe("a tab's resent transcript, over a socket", () => {
+    async function stub<T>(prefix: string) {
+      const room = uniqueName(prefix);
+      const agent = (await getAgentByName(
+        env.ThinkWindowedHydrationAgent,
+        room
+      )) as unknown as WindowedHydrationStub & SocketStub & T;
+      return { room, agent };
+    }
+    const seeds = Array.from({ length: 10 }, (_, i) => `seed-${i}`);
+
+    it("matches a message older than the window by id", async () => {
+      const { room, agent } = await stub<{
+        reconcileOlderThanWindowForTest(): Promise<string[]>;
+      }>("seeded-windowed-reconcile-socket");
+      const ids = await overSocket(room, agent, () =>
+        agent.reconcileOlderThanWindowForTest()
+      );
+      // Then the turn's own reply.
+      expect(ids).toEqual([...seeds, "new-user", expect.any(String)]);
+    });
+
+    it("matches an older reply the tab holds under another id, storing it once", async () => {
+      const { room, agent } = await stub<{
+        reconcileOptimisticCopyForTest(): Promise<string[]>;
+      }>("seeded-windowed-copy-socket");
+      const ids = await overSocket(room, agent, () =>
+        agent.reconcileOptimisticCopyForTest()
+      );
+      expect(ids).not.toContain("client-copy");
+      expect(ids).toEqual([...seeds, "new-user", expect.any(String)]);
+    });
+
+    it("keeps a compacted reply's tool result when the tab resends it stale", async () => {
+      const { room, agent } = await stub<{
+        reconcileHiddenToolResultForTest(): Promise<string | undefined>;
+      }>("seeded-windowed-hidden-tool-socket");
+      expect(
+        await overSocket(room, agent, () =>
+          agent.reconcileHiddenToolResultForTest()
+        )
+      ).toBe("output-available");
+    });
+
+    it("does not let a stale copy take the id of a reply the tab also sent", async () => {
+      const { room, agent } = await stub<{
+        reconcileStaleCopyForTest(): Promise<string | undefined>;
+      }>("seeded-windowed-stale-copy-socket");
+      expect(
+        await overSocket(room, agent, () => agent.reconcileStaleCopyForTest())
+      ).toBe("output-available");
+    });
+
+    it("pairs a reused tool call with the oldest unclaimed reply past the window", async () => {
+      const { room, agent } = await stub<{
+        reconcileReusedCallForTest(): Promise<{
+          earlier: unknown;
+          later: unknown;
+        }>;
+      }>("seeded-windowed-reused-call-socket");
+      expect(
+        await overSocket(room, agent, () => agent.reconcileReusedCallForTest())
+      ).toEqual({ earlier: "early", later: "late" });
+    });
+
+    it("looks a bounded distance past the window for an older reply under another id", async () => {
+      const { room, agent } = await stub<{
+        seedLongPathForTest(count: number): Promise<void>;
+        reconcileCopiesOnLongPathForTest(ids: string[]): Promise<string[]>;
+      }>("windowed-lookback-socket");
+      await agent.seedLongPathForTest(20_000);
+      await evictDurableObject(env.ThinkWindowedHydrationAgent.getByName(room));
+      expect(
+        await overSocket(room, agent, () =>
+          agent.reconcileCopiesOnLongPathForTest(["m17000", "m100"])
+        )
+      ).toEqual(["copy-m100"]);
+    }, 120_000);
+
+    it("pairs the oldest reply the lookback reaches", async () => {
+      const { room, agent } = await stub<{
+        seedLongPathForTest(count: number): Promise<void>;
+        reconcileCopiesOnLongPathForTest(ids: string[]): Promise<string[]>;
+      }>("windowed-lookback-edge-socket");
+      const count = 20_000;
+      await agent.seedLongPathForTest(count);
+      await evictDurableObject(env.ThinkWindowedHydrationAgent.getByName(room));
+      const window = (await agent.getCachedMessageIdsForTest()).length;
+      const edge = count - window - Math.max(1_000, 10_001 - window) + 1;
+      expect(
+        await overSocket(room, agent, () =>
+          agent.reconcileCopiesOnLongPathForTest([`m${edge}`])
+        )
+      ).toEqual([]);
+    }, 120_000);
+
+    it("matches on a path too long to read root-first", async () => {
+      const { room, agent } = await stub<{
+        seedLongPathForTest(count: number): Promise<void>;
+        reconcileOnLongPathForTest(): Promise<string | null>;
+      }>("windowed-long-path-socket");
+      await agent.seedLongPathForTest(200_005);
+      await evictDurableObject(env.ThinkWindowedHydrationAgent.getByName(room));
+      expect(
+        await overSocket(room, agent, () => agent.reconcileOnLongPathForTest())
+      ).toBe("m200005");
+    }, 120_000);
+  });
 
   it("emits chat:hydration:windowed on change, not on every sync", async () => {
     const events: Array<{
