@@ -592,7 +592,11 @@ describe("AgentClient", () => {
         gate.close();
       }
 
-      const onConnectionError = vi.fn();
+      let markErrored = () => {};
+      const errored = new Promise<void>((resolve) => {
+        markErrored = resolve;
+      });
+      const onConnectionError = vi.fn(() => markErrored());
       const onOpen = vi.fn();
       client = new AgentClient({
         agent: "HookingSubAgentParent",
@@ -605,15 +609,16 @@ describe("AgentClient", () => {
         onConnectionError
       });
       client.addEventListener("open", onOpen);
-      // Assert now: the close rejects the call during the waitFor below, and
+      // Assert now: the close rejects the call before the error is reported, and
       // a rejection with no handler by then is reported as unhandled.
       const pending = expect(client.call("add", [1, 2])).rejects.toThrow(
         "Connection closed"
       );
 
-      await vi.waitFor(() => {
-        expect(onConnectionError).toHaveBeenCalledOnce();
-      });
+      // The client reports once it stops retrying; how long that takes
+      // depends on the machine, so wait for the report itself.
+      await errored;
+      expect(onConnectionError).toHaveBeenCalledOnce();
       expect(client.connectionError).toMatchObject({
         code: 4404,
         reason: "Sub-agent connection rejected (404)"
@@ -628,7 +633,11 @@ describe("AgentClient", () => {
 
     it("reports a connection error once maxRetries is spent", async () => {
       const { host, protocol } = getTestWorkerHost();
-      const onConnectionError = vi.fn();
+      let markErrored = () => {};
+      const errored = new Promise<void>((resolve) => {
+        markErrored = resolve;
+      });
+      const onConnectionError = vi.fn(() => markErrored());
 
       client = new AgentClient({
         agent: "NoSuchAgentForRetries",
@@ -644,9 +653,10 @@ describe("AgentClient", () => {
         "Connection closed"
       );
 
-      await vi.waitFor(() => {
-        expect(onConnectionError).toHaveBeenCalledOnce();
-      });
+      // The client reports once it stops retrying; how long that takes
+      // depends on the machine, so wait for the report itself.
+      await errored;
+      expect(onConnectionError).toHaveBeenCalledOnce();
       expect(client.retryCount).toBe(2);
       expect(client.connectionError).toBeInstanceOf(Error);
       await pending;
