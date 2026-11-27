@@ -464,14 +464,20 @@ export class Think<
         id === this.harness.session().id ? this.#context : undefined,
       model: async () => this.resolveModel(await this.getModel()),
       // As in Think: an overridden getSystemPrompt() stays above the
-      // context blocks; the default is only the fallback for no blocks,
-      // the skill catalog's included.
-      system: () =>
-        isMethodOverridden(this, "getSystemPrompt") ||
-        ((!this.#context || this.#context.getBlocks().length === 0) &&
-          !this.#skills.loaded)
-          ? this.getSystemPrompt()
-          : undefined,
+      // context blocks; the default is only the fallback when the context
+      // has no text, the skill catalog's and a prompt a release froze
+      // included.
+      system: async () => {
+        if (isMethodOverridden(this, "getSystemPrompt")) {
+          return this.getSystemPrompt();
+        }
+        if (this.#skills.loaded) return undefined;
+        if (this.#context && this.#context.getBlocks().length > 0) {
+          return undefined;
+        }
+        const frozen = (await this.#context?.freezeSystemPrompt()) ?? "";
+        return frozen ? undefined : this.getSystemPrompt();
+      },
       tools: () => this.getTools(),
       // A turn's `beforeTurn` may set its own, as in Think.
       get maxSteps() {

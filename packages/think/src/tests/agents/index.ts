@@ -63,6 +63,7 @@ export {
 export { ThinkMcpToolMaterializationAgent } from "./mcp-tool-materialization";
 export {
   ThinkPromptCacheTestAgent,
-  ThinkUpgradeTestAgent
+  ThinkUpgradeTestAgent,
+  ThinkUpgradeCustomStoreTestAgent
 } from "./prompt-cache";
 export { ThinkPrefixChangedAgent } from "./prefix-changed";

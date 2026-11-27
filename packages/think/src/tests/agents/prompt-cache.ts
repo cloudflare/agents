@@ -3,7 +3,7 @@ import { tool } from "ai";
 import { AgentContextProvider, type ContextConfig } from "agents/context";
 import { z } from "zod";
 import { Think } from "../../think";
-import type { MediaEvictionConfig } from "../../think";
+import type { MediaEvictionConfig, ThinkSession } from "../../think";
 
 /**
  * Prompt-cache prefix measurement (#2200). Providers cache on a byte-identical
@@ -546,6 +546,51 @@ export class ThinkUpgradeTestAgent extends ThinkPromptCacheTestAgent {
     return {
       system: systemOf(this.requestForTest(before))
     };
+  }
+}
+
+/**
+ * An upgraded agent with no context blocks, whose release froze its prompt
+ * in a custom `withCachedPrompt()` store: the frozen text is all the base
+ * prompt there is, and the custom store is read before the
+ * `_system_prompt` row.
+ */
+export class ThinkUpgradeCustomStoreTestAgent extends ThinkUpgradeTestAgent {
+  override configureContext(): ContextConfig[] {
+    return [];
+  }
+
+  override configureSession(session: ThinkSession): ThinkSession {
+    return session.withCachedPrompt(
+      new AgentContextProvider(this, "custom_frozen_prompt")
+    );
+  }
+
+  /** Freeze in both stores, as a release could have, then run one turn. */
+  async firstSystemAfterUpgradeForTest(stores: {
+    custom: string;
+    row: string;
+  }): Promise<string | undefined> {
+    await new AgentContextProvider(this, "custom_frozen_prompt").set(
+      stores.custom
+    );
+    await new AgentContextProvider(this, "_system_prompt").set(stores.row);
+    await this.addMessages([
+      {
+        id: "r0",
+        role: "user",
+        parts: [{ type: "text", text: "before the upgrade" }]
+      }
+    ]);
+    await this.addMessages(
+      [{ id: "r1", role: "assistant", parts: [{ type: "text", text: "ok" }] }],
+      { parentId: "r0" }
+    );
+    const before = this.requestCountForTest();
+    await this.saveMessages([
+      { id: "u0", role: "user", parts: [{ type: "text", text: "question" }] }
+    ]);
+    return systemOf(this.requestForTest(before));
   }
 }
 

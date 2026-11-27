@@ -44,6 +44,23 @@ describe("Think context upgrade", () => {
     }
   });
 
+  it("opens with a custom store's frozen prompt alone when there are no blocks", async () => {
+    const custom = "You are the prompt a release froze in a custom store.";
+    const system = await (
+      await getAgentByName(
+        env.ThinkUpgradeCustomStoreTestAgent,
+        `custom-store-${crypto.randomUUID()}`
+      )
+    ).firstSystemAfterUpgradeForTest({
+      custom,
+      row: "You are the prompt in the _system_prompt row."
+    });
+    // The frozen text is the whole base prompt: no default above it, and
+    // the custom store wins over the row.
+    expect(system?.startsWith(custom)).toBe(true);
+    expect(system).not.toContain("_system_prompt row");
+  });
+
   it("carries a frozen prompt it could not have rendered itself", async () => {
     const report = await (
       await agent("custom")
