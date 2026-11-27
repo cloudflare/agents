@@ -965,9 +965,8 @@ export class Think<
       configured = undefined;
     }
     if (configured instanceof Promise) {
-      // Awaited at start on the root, not called again; unused elsewhere.
+      // Not used: it may have read a field its subclass had not set yet.
       configured.catch(() => {});
-      this.#configuredLater = configured;
       configured = undefined;
     }
     this.#configuredAtConstruction = configured;
@@ -1018,12 +1017,10 @@ export class Think<
       await this.#context.load();
       // As in Think: the channel registry, read at start on the root.
       if (this.parentPath.length === 0) {
-        // Read again at start when it answered at construction, before its
-        // subclass was set up: the registry is what it answers now.
+        // Read again at start, once its subclass is set up: the registry
+        // is what it answers now.
         const resolved = resolveChannels(
-          this.#configuredAtConstruction !== undefined
-            ? await this.configureChannels()
-            : await (this.#configuredLater ?? this.configureChannels()),
+          await this.configureChannels(),
           this.getMessengers() as ThinkMessengers
         );
         this.#channels = resolved.channels;
@@ -1717,8 +1714,6 @@ export class Think<
 
   /** What `configureChannels()` returned at construction, when not a promise. */
   #configuredAtConstruction: ThinkChannels | undefined;
-  /** What it returned at construction, when a promise. */
-  #configuredLater: Promise<ThinkChannels> | undefined;
   /** The channel the last turn ran on, for a continuation, as on Think. */
   #lastTurnChannel: string | undefined;
   /** Operations a browser's chat request started: they run on `web`. */
@@ -1729,6 +1724,8 @@ export class Think<
   #turnChannel:
     | {
         operationId: string;
+        /** The channel asked for, registered or not. */
+        channelId: string | undefined;
         context: ChannelContext | undefined;
         definition: NormalizedChannelDefinition | undefined;
       }
@@ -2692,13 +2689,13 @@ export class Think<
         channel = messenger;
         await this.#stamp(user.id, messenger);
       }
-      this.#lastTurnChannel = channel;
       const emit = this._emit as unknown as (
         type: string,
         payload: Record<string, unknown>
       ) => void;
       this.#turnChannel = {
         operationId: turn.operationId,
+        channelId: channel,
         context: resolveChannelContext(channel, {
           registry: this.#channels,
           requestId: turn.operationId,
@@ -2926,6 +2923,9 @@ export class Think<
       experimental_transform: config.experimental_transform,
       experimental_repairToolCall: config.repairToolCall
     });
+    // As in Think: recorded once the turn is prepared, so a continuation
+    // never extends a turn whose preparation threw.
+    if (first) this.#lastTurnChannel = this.#turnChannel.channelId;
     return {
       model: sent,
       ...(typeof system === "string" && { system }),

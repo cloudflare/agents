@@ -1524,6 +1524,14 @@ describe("think messengers core", () => {
       ).toBe("Got it");
     });
 
+    it("starts with an async configureChannels() that reads a private field", async () => {
+      const agent = await getAgentByName(
+        env.ThinkMessengerDeliveryTestAgent,
+        `async-config-${crypto.randomUUID()}`
+      );
+      await expect(agent.getAdapterCalls()).resolves.toEqual([]);
+    });
+
     it("runs a messenger's turn on its channel", async () => {
       const agent = await sendBurst(`channel-${crypto.randomUUID()}`, [
         { id: "m1", text: "hello", threadId: "fake:dm" }

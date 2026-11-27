@@ -288,7 +288,25 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
    * An agent named `configured-…` declares its messenger in
    * `configureChannels()` instead of `getMessengers()`.
    */
-  override configureChannels(): ThinkChannels {
+  /** Read by an `async-config-…` agent's `configureChannels()`. */
+  readonly #asyncVoice = "ASYNC VOICE";
+
+  override configureChannels(): ThinkChannels | Promise<ThinkChannels> {
+    // An agent named `async-config-…` configures its channels
+    // asynchronously, reading a private field before its first await.
+    if (this.name.startsWith("async-config-")) {
+      return (async () => {
+        const instructions = this.#asyncVoice;
+        await Promise.resolve();
+        return {
+          voice: {
+            kind: "voice" as const,
+            ingress: { transport: "voice" as const },
+            instructions
+          }
+        };
+      })();
+    }
     if (!this.name.startsWith("configured-")) return {};
     return { fake: messengerChannel(this._messengers().fake) };
   }
