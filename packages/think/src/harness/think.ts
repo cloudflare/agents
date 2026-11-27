@@ -895,6 +895,18 @@ export class Think<
           } as unknown as ChunkContext);
         },
         onTurnEnd: async (end) => {
+          // Its messenger context, for its response hook, taken first so it
+          // is forgotten whichever way the hook ends. A turn that did not
+          // run here (a terminal report replayed after a reset) reads it
+          // from its user message as stored.
+          const ranHere = this.#ranHere.delete(end.operationId);
+          const kept = this.#responseContexts.get(end.operationId);
+          this.#responseContexts.delete(end.operationId);
+          const responding =
+            kept ??
+            (!ranHere && this.#messengers
+              ? await this.#storedMessengerContext()
+              : undefined);
           // The extensions' chunk hooks finish inside the turn, as in Think.
           await this.#chunkHooks;
           const continued = this.#continued.get(end.operationId);
@@ -920,10 +932,6 @@ export class Think<
           // A turn that never ran has no response: one stopped while it
           // waited, or input the harness turned away before a model call (a
           // tool result no call waits for, an empty or unknown operation).
-          // Its messenger context, for its response hook; forgotten here,
-          // whichever way the hook ends.
-          const responding = this.#responseContexts.get(end.operationId);
-          this.#responseContexts.delete(end.operationId);
           const stoppedByCaller = this.#callerStops.delete(end.operationId);
           // As on Think, a turn the chat was cleared under, running or
           // waiting, gets no response hook. Its `chat()` caller is told of
@@ -2184,6 +2192,17 @@ export class Think<
 
   /** Each turn's messenger context, kept for its response hook. */
   #responseContexts = new Map<string, MessengerContext>();
+  /** Operations whose turn ran in this isolate, until their end hook. */
+  #ranHere = new Set<string>();
+
+  /** The latest user message's trusted messenger context, as stored. */
+  async #storedMessengerContext(): Promise<MessengerContext | undefined> {
+    await this.#sync();
+    const user = [...this.#transcript.messages]
+      .reverse()
+      .find((message) => message.role === "user");
+    return this.#trustedMessengerOf(user);
+  }
 
   /**
    * Run a turn for a messenger event, as on Think: the context is kept on
@@ -3154,6 +3173,7 @@ export class Think<
       // A message's own context is trusted only on a messenger's channel,
       // which only the server stamps: a browser cannot claim a sender.
       const context = this.#trustedMessengerOf(user) ?? webhook;
+      this.#ranHere.add(turn.operationId);
       if (context) {
         this.#messengerContexts.set(turn.operationId, context);
         this.#responseContexts.set(turn.operationId, context);
