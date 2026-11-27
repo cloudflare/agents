@@ -32,6 +32,16 @@ import {
   type ChannelsHost,
   type ConversationUpdate
 } from "agents/experimental/channels";
+
+/** A Channels turn's status, from its update. */
+type TurnStatus = Extract<ConversationUpdate, { type: "turn" }>["turn"];
+
+/** A message's text, its text parts joined. */
+function messageText(message: UIMessage | undefined): string {
+  return (message?.parts ?? [])
+    .flatMap((part) => (part.type === "text" ? [part.text] : []))
+    .join("");
+}
 import { Streams } from "agents/streams";
 import type { Tasks } from "agents/tasks";
 import {
@@ -122,6 +132,58 @@ export function messengerChannels(options: {
   /** Each waiting answer's operation, told when Channels settles the turn. */
   const settled = new Map<string, Set<() => void>>();
   let turnsHost: ChannelsHost | undefined;
+  const streams = new Streams({ name: "think-messengers" });
+  /** Each running turn's first response in this isolate. */
+  const firstResponses = new Map<string, string>();
+  /**
+   * Turns whose model call failed and was tried again in this isolate, with
+   * what their first attempt had written: the later attempts are not
+   * delivered live, but posted once the turn settles, as Think posts a
+   * recovered reply (the rest of the answer, the apology, or the
+   * empty-response text). A reset's rerun, in a new isolate, streams.
+   */
+  const retried = new Map<string, Promise<string>>();
+
+  /** The text of saved message `id`, or "" when there is none. */
+  async function textOf(id: string | undefined): Promise<string> {
+    if (id === undefined) return "";
+    const messages = await options.harness.session().messages();
+    return messageText(messages.find((message) => message.id === id));
+  }
+
+  /** The text response `responseId` streamed (what went out live). */
+  async function partialText(responseId: string): Promise<string> {
+    let text = "";
+    for await (const { chunk } of streams.read(responseId)) {
+      const delta = chunk as { type?: unknown; delta?: unknown };
+      if (delta.type === "text-delta" && typeof delta.delta === "string") {
+        text += delta.delta;
+      }
+    }
+    return text;
+  }
+
+  /** Post a retried turn's reply to its asker, as Think posts a recovered one. */
+  async function postRetried(
+    asker: ChannelMessageSurface,
+    turn: Extract<TurnStatus, { status: "settled" }>,
+    partial: Promise<string>
+  ): Promise<void> {
+    const definition = definitions.find((d) => d.id === asker.channelKey);
+    const threadId = (asker.address as { threadId?: unknown }).threadId;
+    if (!definition || typeof threadId !== "string") return;
+    const posted = await partial;
+    const text = await textOf(turn.messageIds.at(-1));
+    const posts = recoveredReplyPosts(definition, {
+      outcome: turn.outcome === "failed" ? "interrupted" : "completed",
+      text: text.startsWith(posted) ? text.slice(posted.length) : text,
+      partialPosted: posted.trim().length > 0
+    });
+    await chat().initialize();
+    for (const post of posts) {
+      await definition.adapter.postMessage(threadId, post);
+    }
+  }
 
   /**
    * Watch `operation`'s turn from before Channels takes it. `settled()`
@@ -161,7 +223,7 @@ export function messengerChannels(options: {
   }
 
   const channels = Channels.forHarness(options.harness, {
-    streams: new Streams({ name: "think-messengers" }),
+    streams,
     channels: Object.fromEntries([
       // Sees each turn settle after every update before it was published
       // (so its deliveries started), for the answer that waits on it.
@@ -172,8 +234,44 @@ export function messengerChannels(options: {
             turnsHost = host;
           },
           publish(_conversationId: string, update: ConversationUpdate) {
+            if (update.type === "turn" && update.turn.status === "running") {
+              const { startedBy, responseId } = update.turn;
+              const first = firstResponses.get(startedBy);
+              if (first === undefined) {
+                firstResponses.set(startedBy, responseId);
+              } else if (
+                first !== responseId &&
+                !retried.has(startedBy) &&
+                // Its webhook still waits here: the model call failed and
+                // was tried again. A reset's rerun has no live webhook.
+                attempts.has(startedBy)
+              ) {
+                retried.set(startedBy, partialText(first));
+              }
+            }
             if (update.type === "turn" && update.turn.status === "settled") {
               const startedBy = update.turn.startedBy;
+              firstResponses.delete(startedBy);
+              const partial = retried.get(startedBy);
+              retried.delete(startedBy);
+              const kept = options.kv.get<ChannelMessageSurface>(
+                askerKey(startedBy)
+              );
+              if (partial && kept) {
+                const posting = postRetried(kept, update.turn, partial);
+                // The answer that waits on the turn waits on this too.
+                const waiting = attempts.get(startedBy);
+                if (waiting) {
+                  for (const mine of waiting) mine.push(posting);
+                } else {
+                  void posting.catch((error: unknown) =>
+                    console.error(
+                      "[Think] A retried reply was not posted",
+                      error
+                    )
+                  );
+                }
+              }
               // A turn no webhook here waits on is one a reset cut off and
               // the harness ran again: the Chat handler that held its thread
               // died with the reset, so what queued behind it is drained, as
@@ -210,7 +308,9 @@ export function messengerChannels(options: {
             // Every thread shares the default session, as in Think: a reply
             // goes to the thread whose message started its turn, only.
             asker: (startedBy) =>
-              options.kv.get<ChannelMessageSurface>(askerKey(startedBy)),
+              retried.has(startedBy)
+                ? undefined
+                : options.kv.get<ChannelMessageSurface>(askerKey(startedBy)),
             sending: (startedBy, attempt) =>
               attempts.get(startedBy)?.forEach((mine) => mine.push(attempt))
           }
