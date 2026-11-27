@@ -2,8 +2,9 @@
 "agents": patch
 ---
 
-MCP, email and stubs after a reset.
+MCP, email and models.
 
-- The MCP client checks server URLs with the same rules as `web_fetch` on every request, and now refuses more private and reserved addresses, `.internal` names and URLs with credentials; loopback stays allowed. See [URL security](https://developers.cloudflare.com/agents/model-context-protocol/apis/client-api/#url-security).
-- `AgentWorkflow`, the MCP RPC transport and `getAgentByName` recover from an Agent reset instead of failing every later call (#2978).
-- `replyToEmail()` no longer adds a second `Re:` to a subject, and `isAutoReplyEmail()` ignores spaces around a header's value (#3207).
+- The MCP client checks server URLs like `web_fetch`, refusing more private addresses, `.internal` names and URLs with credentials.
+- The MCP RPC transport and `getAgentByName` recover from an Agent reset (#2978).
+- `replyToEmail()` no longer adds a second `Re:` (#3207).
+- `agents/models/pi-ai`: an `AbortError` from `onResponse` on Anthropic stops a fallback chain.
