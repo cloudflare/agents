@@ -1618,6 +1618,9 @@ export class ThinkTestAgent extends Think {
     partialText: string;
     recoveryData: string | null;
     createdAt: number;
+    requestId: string;
+    recoveryRootRequestId: string;
+    streamId: string;
   }> = [];
   private _stashInBeforeTurnForTest: string | undefined;
   private _turnIdentityLog: TurnIdentityLogEntry[] = [];
@@ -1631,7 +1634,10 @@ export class ThinkTestAgent extends Think {
       partialText: ctx.partialText,
       recoveryData:
         typeof ctx.recoveryData === "string" ? ctx.recoveryData : null,
-      createdAt: ctx.createdAt
+      createdAt: ctx.createdAt,
+      requestId: ctx.requestId,
+      recoveryRootRequestId: ctx.recoveryRootRequestId,
+      streamId: ctx.streamId
     });
     if (this._recoveryHookForTest === "throw") {
       throw new Error("recovery hook boom");
@@ -3402,8 +3408,12 @@ export class ThinkTestAgent extends Think {
     perTurn?: boolean;
     recovery?: ChatRecoveryOptions | "throw";
     chatRecovery?: ChatRecoveryConfig;
+    /** Data the turn stashes from `beforeTurn`, for its recovery. */
+    stash?: string;
   }): Promise<{
     first: TestChatResult;
+    /** When the stalled turn started, by the agent's clock. */
+    startedAt: number;
     stable: boolean;
     recoveryCalls: ThinkTestAgent["_recoveryCallsForTest"];
     roles: string[];
@@ -3432,6 +3442,11 @@ export class ThinkTestAgent extends Think {
     if (options.chatRecovery !== undefined) {
       this.chatRecovery = options.chatRecovery;
     }
+    const stash = this._stashInBeforeTurnForTest;
+    if (options.stash !== undefined) {
+      this._stashInBeforeTurnForTest = options.stash;
+    }
+    const startedAt = Date.now();
     try {
       const askedAt = Date.now();
       const first = await this.testChat("stall, then recover");
@@ -3440,6 +3455,7 @@ export class ThinkTestAgent extends Think {
       const last = messages.filter((m) => m.role === "assistant").at(-1);
       return {
         first,
+        startedAt,
         stable,
         recoveryCalls: this._recoveryCallsForTest,
         roles: messages.map((m) => m.role),
@@ -3455,6 +3471,7 @@ export class ThinkTestAgent extends Think {
       this._turnConfigOverride = turnConfig;
       this._recoveryHookForTest = null;
       this.chatRecovery = chatRecovery;
+      this._stashInBeforeTurnForTest = stash;
     }
   }
 

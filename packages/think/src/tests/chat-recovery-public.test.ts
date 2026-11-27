@@ -105,4 +105,63 @@ describe("chat recovery, through public behaviour", () => {
     // well before that.
     expect(createdAt).toBeLessThan(result.askedAt + 1000);
   });
+
+  // Successors of onChatRecovery's context tests (think-session, "Think —
+  // onChatRecovery"): what the hook is told about the turn it recovers.
+  describe("onChatRecovery's context", () => {
+    it("tells onChatRecovery the interrupted turn's partial text and when it was interrupted", async () => {
+      const agent = await freshAgent("recover-context");
+      const result = await agent.stallRecoveryForTest({
+        afterParts: 2,
+        stalledCalls: 1,
+        timeoutMs: 50
+      });
+
+      const [first] = result.recoveryCalls;
+      expect(first?.partialText).toBe("Hello from the assistant!");
+      expect(first?.streamId).toEqual(expect.any(String));
+      expect(first?.streamId).not.toBe("");
+      expect(first?.createdAt).toBeGreaterThanOrEqual(result.startedAt);
+      expect(first?.createdAt).toBeLessThanOrEqual(Date.now());
+    });
+
+    it("hands onChatRecovery the data the turn stashed", async () => {
+      const agent = await freshAgent("recover-stash");
+      const result = await agent.stallRecoveryForTest({
+        afterParts: 2,
+        stalledCalls: 1,
+        timeoutMs: 50,
+        stash: "the turn's own notes"
+      });
+
+      expect(result.recoveryCalls[0]?.recoveryData).toBe(
+        "the turn's own notes"
+      );
+    });
+
+    it("tells onChatRecovery of a turn interrupted before it streamed anything, with no partial", async () => {
+      const agent = await freshAgent("recover-pre-stream");
+      const result = await agent.stallRecoveryForTest({
+        afterParts: 0,
+        stalledCalls: 1,
+        timeoutMs: 50
+      });
+
+      expect(result.recoveryCalls.length).toBeGreaterThanOrEqual(1);
+      expect(result.recoveryCalls[0]?.partialText).toBe("");
+    });
+
+    it("names the interrupted turn as the root of its recovery", async () => {
+      const agent = await freshAgent("recover-root");
+      const result = await agent.stallRecoveryForTest({
+        afterParts: 2,
+        stalledCalls: 1,
+        timeoutMs: 50
+      });
+
+      const [first] = result.recoveryCalls;
+      expect(first?.recoveryRootRequestId).toEqual(expect.any(String));
+      expect(first?.recoveryRootRequestId).toBe(first?.requestId);
+    });
+  });
 });
