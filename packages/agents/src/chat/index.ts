@@ -261,6 +261,7 @@ export {
   inspectAgentToolTurn,
   recordAgentToolProgress,
   releasedAgentToolRunOfRequest,
+  releasedAgentToolRunWaiting,
   startAgentToolTurn,
   tailAgentToolTurn
 } from "./agent-tool-turns";

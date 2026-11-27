@@ -3508,6 +3508,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
    */
   async inFlightAgentToolRunAcrossUpgradeForTest(): Promise<{
     keptForItsTurn: boolean;
+    beforeItsTurn: string | undefined;
     status: string | undefined;
     summary: string | undefined;
     tablesLeft: string[];
@@ -3555,6 +3556,9 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       this.sql<{ n: number }>`
         SELECT COUNT(*) AS n FROM cf_ai_chat_agent_tool_runs
       `[0]?.n === 1;
+    // A parent that asks before the turn is carried sees it running.
+    const beforeItsTurn = (await this.inspectAgentToolRun("released-live"))
+      ?.status;
     await recoverInterruptedTurnsForTest(this);
     await this.tasks.wait("agent-tool:released-live", { timeoutMs: 10_000 });
     const inspection = await this.inspectAgentToolRun("released-live");
@@ -3564,6 +3568,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     `.map((row) => row.name);
     return {
       keptForItsTurn,
+      beforeItsTurn,
       status: inspection?.status,
       summary: inspection?.summary,
       tablesLeft

@@ -552,6 +552,32 @@ export async function tailAgentToolTurn(
 }
 
 /**
+ * Released run `runId`, still open in its version's table (its turn is
+ * still to be carried), or `null`.
+ */
+export function releasedAgentToolRunWaiting(
+  sql: SqlStorage,
+  table: string,
+  runId: string
+): { startedAt: number } | null {
+  const exists =
+    sql
+      .exec(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        table
+      )
+      .toArray().length > 0;
+  if (!exists) return null;
+  const row = sql
+    .exec(
+      `SELECT started_at FROM ${table} WHERE run_id = ? AND status IN ('running', 'starting') LIMIT 1`,
+      runId
+    )
+    .toArray()[0] as { started_at: number } | undefined;
+  return row ? { startedAt: row.started_at } : null;
+}
+
+/**
  * The open agent-tool run a released version kept for its turn
  * `requestId`, if any: the upgrade step that carries that turn starts its
  * run under {@link agentToolTurnId} of it, so the run carries on.
@@ -608,6 +634,9 @@ export async function carryForwardAgentToolRuns(
       )
       .toArray().length > 0;
   if (!exists(tables.runs)) return;
+  // Tasks' own reads below need it started (its tables migrated): this
+  // runs from a constructor.
+  await deps.tasks.get(agentToolTurnId(""));
   type ReleasedRun = {
     run_id: string;
     request_id: string | null;

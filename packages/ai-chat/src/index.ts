@@ -65,6 +65,7 @@ import {
   liveTurnsOf,
   recordAgentToolProgress,
   releasedAgentToolRunOfRequest,
+  releasedAgentToolRunWaiting,
   startAgentToolTurn,
   tailAgentToolTurn,
   clientResolvableToolNames,
@@ -516,6 +517,22 @@ export class AIChatAgent<
     // ai-chat 0.12.x: the agent-tool run tables → chat-turn runs
     // `agent-tool:<runId>`, then the tables are dropped.
     this._agentToolRunsCarried = this._carryForwardAgentToolChildRuns();
+  }
+
+  /**
+   * The carry-forward of the released run tables, finished. A carry that
+   * failed is logged, not thrown at every read: the runs it carried read
+   * as they are.
+   */
+  private async _agentToolCarry(): Promise<void> {
+    try {
+      await this._agentToolRunsCarried;
+    } catch (error) {
+      console.error(
+        "[AIChatAgent] agent-tool runs carry-forward failed",
+        error
+      );
+    }
   }
 
   /** The agent-tool runs a released version kept, onto this version's runs. */
@@ -2171,7 +2188,7 @@ export class AIChatAgent<
       eventDelivery?: AgentToolEventDelivery;
     }
   ): Promise<AgentToolRunInspection> {
-    await this._agentToolRunsCarried;
+    await this._agentToolCarry();
     const { runId } = options;
     if (options.signal?.aborted) {
       return {
@@ -2218,7 +2235,7 @@ export class AIChatAgent<
   }
 
   async cancelAgentToolRun(runId: string, reason?: unknown): Promise<void> {
-    await this._agentToolRunsCarried;
+    await this._agentToolCarry();
     await this._holdForStop(
       cancelAgentToolTurn(
         this._chatDeps(),
@@ -2232,8 +2249,17 @@ export class AIChatAgent<
     runId: string,
     _options?: { reconcile?: boolean }
   ): Promise<AgentToolRunInspection | null> {
-    await this._agentToolRunsCarried;
+    await this._agentToolCarry();
     const deps = this._chatDeps();
+    // A released run whose turn is still to be carried: it runs.
+    const waiting = releasedAgentToolRunWaiting(
+      this.ctx.storage.sql,
+      "cf_ai_chat_agent_tool_runs",
+      runId
+    );
+    if (waiting && !this.tasks.peek(agentToolTurnId(runId))) {
+      return { runId, status: "running", startedAt: waiting.startedAt };
+    }
     const inspection = inspectAgentToolTurn(deps, runId, () =>
       this._agentToolResult(
         runId,
@@ -2288,7 +2314,7 @@ export class AIChatAgent<
     runId: string,
     options?: { afterSequence?: number }
   ): Promise<AgentToolStoredChunk[]> {
-    await this._agentToolRunsCarried;
+    await this._agentToolCarry();
     return agentToolTurnChunks(this._chatDeps(), runId, options);
   }
 
@@ -2296,7 +2322,7 @@ export class AIChatAgent<
     runId: string,
     options?: { afterSequence?: number; signal?: AbortSignal }
   ): Promise<ReadableStream<AgentToolStoredChunk>> {
-    await this._agentToolRunsCarried;
+    await this._agentToolCarry();
     let tail = await tailAgentToolTurn(this._chatDeps(), runId, options);
     const id = agentToolTurnId(runId);
     const open = () => {

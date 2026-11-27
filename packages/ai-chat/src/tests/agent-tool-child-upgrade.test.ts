@@ -41,6 +41,7 @@ describe("agent-tool child rows a released version left", () => {
     );
     const result = await agent.inFlightAgentToolRunAcrossUpgradeForTest();
     expect(result.keptForItsTurn).toBe(true);
+    expect(result.beforeItsTurn).toBe("running");
     expect(result.status).toBe("completed");
     expect(result.summary).toBeTruthy();
     expect(result.tablesLeft).toEqual([]);
