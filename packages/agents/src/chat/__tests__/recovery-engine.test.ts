@@ -2189,38 +2189,115 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
     expect(reconciled).toBe(0);
   });
 
-  it("settles the recovery of a turn that had ended, without the budget, the app or the model", async () => {
-    // A recovery attempt's turn returned, and the isolate went away before
-    // the attempt recorded the outcome. Its run is replayed with `ended`.
-    // The budget is spent as well: a finished reply is not given up on.
-    const h = makeHarness({
-      seedExhausted: true,
-      stream: { streamId: "s1", streamStillActive: false }
+  describe("a recovery attempt's turn that had ended", () => {
+    // The turn returned, and the isolate went away before the attempt
+    // recorded the outcome. Its run is replayed with `ended`, which names
+    // the schedule the turn was the turn of.
+    function ended(incident: Partial<ChatRecoveryIncident> | null) {
+      const h = makeHarness({
+        stream: { streamId: "s1", streamStillActive: false }
+      });
+      const incidentId = "i-ended";
+      const key = chatRecoveryIncidentKey(incidentId);
+      const reconciled: Array<string | undefined> = [];
+      const streamsEnded: string[] = [];
+      h.adapter.turns = {
+        attemptScope: new AsyncLocalStorage(),
+        reconcileAgentToolChildRuns: async (endedRequestId?: string) =>
+          void reconciled.push(endedRequestId)
+      } as unknown as ChatRecoveryTurnBindings;
+      h.wake.onStreamEnded = async ({ requestId, streamStatus }) =>
+        void streamsEnded.push(`${requestId}:${streamStatus}`);
+      const stored = (): Promise<ChatRecoveryIncident | null> =>
+        h.adapter.getIncident(key);
+      return {
+        h,
+        reconciled,
+        streamsEnded,
+        stored,
+        run: async () => {
+          if (incident) {
+            await h.adapter.putIncident(key, {
+              incidentId,
+              requestId: "req-0",
+              recoveryRootRequestId: "req-0",
+              recoveryKind: "continue",
+              // The budget is spent: a finished reply is not given up on.
+              attempt: h.config.maxAttempts,
+              maxAttempts: h.config.maxAttempts,
+              status: "scheduled",
+              firstSeenAt: 0,
+              lastAttemptAt: 0,
+              lastProgressAt: 0,
+              progress: 0,
+              ...incident
+            });
+          }
+          await h.engine.recoverInterruptedTurn(
+            { ...h.turn, ended: { incidentId, delivery: 2 } },
+            h.wake
+          );
+        }
+      };
+    }
+    const untouched = (h: ReturnType<typeof ended>["h"]) => {
+      expect(h.calls).not.toContain("exhaust");
+      expect(h.calls).not.toContain("invokeOnChatRecovery");
+      expect(h.calls).not.toContain("schedule");
+      expect(h.calls).not.toContain("persist");
+    };
+
+    it("writes the outcome the attempt did not, without the budget, the app or the model", async () => {
+      const t = ended({ scheduleCount: 2, startedDelivery: 2 });
+      await t.run();
+
+      untouched(t.h);
+      expect(t.h.events.map((event) => event.type)).toEqual([
+        "chat:recovery:completed"
+      ]);
+      expect(await t.stored()).toBeNull();
+      expect(t.streamsEnded).toEqual(["req-1:completed"]);
+      // The turn's run is still open while it is replayed: the reconcile
+      // is told so.
+      expect(t.reconciled).toEqual(["req-1"]);
     });
-    const reconciled: Array<string | undefined> = [];
-    const streamsEnded: string[] = [];
-    h.adapter.turns = {
-      attemptScope: new AsyncLocalStorage(),
-      reconcileAgentToolChildRuns: async (endedRequestId?: string) =>
-        void reconciled.push(endedRequestId)
-    } as unknown as ChatRecoveryTurnBindings;
-    h.wake.onStreamEnded = async ({ requestId, streamStatus }) =>
-      void streamsEnded.push(`${requestId}:${streamStatus}`);
 
-    await h.engine.recoverInterruptedTurn({ ...h.turn, ended: true }, h.wake);
+    it("leaves the incident to a later schedule: the turn was cut off again and its next attempt runs elsewhere", async () => {
+      // The next attempt did not fit in the turn's run and got a run of its
+      // own. Completing the incident here would make that attempt stale,
+      // and the reply would never be continued.
+      const t = ended({ scheduleCount: 3, startedDelivery: 2 });
+      await t.run();
 
-    expect(h.calls).not.toContain("exhaust");
-    expect(h.calls).not.toContain("invokeOnChatRecovery");
-    expect(h.calls).not.toContain("schedule");
-    expect(h.calls).not.toContain("persist");
-    // The outcome the attempt did not write, once.
-    expect(h.events.map((event) => event.type)).toEqual([
-      "chat:recovery:completed"
-    ]);
-    expect(streamsEnded).toEqual(["req-1:completed"]);
-    // The turn's run is still open while it is replayed: the reconcile is
-    // told so.
-    expect(reconciled).toEqual(["req-1"]);
+      untouched(t.h);
+      expect(t.h.events).toEqual([]);
+      expect(await t.stored()).toMatchObject({
+        status: "scheduled",
+        scheduleCount: 3
+      });
+      // The reply is not finished: nothing is told that it ended.
+      expect(t.streamsEnded).toEqual([]);
+    });
+
+    it("leaves an incident that already has its outcome, or is gone", async () => {
+      const stopped = ended({
+        status: "skipped",
+        reason: "user_cancelled",
+        scheduleCount: 2,
+        startedDelivery: 2
+      });
+      await stopped.run();
+      untouched(stopped.h);
+      expect(stopped.h.events).toEqual([]);
+      expect(await stopped.stored()).toMatchObject({ status: "skipped" });
+
+      // The attempt recorded `completed` just before the reset.
+      const gone = ended(null);
+      await gone.run();
+      untouched(gone.h);
+      expect(gone.h.events).toEqual([]);
+      expect(gone.reconciled).toEqual(["req-1"]);
+    });
   });
 
   it("flips the incident to failed and rethrows when scheduling throws", async () => {

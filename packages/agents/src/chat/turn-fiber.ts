@@ -28,6 +28,7 @@
  * `@cloudflare/think`, not a public API.
  */
 
+import type { ChatRecoveryEndedTurn } from "./recovery-engine";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { wrapChatFiberSnapshot, type ChatFiberSnapshot } from "./recovery";
 import { isTurnStopped } from "./turn-stop";
@@ -77,11 +78,13 @@ export interface ChatTurnFiberHost {
    */
   inRecoveryAttempt?(): boolean;
   /**
-   * For a caller that is a recovery attempt: settles when that attempt has
-   * ended (`ChatRecoveryEngine.attemptEnded`). Optional, as
-   * {@link inRecoveryAttempt}.
+   * For a caller that is a recovery attempt: when that attempt ends, and
+   * the schedule it is a delivery of (`ChatRecoveryEngine.attemptEnded`).
+   * Optional, as {@link inRecoveryAttempt}.
    */
-  recoveryAttemptEnded?(): Promise<void> | undefined;
+  recoveryAttemptEnded?():
+    | { until: Promise<void>; schedule?: ChatRecoveryEndedTurn }
+    | undefined;
 }
 
 /** One turn to run as a fiber. */
@@ -267,7 +270,13 @@ export class ChatTurnFibers {
         ...(attemptEnded && {
           hold: () => {
             held();
-            return { ended: turnEnded(), until: attemptEnded };
+            return {
+              until: attemptEnded.until,
+              // A turn that threw is the attempt's to handle, not a turn
+              // that ended.
+              ...(turnEnded() &&
+                attemptEnded.schedule && { ended: attemptEnded.schedule })
+            };
           }
         })
       }

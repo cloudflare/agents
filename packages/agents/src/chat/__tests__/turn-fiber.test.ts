@@ -382,10 +382,13 @@ describe("ChatTurnFibers", () => {
       attemptEnds = resolve;
     });
     host.inRecoveryAttempt = () => true;
-    host.recoveryAttemptEnded = () => attemptEnded;
+    host.recoveryAttemptEnded = () => ({
+      until: attemptEnded,
+      schedule: { incidentId: "i1", delivery: 2 }
+    });
     // The run, as the turn's Task: it settles the caller, then holds.
     let runEnded = false;
-    let ended: boolean | undefined;
+    let ended: unknown;
     host.runTask = async (_input, closure) => {
       closure.settle.resolve(await closure.run((fn) => fn()));
       const held = closure.hold?.();
@@ -403,8 +406,9 @@ describe("ChatTurnFibers", () => {
       )
     ).resolves.toBe("reply");
     expect(runEnded).toBe(false);
-    // The turn returned: the run may record that it ended.
-    expect(ended).toBe(true);
+    // The turn returned: the run may record that it ended, and for which
+    // schedule of the incident.
+    expect(ended).toEqual({ incidentId: "i1", delivery: 2 });
 
     attemptEnds();
     await vi.waitFor(() => expect(runEnded).toBe(true));
@@ -412,8 +416,11 @@ describe("ChatTurnFibers", () => {
 
   it("does not call a recovery attempt's turn ended when it threw", async () => {
     host.inRecoveryAttempt = () => true;
-    host.recoveryAttemptEnded = () => Promise.resolve();
-    let ended: boolean | undefined;
+    host.recoveryAttemptEnded = () => ({
+      until: Promise.resolve(),
+      schedule: { incidentId: "i1", delivery: 2 }
+    });
+    let ended: unknown = "unread";
     host.runTask = async (_input, closure) => {
       closure.settle.resolve(await closure.run((fn) => fn()));
       ended = closure.hold?.().ended;
@@ -427,7 +434,7 @@ describe("ChatTurnFibers", () => {
       )
     ).rejects.toThrow("Network connection lost.");
     // The attempt handles the error: the turn is not a finished reply.
-    expect(ended).toBe(false);
+    expect(ended).toBeUndefined();
   });
 
   it("asks no run to hold for a turn outside a recovery attempt", async () => {

@@ -222,7 +222,7 @@ describe("createChatTurnTaskDefinition", () => {
         // Asked only once the caller has the turn's result.
         holds.push(resolve.mock.calls.length);
         return {
-          ended: true,
+          ended: { incidentId: "i1", delivery: 2 },
           until: new Promise<void>((done) => {
             recorded = done;
           })
@@ -244,7 +244,10 @@ describe("createChatTurnTaskDefinition", () => {
 
     expect(holds).toEqual([1]);
     // Kept with the run, for its replay after a reset.
-    expect(checkpoint.get("ended")).toBe("true");
+    expect(JSON.parse(checkpoint.get("ended")!)).toEqual({
+      incidentId: "i1",
+      delivery: 2
+    });
 
     recorded();
     await run;
@@ -255,7 +258,12 @@ describe("createChatTurnTaskDefinition", () => {
     for (const ended of [true, false]) {
       const recovered: unknown[] = [];
       const { step, checkpoint } = fakeStep(undefined);
-      if (ended) checkpoint.set("ended", "true");
+      if (ended) {
+        checkpoint.set(
+          "ended",
+          JSON.stringify({ incidentId: "i1", delivery: 2 })
+        );
+      }
       await createChatTurnTaskDefinition({
         ...hooks,
         storage: {
@@ -272,7 +280,9 @@ describe("createChatTurnTaskDefinition", () => {
         },
         step
       );
-      expect(recovered).toEqual([ended ? true : undefined]);
+      expect(recovered).toEqual([
+        ended ? { incidentId: "i1", delivery: 2 } : undefined
+      ]);
     }
   });
 

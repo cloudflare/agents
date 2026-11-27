@@ -9825,10 +9825,14 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     requestId: string;
     persisted: unknown;
     createdAt: number;
-    ended?: boolean;
+    ended?: { incidentId: string; delivery: number };
     attempt?: (attempt: ChatRecoveryAttemptInput) => boolean;
   }): Promise<void> {
-    if (await this._settlePersistedChatTurn(turn.requestId)) return;
+    // A turn that had ended still has its recovery to settle: the engine
+    // does that below, and asks the model nothing.
+    if ((await this._settlePersistedChatTurn(turn.requestId)) && !turn.ended) {
+      return;
+    }
     const { snapshot, user } = unwrapChatFiberSnapshot<"think-chat-turn">(
       "__cfThinkChatFiberSnapshot",
       turn.persisted,
@@ -9841,7 +9845,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         recoveryData: user,
         createdAt: turn.createdAt,
         attempt: turn.attempt,
-        ...(turn.ended && { ended: true })
+        ...(turn.ended && { ended: turn.ended })
       },
       this._chatRecoveryWakeHooks()
     );

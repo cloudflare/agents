@@ -1366,12 +1366,15 @@ describe("what an attempt records, and in what order", () => {
     // The run of the attempt's turn stays open until then: a reset before
     // the outcome is written must find a run to replay.
     let ended: Promise<void> | undefined;
+    let schedule: unknown = "unread";
     const seen: Array<{ incident: string; log: string[] }> = [];
     const t = setup({
       duringTurn: async ({ engine }) => {
         // The turn, in its own run, as the host's fiber wrapper starts it.
         await engine.turnBody(true, async () => {}, "turn-req")();
-        ended = engine.attemptEnded;
+        ended = engine.attemptEnded?.until;
+        // The scope here carries no schedule number: none is named.
+        schedule = engine.attemptEnded?.schedule;
         void ended?.then(() => {
           // A completed recovery deletes its incident.
           seen.push({
@@ -1386,6 +1389,7 @@ describe("what an attempt records, and in what order", () => {
     await ended;
 
     expect(ended).toBeInstanceOf(Promise);
+    expect(schedule).toBeUndefined();
     // Recorded before the run was told, and the reconcile after it is told
     // which turn just ended.
     expect(seen).toEqual([

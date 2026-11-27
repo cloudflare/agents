@@ -442,12 +442,18 @@ export interface InterruptedChatTurn {
    */
   attempt?: (attempt: ChatRecoveryAttemptInput) => boolean;
   /**
-   * The turn was a recovery attempt's and had returned: its reply is
-   * stored, and only the attempt's record of the outcome is missing (the
-   * isolate went away before it was written). Nothing is continued.
+   * The turn was a recovery attempt's and had returned: only the attempt's
+   * record of the outcome may be missing (the isolate went away before it
+   * was written). Nothing is continued. Names the schedule of the incident
+   * the turn was the turn of: the outcome is written only while that is
+   * still the incident's schedule. A turn that was cut off again left a
+   * later schedule, whose attempt owns the reply.
    */
-  ended?: boolean;
+  ended?: ChatRecoveryEndedTurn;
 }
+
+/** The schedule of an incident whose turn has returned. */
+export type ChatRecoveryEndedTurn = { incidentId: string; delivery: number };
 
 /**
  * One scheduled recovery attempt: the host callback, its payload, and how
@@ -768,28 +774,27 @@ export class ChatRecoveryEngine {
 
     if (turn.ended) {
       // The turn finished: it is not an interrupted attempt, so nothing is
-      // counted against the budget and the model is not asked again. The
-      // recovery it belonged to gets the outcome its attempt did not write.
-      const ended = streamStatus === "error" ? "error" : "completed";
+      // counted against the budget and the model is not asked again.
       try {
-        if (streamStillActive) await wake.completeRecoveredStream(streamId);
-        await wake.onStreamEnded?.({
-          requestId,
-          recoveryRootRequestId,
-          streamStatus: ended
-        });
-        const incidentId = chatRecoveryIncidentId({
-          requestId,
-          recoveryRootRequestId,
-          latestUserMessageId: snapshot?.latestUserMessageId,
-          recoveryKind
-        });
+        const { incidentId, delivery } = turn.ended;
         const incident = await this.readIncident(incidentId);
+        // Still the incident's schedule, with its turn started and nothing
+        // scheduled since: the attempt did not get to write the outcome. A
+        // later schedule (the turn was cut off again, and its next attempt
+        // runs elsewhere) owns the reply, and a settled incident has its
+        // outcome.
         if (
-          incident?.status === "scheduled" ||
-          incident?.status === "attempting" ||
-          incident?.status === "detected"
+          incident?.status === "scheduled" &&
+          incident.scheduleCount === delivery &&
+          incident.startedDelivery === delivery
         ) {
+          const ended = streamStatus === "error" ? "error" : "completed";
+          if (streamStillActive) await wake.completeRecoveredStream(streamId);
+          await wake.onStreamEnded?.({
+            requestId,
+            recoveryRootRequestId,
+            streamStatus: ended
+          });
           await this.updateIncident(
             incidentId,
             ended === "error" ? "failed" : "completed",
@@ -1720,16 +1725,27 @@ export class ChatRecoveryEngine {
   >();
 
   /**
-   * For code that runs inside a recovery attempt: settles when that attempt
-   * has ended, its turn's outcome recorded. The run of the attempt's turn
-   * stays open until then (`ChatTurnClosureEntry.hold`).
-   * `undefined` outside an attempt.
+   * For code that runs inside a recovery attempt: `until` settles when that
+   * attempt has ended, its turn's outcome recorded. The run of the
+   * attempt's turn stays open until then (`ChatTurnClosureEntry.hold`).
+   * `schedule` names the schedule of the incident the attempt is a delivery
+   * of, when it has a number. `undefined` outside an attempt.
    */
-  get attemptEnded(): Promise<void> | undefined {
-    const incidentId = this.adapter.turns?.attemptScope.getStore()?.incidentId;
-    return incidentId
+  get attemptEnded():
+    | { until: Promise<void>; schedule?: ChatRecoveryEndedTurn }
+    | undefined {
+    const scope = this.adapter.turns?.attemptScope.getStore();
+    const incidentId = scope?.incidentId;
+    const until = incidentId
       ? this.#runningAttempts.get(incidentId)?.ended
       : undefined;
+    if (!incidentId || !until) return undefined;
+    return {
+      until,
+      ...(scope?.delivery !== undefined && {
+        schedule: { incidentId, delivery: scope.delivery }
+      })
+    };
   }
 
   /**

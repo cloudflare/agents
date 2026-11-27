@@ -18,7 +18,10 @@ import { isTaskSuspension } from "../tasks/replay";
 import { TaskSettlement } from "../tasks/settlement";
 import type { TaskCheckpoint } from "../tasks/types";
 import type { ChatAdmissionInput, ChatAdmissionRecord } from "./admissions";
-import type { ChatRecoveryAttemptInput } from "./recovery-engine";
+import type {
+  ChatRecoveryAttemptInput,
+  ChatRecoveryEndedTurn
+} from "./recovery-engine";
 import {
   journalableAttempt,
   runChatRecoveryAttempt,
@@ -43,10 +46,11 @@ export type ChatTurnClosureEntry = {
    * For the turn of a recovery attempt, called once its caller is settled.
    * `until` settles once the attempt has recorded the turn's outcome: the
    * run stays open until then, so a reset before that write replays the
-   * run, which settles the recovery. It never rejects. `ended` is whether
-   * the turn returned, as opposed to throwing an error the attempt handles.
+   * run, which settles the recovery. It never rejects. `ended` is set when
+   * the turn returned, as opposed to throwing an error the attempt
+   * handles: the schedule of the incident the turn was the turn of.
    */
-  hold?(): { ended: boolean; until: Promise<void> };
+  hold?(): { ended?: ChatRecoveryEndedTurn; until: Promise<void> };
 };
 
 /**
@@ -138,9 +142,9 @@ export type ChatTurnTaskHooks = {
     createdAt: number;
     /**
      * The turn, a recovery attempt's, had ended: only the attempt's record
-     * of the outcome is missing (`InterruptedChatTurn.ended`).
+     * of the outcome may be missing (`InterruptedChatTurn.ended`).
      */
-    ended?: boolean;
+    ended?: ChatRecoveryEndedTurn;
     attempt: (attempt: ChatRecoveryAttemptInput) => boolean;
   }): Promise<void>;
   /** The host's recovery callbacks, bounded to their model handoff. */
@@ -172,6 +176,18 @@ export type ChatTurnTaskHooks = {
    */
   backingOff(runId: string, requestId: string, waiting: boolean): void;
 };
+
+/** The run's {@link ENDED} mark, when it holds one. */
+function endedTurn(step: TaskStep): ChatRecoveryEndedTurn | undefined {
+  const mark = step.checkpoint.get(ENDED);
+  if (!mark || typeof mark !== "object" || Array.isArray(mark)) {
+    return undefined;
+  }
+  const { incidentId, delivery } = mark;
+  return typeof incidentId === "string" && typeof delivery === "number"
+    ? { incidentId, delivery }
+    : undefined;
+}
 
 /** The Tasks lane the chat turns of an agent run on, one at a time. */
 export const CHAT_TURN_LANE = "chat";
@@ -363,7 +379,7 @@ export function createChatTurnTaskDefinition(
               requestId,
               persisted,
               createdAt: typeof beganAt === "number" ? beganAt : step.createdAt,
-              ...(step.checkpoint.get(ENDED) === true && { ended: true }),
+              ...(endedTurn(step) && { ended: endedTurn(step) }),
               attempt: (next) => {
                 if (!journalableAttempt(next)) return false;
                 scheduled = next;
@@ -423,7 +439,7 @@ export function createChatTurnTaskDefinition(
           if (held) {
             // Kept with the run: its replay must not ask the model to
             // continue a reply that is finished.
-            if (held.ended) step.checkpoint.set(ENDED, true);
+            if (held.ended) step.checkpoint.set(ENDED, held.ended);
             await held.until;
           }
         } catch (error) {
