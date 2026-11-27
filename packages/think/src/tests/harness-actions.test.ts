@@ -9,6 +9,8 @@ type ActionsStub = {
   toolStates(): Promise<string[]>;
   lastText(): Promise<string>;
   resetForTest(): Promise<void>;
+  grantForTest(permissions: string[] | undefined): Promise<void>;
+  toolOutputs(): Promise<unknown[]>;
   pendingApprovals(executionId?: string): Promise<PendingApproval[]>;
   approveExecution(executionId: string): Promise<unknown>;
   rejectExecution(
@@ -87,8 +89,50 @@ describe("harness-backed Think: actions that need a human", () => {
     await think.resetForTest().catch(() => {});
     const fresh = await agent(name);
     const [after] = await fresh.pendingApprovals();
-    expect(after).toEqual(before);
+    // The same, except the asking turn's id, which only memory knew.
+    expect(before.descriptor.requestId).not.toBe("");
+    expect({
+      ...after,
+      descriptor: { ...after.descriptor, requestId: "" }
+    }).toEqual({
+      ...before,
+      descriptor: { ...before.descriptor, requestId: "" }
+    });
     await fresh.approveExecution(after.executionId);
     expect(await fresh.charged()).toBe(1);
+  });
+
+  it("refuses an action whose permission the turn was not granted, without asking", async () => {
+    const think = await agent();
+    await think.grantForTest([]);
+    await think.say("charge 5");
+    expect(await think.pendingApprovals()).toEqual([]);
+    expect(await think.charged()).toBe(0);
+    expect(await think.toolOutputs()).toEqual([
+      expect.objectContaining({
+        error: expect.objectContaining({
+          name: "ActionAuthorizationError",
+          permissions: ["billing:charge"]
+        })
+      })
+    ]);
+  });
+
+  it("asks the turn's grant again for a call approved after a restart", async () => {
+    const name = crypto.randomUUID();
+    const think = await agent(name);
+    await think.say("charge 5");
+    const [pending] = await think.pendingApprovals();
+    // The grant is withdrawn while the call waits, then the object restarts.
+    await think.grantForTest([]);
+    await think.resetForTest().catch(() => {});
+    const fresh = await agent(name);
+    await fresh.approveExecution(pending.executionId);
+    expect(await fresh.charged()).toBe(0);
+    expect(await fresh.toolOutputs()).toEqual([
+      expect.objectContaining({
+        error: expect.objectContaining({ name: "ActionAuthorizationError" })
+      })
+    ]);
   });
 });

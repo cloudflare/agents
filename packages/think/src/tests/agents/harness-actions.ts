@@ -8,9 +8,14 @@ import type { LanguageModel } from "ai";
 import { z } from "zod";
 import { action, type Action } from "../../actions";
 import { Think } from "../../harness/think";
-import type { StreamCallback } from "../../think";
+import type {
+  ActionAuthorizationDecision,
+  StreamCallback,
+  TurnContext
+} from "../../think";
 
 const COUNT_KEY = "test:charged";
+const GRANT_KEY = "test:grant";
 
 function finish(controller: ReadableStreamDefaultController, reason: string) {
   controller.enqueue({
@@ -101,6 +106,27 @@ export class ThinkHarnessActionsAgent extends Think {
         execute: run
       })
     };
+  }
+
+  override authorizeTurn(_ctx: TurnContext): ActionAuthorizationDecision {
+    const grant = this.ctx.storage.kv.get<string[]>(GRANT_KEY);
+    return grant === undefined
+      ? true
+      : { allowed: true, grantedPermissions: grant };
+  }
+
+  /** The permissions the next turn is granted; `undefined` grants all. */
+  grantForTest(permissions: string[] | undefined): void {
+    if (permissions === undefined) this.ctx.storage.kv.delete(GRANT_KEY);
+    else this.ctx.storage.kv.put(GRANT_KEY, permissions);
+  }
+
+  async toolOutputs(): Promise<unknown[]> {
+    return this.messages.flatMap((message) =>
+      message.parts.flatMap((part) =>
+        "toolCallId" in part && "output" in part ? [part.output] : []
+      )
+    );
   }
 
   async say(text: string): Promise<void> {

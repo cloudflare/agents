@@ -66,7 +66,11 @@ import { fetchExtension } from "./extensions/fetch";
 import { skillsExtension } from "./extensions/skills";
 import { sandboxedExtensions } from "./extensions/sandboxed";
 import { actionsExtension } from "./extensions/actions";
-import { compileActionTools, type ActionToolHost } from "../action-tools";
+import {
+  compileActionTools,
+  normalizeActionAuthorization,
+  type ActionToolHost
+} from "../action-tools";
 import { createEffectState, registerEffectTask } from "../action-ledger";
 import { runLedgeredAction } from "../action-run";
 import type {
@@ -74,7 +78,8 @@ import type {
   ActionApprovalDescriptor,
   ActionAuthorizationContext,
   ActionAuthorizationDecision,
-  CompiledActionMetadata
+  CompiledActionMetadata,
+  NormalizedActionAuthorization
 } from "../actions";
 import {
   callThinkHostApi,
@@ -636,6 +641,22 @@ export class Think<
         beforeToolCall: async (call) => {
           // The step's chunks reach extensions before its tool calls do.
           await this.#chunkHooks;
+          // A call approved after a restart runs before any model call of
+          // its turn: the turn's grant is asked for here.
+          await this.#authorizeTurn(
+            call.operationId,
+            async () =>
+              ({
+                system: this.getSystemPrompt(),
+                messages: await convertToModelMessages(this.messages, {
+                  ignoreIncompleteToolCalls: true
+                }),
+                tools: {},
+                model: this.resolveModel(await this.getModel()),
+                continuation: true,
+                requestId: call.operationId
+              }) as unknown as TurnContext
+          );
           const decision = await this.#beforeToolCall(call);
           // As in Think: extensions hear of a call that runs, with the
           // input it runs with.
@@ -819,6 +840,7 @@ export class Think<
         this.#wakeStableWaiters();
         this.#running = undefined;
         this.#ownTurn = undefined;
+        this.#actionTurn = undefined;
         this.#extensionTurn = undefined;
         this.#turnMaxSteps = undefined;
       }
@@ -1107,12 +1129,57 @@ export class Think<
   }
 
   /**
-   * Authorize a single action call, as on Think. The default allows it.
+   * Authorize action permissions for the current turn, as on Think.
+   * Returning `true` grants all of them; `grantedPermissions` limits the
+   * default `authorizeAction` to that set.
    */
-  authorizeAction(
-    _ctx: ActionAuthorizationContext
+  authorizeTurn(
+    _ctx: TurnContext
   ): ActionAuthorizationDecision | Promise<ActionAuthorizationDecision> {
     return true;
+  }
+
+  /**
+   * Authorize a single action call, as on Think. The default enforces the
+   * grant `authorizeTurn` returned for the turn.
+   */
+  authorizeAction(
+    ctx: ActionAuthorizationContext
+  ): ActionAuthorizationDecision | Promise<ActionAuthorizationDecision> {
+    const turn = this.#actionTurn?.authorization ?? { allowed: true };
+    if (!turn.allowed) return { allowed: false, reason: turn.reason };
+    if (turn.grantedPermissions === undefined) return true;
+    const granted = new Set(turn.grantedPermissions);
+    const missing = ctx.requiredPermissions.filter(
+      (permission) => !granted.has(permission)
+    );
+    if (missing.length === 0) return true;
+    return {
+      allowed: false,
+      reason: `Missing required permission: ${missing.join(", ")}`
+    };
+  }
+
+  /**
+   * The running operation and what `authorizeTurn` granted it. Set before
+   * its first model call, or, for a call approved after a restart, before
+   * that call runs.
+   */
+  #actionTurn:
+    | { operationId: string; authorization: NormalizedActionAuthorization }
+    | undefined;
+
+  async #authorizeTurn(
+    operationId: string,
+    context: () => Promise<TurnContext>
+  ): Promise<void> {
+    if (this.#actionTurn?.operationId === operationId) return;
+    this.#actionTurn = {
+      operationId,
+      authorization: normalizeActionAuthorization(
+        await this.authorizeTurn(await context())
+      )
+    };
   }
 
   /** As on Think: how long a stale claim of a keyed action is held. */
@@ -1122,11 +1189,12 @@ export class Think<
   readonly #actionToolHost: ActionToolHost = {
     agent: this as unknown as LegacyThink,
     env: () => this.env as Cloudflare.Env,
-    requestId: () => "",
+    requestId: () => this.#actionTurn?.operationId ?? "",
     // An approved call runs without asking again: the harness decides that
     // from its answered approval.
     isApproved: () => false,
-    grantedPermissions: () => undefined,
+    grantedPermissions: () =>
+      this.#actionTurn?.authorization.grantedPermissions,
     authorizeAction: (ctx) => this.authorizeAction(ctx),
     recordApprovalDescriptor: (toolCallId, descriptor) =>
       this.#actionDescriptors.set(toolCallId, descriptor),
@@ -2373,6 +2441,19 @@ export class Think<
       this.#extensionTurn = { operationId: turn.operationId, changes: kept };
     }
     this.#turnMaxSteps = config.maxSteps;
+    await this.#authorizeTurn(
+      turn.operationId,
+      async () =>
+        ({
+          ...context,
+          ...(config.system !== undefined && { system: config.system }),
+          ...(config.messages !== undefined && { messages: config.messages }),
+          model:
+            config.model !== undefined
+              ? this.resolveModel(config.model)
+              : resolveDefault()
+        }) as unknown as TurnContext
+    );
     // Then `beforeStep`, before each model call, as the AI SDK's
     // `prepareStep` runs in Think. Its fields win for this call.
     const self = this;
