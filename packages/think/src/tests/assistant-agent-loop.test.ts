@@ -859,6 +859,8 @@ describe("Think — agentic loop", () => {
       expect(prompts.length).toBe(3);
       // Step 3 still sends the compacted head, with both tool steps.
       expect(prompts[2].hasSummary).toBe(true);
+      // The compacted-away question is gone, not just a summary added.
+      expect(prompts[2].prompt).not.toContain("earlier question");
       expect(prompts[2].toolCalls.length).toBe(2);
       expect(prompts[2].toolResults.length).toBe(2);
     });
