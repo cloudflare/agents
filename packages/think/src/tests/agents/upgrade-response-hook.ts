@@ -34,24 +34,25 @@ export class ThinkUpgradeResponseHookAgent extends Think {
   /**
    * Leave what think@0.24.0 left when a reset fell between storing a reply
    * and its hook: the question and the reply stored, and the hook owed under
-   * its key, shaped as `_rememberPendingResponseHook` wrote it.
+   * its key, shaped as `_rememberPendingResponseHook` wrote it. `tag` names
+   * the turn: `u-<tag>`, `a-<tag>` and `r-<tag>`.
    */
-  async leaveReleasedOwedHookForTest(): Promise<void> {
+  async leaveReleasedOwedHookForTest(tag = "owed"): Promise<void> {
     await this.session.appendMessage({
-      id: "u-owed",
+      id: `u-${tag}`,
       role: "user",
       parts: [{ type: "text", text: "hello" }]
     } as UIMessage);
     await this.session.appendMessage({
-      id: "a-owed",
+      id: `a-${tag}`,
       role: "assistant",
       parts: [{ type: "text", text: "the reply" }]
     } as UIMessage);
     await this.ctx.storage.put(
-      `${RELEASED_PENDING_RESPONSE_HOOK_PREFIX}r-owed`,
+      `${RELEASED_PENDING_RESPONSE_HOOK_PREFIX}r-${tag}`,
       {
-        requestId: "r-owed",
-        messageId: "a-owed",
+        requestId: `r-${tag}`,
+        messageId: `a-${tag}`,
         continuation: false,
         status: "completed"
       }

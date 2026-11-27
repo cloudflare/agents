@@ -24,8 +24,19 @@ describe("Think upgraded over the response hook a release owed", () => {
     );
     expect(await (await agent()).owedHookLeftForTest()).toBe(false);
 
-    // Another restart fires nothing more.
+    // Another restart fires only what is owed then. A second owed hook is
+    // the barrier: once it has fired, the start's replay has run.
+    await (await agent()).leaveReleasedOwedHookForTest("later");
     await (await agent()).resetIsolateForTest().catch(() => {});
-    expect(await (await agent()).responsesForTest()).toHaveLength(1);
+    await vi.waitFor(
+      async () => {
+        expect(await (await agent()).responsesForTest()).toHaveLength(2);
+      },
+      { timeout: 5_000, interval: 50 }
+    );
+    expect(await (await agent()).responsesForTest()).toEqual([
+      { requestId: "r-owed", messageId: "a-owed", status: "completed" },
+      { requestId: "r-later", messageId: "a-later", status: "completed" }
+    ]);
   });
 });

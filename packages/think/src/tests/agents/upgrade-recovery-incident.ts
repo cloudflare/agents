@@ -55,7 +55,7 @@ export class ThinkUpgradeRecoveryIncidentAgent extends Think {
     const incident = (id: string, lastAttemptAt: number) => ({
       incidentId: id,
       requestId: `req-${id}`,
-      recoveryKind: "interrupted",
+      recoveryKind: "continue",
       attempt: 1,
       maxAttempts: 10,
       status: "scheduled",
