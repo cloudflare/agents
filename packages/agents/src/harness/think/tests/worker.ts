@@ -34,6 +34,8 @@ const GATE_RUNS_KEY = "test:gate:runs";
 const RELEASE_KEY = "test:gate:release";
 const DANGEROUS_RUNS_KEY = "test:dangerous:runs";
 const MULTIPLY_RUNS_KEY = "test:multiply:runs";
+const TOOL_ATTEMPTS_KEY = "test:tool-attempts";
+const THROW_AFTER_KEY = "test:throw-after";
 const RECOVERY_PARTIAL_KEY = "test:recovery:partial";
 const SYSTEM_KEY = "test:system";
 const NOTE_IN_BEFORE_TURN_KEY = "test:note-in-before-turn";
@@ -319,7 +321,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
           ...(activeTools && { activeTools })
         };
       },
-      beforeToolCall: ({ toolName }) => {
+      beforeToolCall: ({ toolName, attempt }) => {
+        this.#recordAttempt(`before ${toolName}:${attempt}`);
         const blocked = this.ctx.storage.kv.get<string>(BLOCK_KEY);
         if (blocked === toolName) {
           return { action: "block", reason: "blocked by policy" };
@@ -329,8 +332,12 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         }
         return undefined;
       },
-      afterToolCall: async () => {
+      afterToolCall: async ({ toolName, attempt }) => {
+        this.#recordAttempt(`after ${toolName}:${attempt}`);
         const kv = this.ctx.storage.kv;
+        if (kv.get<string>(THROW_AFTER_KEY) === toolName) {
+          throw new Error(`afterToolCall failed for ${toolName}`);
+        }
         if (!kv.get(HOLD_AFTER_KEY)) return;
         kv.put(AFTER_KEY, "entered");
         while (kv.get(HOLD_AFTER_KEY)) {
@@ -437,6 +444,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       ];
     } else if (last?.role === "tool") {
       parts = textReply(`tool said: ${toolResultText(last.content)}`);
+    } else if (
+      last?.role === "assistant" &&
+      firstText === "slow then multiply"
+    ) {
+      parts = callReply([{ name: "multiply", input: { value: 1 } }]);
     } else if (last?.role === "assistant") {
       parts = textReply("continued");
     } else {
@@ -504,6 +516,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         parts = callReply([
           { name: "ask", input: { question: "again?" }, id: "reused-call" }
         ]);
+      } else if (text === "slow then multiply") {
+        return this.#slow(3);
       } else if (text === "slow") {
         return this.#slow(12);
       } else if (text === "slow-short") {
@@ -548,6 +562,14 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         controller.close();
       }
     });
+  }
+
+  #recordAttempt(entry: string): void {
+    const kv = this.ctx.storage.kv;
+    kv.put(TOOL_ATTEMPTS_KEY, [
+      ...(kv.get<string[]>(TOOL_ATTEMPTS_KEY) ?? []),
+      entry
+    ]);
   }
 
   async #gate(): Promise<string> {
@@ -1041,6 +1063,16 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   gateRuns(): number {
     return this.ctx.storage.kv.get<number>(GATE_RUNS_KEY) ?? 0;
+  }
+
+  /** Each tool hook call, as `before|after <tool>:<attempt>`. */
+  toolAttempts(): string[] {
+    return this.ctx.storage.kv.get<string[]>(TOOL_ATTEMPTS_KEY) ?? [];
+  }
+
+  /** Make `afterToolCall` throw for `toolName`. */
+  throwAfterToolCall(toolName: string): void {
+    this.ctx.storage.kv.put(THROW_AFTER_KEY, toolName);
   }
 
   multiplyRuns(): number {

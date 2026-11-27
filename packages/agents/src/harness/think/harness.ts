@@ -1927,24 +1927,30 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           );
           const stallTimeoutMs =
             this.#options.recovery?.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
-          for await (const chunk of untilAborted(
-            iterateWithStallWatchdog(model.stream, stallTimeoutMs, () =>
-              stall.abort(new ChatStreamStalledError("Model stream stalled"))
-            ),
-            signal
-          )) {
-            if (chunk.type === "start") {
-              if (started) continue;
-              started = true;
-            } else if (chunk.type === "finish") {
-              finish = chunk;
-              continue;
-            } else if (chunk.type === "error" || chunk.type === "abort") {
-              // The model's error is thrown below, out of band.
-              continue;
+          try {
+            for await (const chunk of untilAborted(
+              iterateWithStallWatchdog(model.stream, stallTimeoutMs, () =>
+                stall.abort(new ChatStreamStalledError("Model stream stalled"))
+              ),
+              signal
+            )) {
+              if (chunk.type === "start") {
+                if (started) continue;
+                started = true;
+              } else if (chunk.type === "finish") {
+                finish = chunk;
+                continue;
+              } else if (chunk.type === "error" || chunk.type === "abort") {
+                // The model's error is thrown below, out of band.
+                continue;
+              }
+              chunks.push(chunk);
+              yield chunk;
             }
-            chunks.push(chunk);
-            yield chunk;
+          } catch (error) {
+            // The watchdog ends a silent stream by throwing: that is the
+            // stall, handled below. Anything else is not the model's.
+            if (!stall.signal.aborted) throw error;
           }
           if (signal.aborted) return;
           const stalled = stall.signal.aborted;
@@ -2283,6 +2289,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
               if (!tool) {
                 return {
                   input: asJson(input),
+                  attempt,
                   outcome: {
                     ok: false,
                     errorText: `Tool "${toolName}" is no longer available.`
@@ -2296,6 +2303,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
               ) {
                 return {
                   input: asJson(input),
+                  attempt,
                   outcome: { ok: false, errorText: INTERRUPTED_TOOL_ERROR }
                 } as TaskJson;
               }
@@ -2310,12 +2318,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
               if (decision?.action === "block") {
                 return {
                   input: asJson(input),
+                  attempt,
                   outcome: { ok: false, errorText: decision.reason }
                 } as TaskJson;
               }
               if (decision?.action === "substitute") {
                 return {
                   input: asJson(input),
+                  attempt,
                   outcome: { ok: true, output: asJson(decision.output) }
                 } as TaskJson;
               }
@@ -2341,12 +2351,17 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
               // Journaled as JSON: an output's own `toJSON` decides its form.
               return {
                 input: asJson(input),
+                attempt,
                 outcome: outcome.ok
                   ? { ok: true, output: asJson(outcome.output) }
                   : outcome
               } as TaskJson;
             }
-          )) as unknown as { outcome: ToolOutcome; input: unknown };
+          )) as unknown as {
+            outcome: ToolOutcome;
+            input: unknown;
+            attempt?: number;
+          };
           if (signal.aborted) return;
           await this.#extensions.hook("afterToolCall", {
             session,
@@ -2354,7 +2369,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             toolCallId,
             toolName,
             input: recorded.input,
-            attempt: call.attempt,
+            attempt: recorded.attempt ?? 1,
             ...recorded.outcome
           });
           finished.push({ toolCallId, outcome: recorded.outcome });
@@ -2380,6 +2395,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         current = withToolPart(current, toolCallId, (part) =>
           withOutcome(part, outcome)
         );
+        // A sibling that fails the turn after this does not lose it.
+        turn.live.reply = current;
         yield outcome.ok
           ? {
               type: "tool-output-available",

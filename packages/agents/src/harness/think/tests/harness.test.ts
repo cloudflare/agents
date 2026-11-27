@@ -1056,6 +1056,45 @@ describe("ThinkHarness durability", () => {
     expect(await stub.branches(question ?? "")).toBe(2);
   });
 
+  it("recovers a model call that stalls, instead of ending the turn", async () => {
+    const stub = fresh();
+    await stub.setStallTimeout(50);
+    const receipt = await stub.submit("slow");
+    // The stall is an interruption: the next attempt, after a backoff,
+    // continues the reply.
+    const result = await stub.wait(receipt.operationId);
+    expect(result.status).toBe("done");
+    expect((await stub.messages())[1]).toMatch(/^assistant: x+ continued$/);
+  });
+
+  it("keeps a finished tool's result when the other call of its step fails the turn", async () => {
+    const stub = fresh();
+    await stub.throwAfterToolCall("gate");
+    const receipt = await stub.submit("multiply and gate");
+    await stub.gateStarted(1);
+    await stub.streamed("tool-output-available");
+    await stub.release();
+    expect((await stub.wait(receipt.operationId)).status).toBe("unanswered");
+    expect((await stub.messages())[1]).toMatch(
+      /^assistant: \[multiply output-available\]/
+    );
+  });
+
+  it("gives a tool's hooks the same attempt, also on a later attempt of its turn", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const receipt = await stub.submit("slow then multiply");
+    await stub.streamed("text-delta");
+
+    stub = await crash(name);
+    await runDurableObjectAlarm(stub);
+    expect((await stub.wait(receipt.operationId)).status).toBe("done");
+    expect(await stub.toolAttempts()).toEqual([
+      "before multiply:1",
+      "after multiply:1"
+    ]);
+  });
+
   it("does not run a finished tool again after a reset in the model call that follows it", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);
