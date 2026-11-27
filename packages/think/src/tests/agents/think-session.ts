@@ -4618,13 +4618,13 @@ export class ThinkTestAgent extends Think {
       // Think has accepted it by the time it reports the start.
       if ((this as unknown as { _turnQueue?: unknown })._turnQueue) {
         const deadline = Date.now() + 5000;
-        while (Date.now() < deadline) {
+        for (;;) {
           const [row] = this.sql<{ count: number }>`
             SELECT COUNT(*) AS count FROM cf_agents_task_runs
             WHERE lane = 'chat' AND status = 'pending'
           `;
           if ((row?.count ?? 0) > 0) break;
-          if (Date.now() >= deadline - 5) {
+          if (Date.now() >= deadline) {
             throw new Error("the second chat never waited on the lane");
           }
           await new Promise((resolve) => setTimeout(resolve, 5));
