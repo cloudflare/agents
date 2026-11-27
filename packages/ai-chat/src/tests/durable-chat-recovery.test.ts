@@ -386,6 +386,7 @@ describe("onChatRecovery", () => {
       agentStub as unknown as {
         turnAfterPlatformTransientForTest(): Promise<{
           retryInMs: number | null;
+          alarmInMs: number | null;
           claimed: boolean;
           reply: boolean;
         }>;
@@ -396,6 +397,10 @@ describe("onChatRecovery", () => {
     expect(turn.claimed).toBe(false);
     expect(turn.retryInMs).toBeGreaterThanOrEqual(30_000);
     expect(turn.retryInMs).toBeLessThan(60_000);
+    // The object's alarm is set to wake it by then, with nothing moved by
+    // the test.
+    expect(turn.alarmInMs).not.toBeNull();
+    expect(turn.alarmInMs).toBeLessThanOrEqual(turn.retryInMs ?? 0);
     expect(turn.reply).toBe(true);
   }, 30_000);
 

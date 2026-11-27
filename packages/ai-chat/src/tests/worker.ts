@@ -3642,6 +3642,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
    */
   async turnAfterPlatformTransientForTest(): Promise<{
     retryInMs: number | null;
+    alarmInMs: number | null;
     claimed: boolean;
     reply: boolean;
   }> {
@@ -3670,7 +3671,11 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     const waiting = run();
-    if (!waiting) return { retryInMs: null, claimed: false, reply: false };
+    if (!waiting) {
+      return { retryInMs: null, alarmInMs: null, claimed: false, reply: false };
+    }
+    // The object's real alarm, before the test moves anything.
+    const alarm = await this.ctx.storage.getAlarm();
     const due = Date.now() - 1;
     this
       .sql`UPDATE cf_agents_task_runs SET next_at = ${due} WHERE run_id = ${waiting.run_id}`;
@@ -3684,6 +3689,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     }
     return {
       retryInMs: waiting.next_at - before,
+      alarmInMs: alarm === null ? null : alarm - before,
       claimed: waiting.generation !== null,
       reply: this.messages.at(-1)?.role === "assistant"
     };
