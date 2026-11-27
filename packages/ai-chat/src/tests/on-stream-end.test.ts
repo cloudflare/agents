@@ -614,6 +614,16 @@ describe("onChatResponse error resilience", () => {
     expect(errorDone).toBeDefined();
     expect(errorDone!.error).toBe(true);
 
+    // The hook ran for the failed request (it marks the stream, then
+    // throws); it runs after the done frame.
+    const agentStub = await getAgentByName(env.ResponseThrowingAgent, room);
+    await vi.waitFor(
+      async () => {
+        expect(await agentStub.getStreamCompleted()).toBe(true);
+      },
+      { timeout: 5000, interval: 20 }
+    );
+
     // Agent should still be healthy
     const done2 = waitForDone(ws, "req-after-err");
     ws.send(
