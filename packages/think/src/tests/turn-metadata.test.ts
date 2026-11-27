@@ -76,6 +76,21 @@ describe("turn metadata", () => {
     expect(await agent.getActiveTurnMetadataForTest()).toBeUndefined();
   });
 
+  it("stamps no channel for an empty channel name, as Think", async () => {
+    const agent = await freshAgent(`turn-meta-empty-${crypto.randomUUID()}`);
+    await agent.runChatTurnForTest({
+      input: "hello",
+      channel: "",
+      metadata: { actingUserId: "user-789" }
+    });
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const metadata = messages.find((m) => m.role === "user")?.metadata as
+      | Record<string, unknown>
+      | undefined;
+    expect(metadata && "channel" in metadata).toBe(false);
+    expect(metadata?.turnMetadata).toEqual({ actingUserId: "user-789" });
+  });
+
   it("strips reserved metadata keys a client's chat request sends", async () => {
     const room = crypto.randomUUID();
     const res = await exports.default.fetch(
