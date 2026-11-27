@@ -507,7 +507,9 @@ export class PerfAgent extends Agent<Env> {
       },
       schedule: async () => {
         await this.schedule(1, "perfTick");
-        await sleep(2500);
+        // The 1 s schedule's tick, bounded at 10 s.
+        const deadline = Date.now() + 10_000;
+        while (this.ticks === 0 && Date.now() < deadline) await sleep(20);
         return this.ticks;
       }
     };
