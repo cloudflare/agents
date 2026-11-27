@@ -103,12 +103,12 @@ export async function executeTool(
     const streams = isAsyncIterable(returned) || resolvesToStream(tool);
     const result: unknown = await returned;
     if (!isAsyncIterable(result)) return { ok: true, output: result };
+    // As in the AI SDK, each value a streaming tool yields is reported as
+    // it comes; the last is also its result.
     let last: unknown;
-    let seen = false;
     for await (const output of result) {
-      if (seen && streams) options.onPreliminary(last);
+      if (streams) options.onPreliminary(output);
       last = output;
-      seen = true;
     }
     return { ok: true, output: last };
   } catch (error) {
