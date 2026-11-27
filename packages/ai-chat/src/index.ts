@@ -1252,6 +1252,19 @@ export class AIChatAgent<
       hooks: {
         onResponse: async (result) => {
           this._shownQueued.delete(result.requestId);
+          // SEAM: a turn an agent-tool run started before a reset has no
+          // runner left to settle the run: once the turn leaves the lane,
+          // the run is settled from what the turn stored.
+          const toolRun = this._agentToolRuns.runForRequest(result.requestId);
+          if (toolRun) {
+            const run = this._agentToolRuns.store.read(toolRun);
+            if (run && this._agentToolRuns.isStale(run)) {
+              void this.tasks
+                .wait(result.requestId)
+                .then(() => this._agentToolRuns.reconcileStale(toolRun))
+                .catch(() => {});
+            }
+          }
           const waiter = this._turnWaiters.get(result.requestId);
           // No caller waits on it (a tab's request): nothing gets it.
           if (!waiter) this._onErrorReplaced.delete(result.requestId);
