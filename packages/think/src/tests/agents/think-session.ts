@@ -10946,6 +10946,23 @@ export class ThinkToolsTestAgent extends Think {
     this._turnStopCondition = hasToolCall("echo");
   }
 
+  /** Stop once a step's results hold echo's output. */
+  async stopOnEchoResultForTest(): Promise<void> {
+    this._turnStopCondition = ({ steps }) =>
+      steps
+        .at(-1)
+        ?.toolResults.some((result) =>
+          String(result.output).startsWith("echo")
+        ) ?? false;
+  }
+
+  /** Stop once the steps' token usage reaches a budget. */
+  async stopOnTokenBudgetForTest(budget: number): Promise<void> {
+    this._turnStopCondition = ({ steps }) =>
+      steps.reduce((total, step) => total + (step.usage.totalTokens ?? 0), 0) >=
+      budget;
+  }
+
   private _turnStopCondition: TurnConfig["stopWhen"];
   private _repairToolCalls = false;
   private _invalidToolInput = false;
