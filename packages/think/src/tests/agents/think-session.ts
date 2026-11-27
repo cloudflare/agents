@@ -1338,6 +1338,35 @@ function createAbortAwareMockModel(
   } as LanguageModel;
 }
 
+/** A model that streams `text`, then reports `message` as an in-band error. */
+function createInBandErrorAfterTextMockModel(
+  text: string,
+  message: string
+): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-in-band-error-after-text",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    async doStream() {
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "text-start", id: "t-1" });
+          controller.enqueue({ type: "text-delta", id: "t-1", delta: text });
+          controller.enqueue({ type: "text-end", id: "t-1" });
+          controller.enqueue({ type: "error", error: new Error(message) });
+          controller.close();
+        }
+      });
+      return { stream };
+    }
+  } as LanguageModel;
+}
+
 /** A model that streams two chunks of `text`, then fails with `message`. */
 function createMidStreamErrorMockModel(
   text: string,
@@ -4549,6 +4578,56 @@ export class ThinkTestAgent extends Think {
    * from `beforeTurn`, so the turn fails the way a provider's would, on
    * Think and on the harness-backed Think alike.
    */
+  /** The response hooks of a chat turn the chat is cleared under. */
+  async clearDuringChatForTest(): Promise<{
+    responses: string[];
+    done: boolean;
+    error: string | null;
+  }> {
+    this._responseLog = [];
+    let markStarted = () => {};
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    this._turnConfigOverride = {
+      model: createAbortAwareMockModel("stream", () => markStarted())
+    };
+    const callback = new TestCollectingCallback();
+    try {
+      const turn = this.chat("cleared under me", callback);
+      await started;
+      await this.clearMessages();
+      await turn;
+      await this._waitForTurnQueueIdleForTest();
+      return {
+        responses: this._responseLog.map((response) => response.status),
+        done: callback.doneCalled,
+        error: callback.errorMessage ?? null
+      };
+    } finally {
+      this._turnConfigOverride = null;
+    }
+  }
+
+  /**
+   * A turn whose model writes some text, then reports an in-band error, from
+   * the model `beforeTurn` gives: public on both configs.
+   */
+  async testChatWithInBandModelError(
+    text: string,
+    errorMessage: string
+  ): Promise<TestChatResult> {
+    this._responseLog = [];
+    this._turnConfigOverride = {
+      model: createInBandErrorAfterTextMockModel(text, errorMessage)
+    };
+    try {
+      return await this.testChat("trigger in-band error");
+    } finally {
+      this._turnConfigOverride = null;
+    }
+  }
+
   async testChatWithModelError(errorMessage?: string): Promise<TestChatResult> {
     this._turnConfigOverride = {
       model: createMidStreamErrorMockModel(

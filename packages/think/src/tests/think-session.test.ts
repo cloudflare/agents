@@ -1404,6 +1404,39 @@ describe("Think — error handling", () => {
     expect(stored).toHaveLength(4);
   });
 
+  // The successor of "should persist partial assistant message on error"
+  // through public behaviour: the model reports the error in-band.
+  it("tells a chat the chat was cleared under it, with no response hook", async () => {
+    const agent = await freshAgent("clear-during-chat");
+    expect(await agent.clearDuringChatForTest()).toEqual({
+      responses: [],
+      done: false,
+      error: "The chat was cleared before the turn finished."
+    });
+  });
+
+  it("keeps the partial reply of a turn whose model reports an error", async () => {
+    const agent = await freshAgent("err-partial-model");
+
+    const result = await agent.testChatWithInBandModelError(
+      "partial response",
+      "Mid-stream failure"
+    );
+    expect(result.done).toBe(false);
+    expect(result.error).toContain("Mid-stream failure");
+
+    const history = (await agent.getStoredMessages()) as UIMessage[];
+    expect(history.map((message) => message.role)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    expect(history[1].parts).toContainEqual(
+      expect.objectContaining({ type: "text", text: "partial response" })
+    );
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.map((entry) => entry.status)).toEqual(["error"]);
+  });
+
   // The successor of the test above through public behaviour: the failure
   // is the model's own, from the model `beforeTurn` gives.
   it("answers the next turn after a model failure", async () => {

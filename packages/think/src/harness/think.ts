@@ -698,6 +698,16 @@ export class Think<
           ) {
             return;
           }
+          // As on Think, a turn the chat was cleared under gets no response
+          // hook; its `chat()` caller is told of the clear instead.
+          if (
+            end.status === "unanswered" &&
+            end.reason === "aborted" &&
+            this.#clearing > 0
+          ) {
+            this.#cleared.add(end.operationId);
+            return;
+          }
           await this.onChatResponse({
             // As on Think, a turn that ended before it wrote anything still
             // reports, with an empty assistant message.
@@ -1228,9 +1238,19 @@ export class Think<
   }
 
   async clearMessages(): Promise<void> {
-    await this.harness.session().reset();
+    this.#clearing++;
+    try {
+      await this.harness.session().reset();
+    } finally {
+      this.#clearing--;
+    }
     await this.#sync();
   }
+
+  /** Clears in progress: a turn they stop ends cleared, not stopped. */
+  #clearing = 0;
+  /** The turns a clear stopped, for the `chat()` callers to be told. */
+  #cleared = new Set<string>();
 
   async continueLastTurn(
     body?: Record<string, unknown>,
@@ -1794,6 +1814,9 @@ export class Think<
       },
       { operationId }
     );
+    if (this.#cleared.delete(operationId) && !options?.signal?.aborted) {
+      await callback.onError(CHAT_CLEARED_ERROR);
+    }
     await this.#sync();
   }
 

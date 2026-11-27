@@ -133,5 +133,14 @@
       "file": "think-session.test.ts",
       "test": "Think — error handling > answers the next turn after a model failure"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — error handling > should persist partial assistant message on error",
+    "reason": "the turn's failure is injected through the class's private `_transformInferenceResult` seam (`_errorConfig`, via `testChatWithError`)",
+    "successor": {
+      "file": "think-session.test.ts",
+      "test": "Think — error handling > keeps the partial reply of a turn whose model reports an error"
+    }
   }
 ]
