@@ -221,6 +221,17 @@ describe("detached agent-tool runs on Tasks", () => {
     expect(
       statuses(await agent.getDetachedDeliveryLog(), "run-gave-up-gone")
     ).toEqual(["interrupted"]);
+    // It settles as the give-up it delivered: over its budget.
+    expect(
+      (await agent.captureReplayTerminalEventsForTest()).filter(
+        (event) => "runId" in event && event.runId === "run-gave-up-gone"
+      )
+    ).toEqual([
+      expect.objectContaining({
+        kind: "interrupted",
+        reason: "budget-exceeded"
+      })
+    ]);
   });
 
   it("settles an unconfirmed give-up once a later check reads the give-up's own abort (#2769)", async () => {
@@ -240,6 +251,16 @@ describe("detached agent-tool runs on Tasks", () => {
     expect(
       statuses(await agent.getDetachedDeliveryLog(), "run-unconfirmed")
     ).toEqual(["interrupted"]);
+    expect(
+      (await agent.captureReplayTerminalEventsForTest()).filter(
+        (event) => "runId" in event && event.runId === "run-unconfirmed"
+      )
+    ).toEqual([
+      expect.objectContaining({
+        kind: "interrupted",
+        reason: "budget-exceeded"
+      })
+    ]);
   });
 
   it("delivers the real result when the child finishes before the give-up's cancel lands (#2768)", async () => {

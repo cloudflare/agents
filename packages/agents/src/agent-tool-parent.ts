@@ -1467,7 +1467,7 @@ export class AgentToolParent {
     if (gaveUp && reached && reached.inspection === null) {
       // The give-up went out already and the child has no run left to
       // finish: the run is settled, with no second callback.
-      return this._detachedGiveUpResult(meta, runId, false, true);
+      return this._settleGaveUp(step, meta, runId);
     }
     if (reached && reached.inspection === null) {
       // The child answered and has no such run: the parent was reset after
@@ -1505,7 +1505,7 @@ export class AgentToolParent {
       // The give-up went out while its teardown was unconfirmed. The child's
       // own abort confirms it now: the run is settled, with no callback.
       if (inspection && this._isDetachedGiveUpAbort(inspection)) {
-        return this._detachedGiveUpResult(meta, runId, false, true);
+        return this._settleGaveUp(step, meta, runId);
       }
       return TaskSettlement.park("child", {
         until: this._detachedNextCheck(step, budget, { gaveUp: true })
@@ -1659,6 +1659,22 @@ export class AgentToolParent {
   }
 
   /** The give-up result of a detached run; `delivered` when it went out. */
+  /**
+   * Settle a run whose give-up went out earlier: the give-up it delivered
+   * (kept in the checkpoint, with its own reason), marked delivered.
+   */
+  private _settleGaveUp(
+    step: TaskStep,
+    meta: AgentToolTaskMeta,
+    runId: string
+  ): TaskJson {
+    const delivered = step.checkpoint.get("gaveUp");
+    if (delivered !== undefined && typeof delivered === "object") {
+      return { ...(delivered as Record<string, TaskJson>), delivered: true };
+    }
+    return this._detachedGiveUpResult(meta, runId, false, true);
+  }
+
   private _detachedGiveUpResult(
     meta: AgentToolTaskMeta,
     runId: string,
