@@ -298,6 +298,121 @@ describe("chat recovery, through public behaviour", () => {
       expect(first?.recoveryRootRequestId).toBe(requestId);
     }, 30_000);
   });
+  it("recovers a continuation a reset cut off after a tool answer: the tool's result once, then the text to its end", async () => {
+    const room = `slow-continuation-${crypto.randomUUID()}`;
+    const agent = () => getAgentByName(env.ThinkTestAgent, room);
+    await (await agent()).askClientToolThenAnswerSlowlyForTest();
+    const tab = async () => {
+      const res = await exports.default.fetch(
+        `http://example.com/agents/think-test-agent/${room}`,
+        { headers: { Upgrade: "websocket" } }
+      );
+      const ws = res.webSocket;
+      if (!ws) throw new Error("no socket");
+      ws.accept();
+      return ws;
+    };
+    const frames: Array<{ type?: string; body?: string; done?: boolean }> = [];
+    const ws = await tab();
+    ws.addEventListener("message", (event) => {
+      const frame = JSON.parse(String(event.data)) as {
+        type?: string;
+        id?: string;
+      };
+      frames.push(frame);
+      // As useAgentChat does: take the continuation's stream when offered.
+      if (frame.type === "cf_agent_stream_resuming") {
+        ws.send(
+          JSON.stringify({ type: "cf_agent_stream_resume_ack", id: frame.id })
+        );
+      }
+    });
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_use_chat_request",
+        id: crypto.randomUUID(),
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [
+              {
+                id: crypto.randomUUID(),
+                role: "user",
+                parts: [{ type: "text", text: "confirm it with me" }]
+              }
+            ],
+            clientTools: [
+              { name: "client_action", description: "A client tool" }
+            ]
+          })
+        }
+      })
+    );
+    // The model has asked the client's tool; the client answers it.
+    await vi.waitFor(
+      () =>
+        expect(
+          frames.some((frame) => frame.body?.includes('"tool-input-available"'))
+        ).toBe(true),
+      { timeout: 10_000, interval: 20 }
+    );
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId: "tc-slow",
+        toolName: "client_action",
+        output: { confirmed: true },
+        autoContinue: true
+      })
+    );
+    // The continuation streams a little; then the isolate resets.
+    await vi.waitFor(
+      () =>
+        expect(
+          frames.filter((frame) => frame.body?.includes('"text-delta"')).length
+        ).toBeGreaterThanOrEqual(2),
+      { timeout: 10_000, interval: 20 }
+    );
+    await (await agent()).resetIsolateForTest().catch(() => undefined);
+    ws.close();
+
+    await vi.waitFor(
+      async () =>
+        expect(await (await agent()).lastAssistantTextForTest()).toContain(
+          "c11 "
+        ),
+      { timeout: 20_000, interval: 100 }
+    );
+    const messages = (await (await agent()).getMessages()) as Array<{
+      role: string;
+      parts: Array<{
+        type: string;
+        toolCallId?: string;
+        state?: string;
+        output?: unknown;
+      }>;
+    }>;
+    // Whether the continuation is the answered message or a second one is
+    // Q10's ground; either way the recovery repeats nothing: the tool's call
+    // and result once, and the continued text ends the reply once.
+    const parts = messages
+      .filter((message) => message.role === "assistant")
+      .flatMap((message) => message.parts)
+      .filter((part) => part.type !== "step-start");
+    expect(parts.filter((part) => part.toolCallId === "tc-slow")).toMatchObject(
+      [{ state: "output-available", output: { confirmed: true } }]
+    );
+    const text = parts
+      .map((part) =>
+        part.type === "text" ? (part as { text?: string }).text : ""
+      )
+      .join("");
+    // What the reset cut off is kept, and the recovered call ends it once.
+    expect(text.startsWith("c0 ")).toBe(true);
+    expect(text.split("c11 ").length - 1).toBe(1);
+    expect(parts.at(-1)?.type).toBe("text");
+  }, 60_000);
+
   it("gives every recovery hook one incident id and stream id", async () => {
     const agent = await freshAgent("recover-one-incident");
     await agent.armGiveUpForTest(2);
