@@ -2606,12 +2606,25 @@ describe("Think — onChatResponse", () => {
   // stream records.
   it("reports an in-band stream error to the RPC caller, the response hook and observability", async () => {
     const room = "hook-rpc-inband-error-public";
-    const observedTypes: string[] = [];
-    const unsubscribe = subscribe("message", (event) => {
-      if (event.agent === "ThinkTestAgent" && event.name === room) {
-        observedTypes.push(event.type);
+    const observed: Array<{ type: string; error?: unknown }> = [];
+    const record = (event: {
+      agent?: string;
+      name?: string;
+      type: string;
+      payload?: unknown;
+    }) => {
+      if (event.agent !== "ThinkTestAgent" || event.name !== room) return;
+      if (
+        event.type !== "message:error" &&
+        event.type !== "chat:request:failed"
+      ) {
+        return;
       }
-    });
+      const payload = (event.payload ?? {}) as { error?: unknown };
+      observed.push({ type: event.type, error: payload.error });
+    };
+    const unsubscribeMessage = subscribe("message", record);
+    const unsubscribeChat = subscribe("chat", record);
     const agent = await freshAgent(room);
 
     try {
@@ -2623,9 +2636,17 @@ describe("Think — onChatResponse", () => {
       const log = (await agent.getResponseLog()) as ChatResponseResult[];
       expect(log.map((entry) => entry.status)).toEqual(["error"]);
       expect(log[0].error).toContain("RPC in-band error");
-      expect(observedTypes).toContain("message:error");
+      // One message error, then one failed request, both with the error.
+      expect(observed.map((event) => event.type)).toEqual([
+        "message:error",
+        "chat:request:failed"
+      ]);
+      for (const event of observed) {
+        expect(String(event.error)).toContain("RPC in-band error");
+      }
     } finally {
-      unsubscribe();
+      unsubscribeMessage();
+      unsubscribeChat();
     }
   });
 
