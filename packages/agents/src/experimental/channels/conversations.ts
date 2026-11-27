@@ -2,6 +2,7 @@
 // cloudflare:workers and would stop agents/experimental/channels loading outside Workers.
 import { LifecycleCapability } from "../../lifecycle/capability";
 import { Streams } from "../../streams/streams";
+import type { StreamStatus } from "../../streams/types";
 import type { WebSockets } from "../../websockets";
 import type {
   GatewayOrigin,
@@ -269,6 +270,18 @@ export class Channels extends LifecycleCapability {
   }
 
   /** Open a new response for a turn. Each run opens one. */
+  /**
+   * Readers of a cut-off response waiting to learn what became of its
+   * turn, by turn id: told when the turn opens another response or settles.
+   */
+  readonly #turnWaiters = new Map<string, Set<() => void>>();
+
+  #turnMoved(turnId: string): void {
+    const waiters = this.#turnWaiters.get(turnId);
+    this.#turnWaiters.delete(turnId);
+    for (const resolve of waiters ?? []) resolve();
+  }
+
   async #openResponse(
     conversationId: string,
     turnId: string
@@ -277,6 +290,7 @@ export class Channels extends LifecycleCapability {
       tag: TAG_PREFIX + conversationId,
       metadata: { turnId }
     });
+    this.#turnMoved(turnId);
     return responseWriter(writer);
   }
 
@@ -307,6 +321,9 @@ export class Channels extends LifecycleCapability {
     conversationId: string,
     update: ConversationUpdate
   ): Promise<void> {
+    if (update.type === "turn" && update.turn.status === "settled") {
+      this.#turnMoved(update.turn.turnId);
+    }
     await Promise.all(
       this.#channels.map(async ([channelKey, channel]) => {
         try {
@@ -455,21 +472,100 @@ export class Channels extends LifecycleCapability {
     const streams = this.streams;
     const status = await streams.status(responseId);
     if (status?.tag !== TAG_PREFIX + conversationId) return "not-found";
+    // A run a reset cut off answers nothing once its turn went on in a
+    // later response, which answers instead: a reader that comes after the
+    // reset (a delivery tried again) waits until the turn either opened that
+    // response or settled without one, and gets nothing of this one in the
+    // first case.
+    if (
+      status.state === "errored" &&
+      (await this.#superseded(conversationId, status, options.signal))
+    ) {
+      return "ended";
+    }
     let cursor = options.from ?? 0;
+    let wrote = cursor > 0;
     for await (const batch of streams.readBatches(responseId, {
       from: cursor,
       signal: options.signal,
       onUpToDate: () => options.onCaughtUp(cursor)
     })) {
-      options.onChunks(
-        batch[0].seq,
-        // SAFETY: Channels records only chunks that passed the grammar.
-        batch.map((item) => item.chunk as unknown as ResponseChunk)
+      // SAFETY: Channels records only chunks that passed the grammar.
+      const chunks = batch.map(
+        (item) => item.chunk as unknown as ResponseChunk
       );
+      wrote ||= chunks.some((chunk) => chunk.type === "text-delta");
+      options.onChunks(batch[0].seq, chunks);
       cursor = batch[batch.length - 1].seq + 1;
     }
     const ending = await streams.status(responseId);
-    return ending?.state === "errored" ? "interrupted" : "ended";
+    if (ending?.state !== "errored") return "ended";
+    // Cut off while it was read. Its turn may go on in a later response
+    // (a run the object's reset cut resumes): wait to know, so the reader
+    // does not finish this one first.
+    const superseded = await this.#superseded(
+      conversationId,
+      ending,
+      options.signal
+    );
+    if (!superseded) return "interrupted";
+    // A later response answers: this one is no answer to finish ("not-found"
+    // to a reader that has some of it).
+    return wrote ? "not-found" : "ended";
+  }
+
+  /**
+   * Whether a later response continues cut-off `response`'s turn, waiting
+   * while the turn is open without one (it resumes after a reset).
+   */
+  async #superseded(
+    conversationId: string,
+    response: StreamStatus,
+    signal: AbortSignal | undefined
+  ): Promise<boolean> {
+    const turnId = response.metadata?.turnId;
+    if (typeof turnId !== "string") return false;
+    for (;;) {
+      // Registered first, so a move between the checks is not missed.
+      let resolve!: () => void;
+      const moved = new Promise<void>((r) => (resolve = r));
+      const waiters = this.#turnWaiters.get(turnId) ?? new Set();
+      this.#turnWaiters.set(turnId, waiters.add(resolve));
+      signal?.addEventListener("abort", resolve, { once: true });
+      try {
+        if (await this.#continued(conversationId, response)) return true;
+        const { turns } = await this.#runInHost(() =>
+          this.#harness.snapshot(conversationId)
+        );
+        if (!turns.some((turn) => turn.turnId === turnId)) return false;
+        if (signal?.aborted) return false;
+        await moved;
+      } finally {
+        signal?.removeEventListener("abort", resolve);
+        waiters.delete(resolve);
+        if (waiters.size === 0 && this.#turnWaiters.get(turnId) === waiters) {
+          this.#turnWaiters.delete(turnId);
+        }
+      }
+    }
+  }
+
+  /** Whether a later response continues `response`'s turn. */
+  async #continued(
+    conversationId: string,
+    response: StreamStatus
+  ): Promise<boolean> {
+    const turnId = response.metadata?.turnId;
+    if (turnId === undefined) return false;
+    const responses = await this.streams.list({
+      tag: TAG_PREFIX + conversationId
+    });
+    return responses.some(
+      (other) =>
+        other.streamId !== response.streamId &&
+        other.metadata?.turnId === turnId &&
+        other.createdAt >= response.createdAt
+    );
   }
 
   async #runInHost<T>(fn: () => Promise<T>): Promise<T> {

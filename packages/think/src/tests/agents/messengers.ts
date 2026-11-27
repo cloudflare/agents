@@ -182,6 +182,24 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
           this.ctx.abort("reset mid-reply");
         }
       : undefined;
+    // An agent named `tg-resetmid-…` resets once its first text reached the
+    // chat as a draft, mid-answer.
+    const bot = this.name;
+    const resetMidOnce =
+      /^tg-resetmid-/.test(this.name) && !this.ctx.storage.kv.get("reset-done")
+        ? async () => {
+            this.ctx.storage.kv.put("reset-done", true);
+            for (;;) {
+              const calls = (await (
+                await fetch(`https://fake-telegram.test/__calls?bot=${bot}`)
+              ).json()) as Array<{ method: string }>;
+              if (calls.some((call) => call.method.includes("Draft"))) break;
+              await new Promise((resolve) => setTimeout(resolve, 20));
+            }
+            await this.ctx.storage.sync();
+            this.ctx.abort("reset mid-answer");
+          }
+        : undefined;
     // An agent named `slow-…` holds each model call until the test releases
     // it (`releaseSlowModelForTest`).
     const slow = this.name.startsWith("slow-");
@@ -218,7 +236,7 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
                 ? ["it"]
                 : ["Got ", "it"];
         const stream = new ReadableStream({
-          start(controller) {
+          async start(controller) {
             controller.enqueue({ type: "stream-start", warnings: [] });
             controller.enqueue({ type: "text-start", id: "t" });
             if (fails) {
@@ -236,8 +254,11 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
               controller.close();
               return;
             }
+            let first = true;
             for (const delta of deltas) {
               controller.enqueue({ type: "text-delta", id: "t", delta });
+              if (first && resetMidOnce) await resetMidOnce();
+              first = false;
             }
             controller.enqueue({ type: "text-end", id: "t" });
             controller.enqueue({
@@ -286,6 +307,25 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         // A `split-…` agent posts each `|`-separated piece separately.
         ...(this.name.startsWith("split-") && {
           delivery: { splitText: (text: string) => text.split("|") }
+        })
+      }),
+      // A `two-…` agent has a second messenger, which records its posts.
+      ...(this.name.startsWith("two-") && {
+        other: chatSdkMessenger({
+          adapter: {
+            ...fakeAdapter,
+            name: "other",
+            postMessage: (threadId: string) => {
+              this.ctx.storage.kv.put("other-posts", [
+                ...this.getOtherPostsForTest(),
+                threadId
+              ]);
+              return Promise.resolve({ id: "other", raw: {}, threadId });
+            }
+          } as unknown as Adapter,
+          provider: "other",
+          userName: "fake_bot",
+          verifyWebhook: false
         })
       })
     };
@@ -704,8 +744,12 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     return (
       this.sql<{ n: number }>`
         SELECT COUNT(*) AS n FROM cf_agents_task_runs
-        WHERE definition IN (
-          '__cf_internal_messenger_reply', '__cf_delivery:messenger-reply'
+        WHERE (
+          definition IN (
+            '__cf_internal_messenger_reply', '__cf_delivery:messenger-reply'
+          )
+          -- The harness-backed Think sends replies through Channels.
+          OR definition LIKE '__cf_delivery:channels:%'
         )
           AND status IN ('pending', 'running')
       `[0]?.n ?? 0
@@ -724,6 +768,23 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     this.sql`CREATE TABLE IF NOT EXISTS messenger_delivery_log (
       seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, content TEXT
     )`;
+  }
+
+  /** The threads the `two-…` agent's second messenger posted to. */
+  getOtherPostsForTest(): string[] {
+    return this.ctx.storage.kv.get<string[]>("other-posts") ?? [];
+  }
+
+  /** Askers the harness-backed Think still keeps for its turns. */
+  askersKeptForTest(): number {
+    return [
+      ...this.ctx.storage.kv.list({ prefix: "cf_think_messenger_asker:" })
+    ].length;
+  }
+
+  /** The thread of every post, in order. */
+  getPostThreadsForTest(): string[] {
+    return this.ctx.storage.kv.get<string[]>("post-threads") ?? [];
   }
 
   private _record(kind: string, content: string): void {
@@ -833,6 +894,10 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
           await new Promise((resolve) => setTimeout(resolve, 20));
         }
         this._record("post", text(message));
+        this.ctx.storage.kv.put("post-threads", [
+          ...this.getPostThreadsForTest(),
+          threadId
+        ]);
         return { id: "reply", raw: {}, threadId };
       },
       startTyping: () => Promise.resolve()
@@ -841,7 +906,14 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
   }
 }
 
+/** Webhooks the guarded messenger's adapter handled, in this isolate. */
+let guardedWebhooks = 0;
+
 export class ThinkMessengerRouteTestAgent extends Think {
+  getGuardedWebhooksForTest(): number {
+    return guardedWebhooks;
+  }
+
   override getMessengers(): ThinkMessengers {
     return {
       fake: chatSdkMessenger({
@@ -849,8 +921,37 @@ export class ThinkMessengerRouteTestAgent extends Think {
         provider: "fake",
         userName: "fake_bot",
         verifyWebhook: false
+      }),
+      guarded: chatSdkMessenger({
+        adapter: {
+          ...fakeAdapter,
+          handleWebhook: () => {
+            guardedWebhooks += 1;
+            return Promise.resolve(new Response("guarded"));
+          }
+        } as unknown as typeof fakeAdapter,
+        adapterName: "guarded",
+        provider: "fake",
+        userName: "fake_bot",
+        verifyWebhook: () => false
       })
     };
+  }
+
+  /** A messenger webhook sent to a sub-agent of this class. */
+  async webhookOnSubAgentForTest(): Promise<string> {
+    // A sub-agent's stub takes fetch, though its type does not say so.
+    const child = (await this.subAgent(
+      ThinkMessengerRouteTestAgent,
+      "kid"
+    )) as unknown as {
+      fetch(url: string, init: RequestInit): Promise<Response>;
+    };
+    const response = await child.fetch(
+      "https://example.com/messengers/fake/webhook",
+      { method: "POST" }
+    );
+    return response.text();
   }
 
   override onRequest(_request: Request): Response | Promise<Response> {

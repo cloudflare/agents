@@ -15,6 +15,8 @@ export type ResponseWriter = {
   /** Records the chunk and wakes readers. Throws if it cannot be recorded. */
   append(chunk: ResponseChunk): void;
   end(): void;
+  /** Settle it as interrupted: what it holds is not the whole answer. */
+  interrupt(): void;
   /**
    * Append every chunk, then end the response. If the source or an append
    * fails, settles the response as interrupted and rejects.
@@ -51,6 +53,9 @@ export function responseWriter(writer: StreamWriter): ResponseWriter {
     },
     end() {
       writer.close();
+    },
+    interrupt() {
+      writer.error("interrupted");
     },
     async pipe(chunks) {
       try {

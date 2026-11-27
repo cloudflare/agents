@@ -236,4 +236,25 @@ describe("Chat SDK Channel", () => {
       markdown: "Hello"
     });
   });
+
+  it("shows posted and edited text without trailing whitespace", async () => {
+    const editMessage = vi.fn(async () => ({ id: "sent-1", raw: {} }));
+    const adapter = fakeAdapter([], { editMessage } as Partial<Adapter>);
+    await channelFor(adapter).stream!(
+      SURFACE,
+      chunksOf(
+        { type: "text-start", id: "a" },
+        { type: "text-delta", id: "a", delta: "Got " },
+        { type: "text-delta", id: "a", delta: "it " },
+        { type: "text-end", id: "a" }
+      ),
+      {}
+    );
+    expect(adapter.postMessage).toHaveBeenCalledWith("telegram:42", {
+      markdown: "Got"
+    });
+    expect(editMessage.mock.calls).toEqual([
+      ["telegram:42", "sent-1", { markdown: "Got it" }]
+    ]);
+  });
 });

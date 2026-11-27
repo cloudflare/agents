@@ -39,6 +39,11 @@ import {
   type UIMessage
 } from "ai";
 import { ThinkModelResolver } from "../model";
+import type { ThinkMessengers } from "../messengers";
+import {
+  messengerChannels,
+  type ThinkMessengerChannels
+} from "./messenger-channels";
 import {
   reconcileScheduledTasks,
   type ThinkScheduledTasks
@@ -250,6 +255,8 @@ export class Think<
 
   readonly harness: ThinkHarness;
   readonly #chat: ThinkChat;
+  /** The messengers from `getMessengers()`, as Chat SDK Channels. */
+  readonly #messengers: ThinkMessengerChannels | undefined;
   readonly #handlers: WebSocketHandlers[] = [];
 
   /** The conversation, configured by {@link configureSession}. */
@@ -334,7 +341,12 @@ export class Think<
         },
         {
           name: "workspace",
-          extension: workspaceExtension(() => this.workspace)
+          // Made here when first needed, as at start: Channels follows a
+          // run cut off by a reset as it starts, before Think's onStart.
+          extension: workspaceExtension(
+            () =>
+              (this.workspace ??= new Workspace({ storage: this.ctx.storage }))
+          )
         },
         {
           name: "fetch",
@@ -529,6 +541,22 @@ export class Think<
     });
     this.lifecycle.use(this.harness);
     this.lifecycle.use(this.#config);
+    // Read here, not at start as Think reads them: Channels mounts its
+    // channels, and their deliveries register on Tasks, at construction. A
+    // sub-agent mounts them too (its path is not known yet) but takes no
+    // webhook.
+    this.#messengers = messengerChannels({
+      messengers: this.getMessengers() as ThinkMessengers,
+      harness: this.harness,
+      tasks: this.tasks,
+      root: () => this.parentPath.length === 0,
+      kv: this.ctx.storage.kv
+    });
+    if (this.#messengers) {
+      this.lifecycle
+        .use(this.#messengers.channels.streams)
+        .use(this.#messengers.channels);
+    }
 
     const onStart = this.onStart.bind(this);
     this.onStart = async (props?: Props) => {
@@ -747,7 +775,7 @@ export class Think<
   getActions(): Record<string, unknown> | Promise<Record<string, unknown>> {
     return {};
   }
-  getMessengers(): Record<string, unknown> {
+  getMessengers(): ThinkMessengers {
     return {};
   }
   configureChannels():
@@ -1647,7 +1675,9 @@ export class Think<
     };
     const onRequest = this.onRequest.bind(this);
     this.onRequest = async (request: Request) => {
-      const handled = await this.#chat.onRequest({ request });
+      const handled =
+        (await this.#chat.onRequest({ request })) ??
+        (await this.#messengers?.receive(request));
       return handled ?? onRequest(request);
     };
   }

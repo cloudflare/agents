@@ -25,6 +25,24 @@ export type DeliverToSurfacesOptions = {
    * (`this.tasks`), or one the host installs.
    */
   tasks: Tasks;
+  /**
+   * Send each response only to the surface that asked: given the event id
+   * that started the response's turn, its surface, or `undefined` to send it
+   * nowhere. A surface of another Channel is not sent to. Default: every
+   * surface of this Channel that joined the conversation.
+   */
+  asker?(
+    startedBy: string
+  ):
+    | ChannelMessageSurface
+    | undefined
+    | Promise<ChannelMessageSurface | undefined>;
+  /**
+   * Told of each delivery as it starts, with the event id that started the
+   * response's turn and a promise that settles when its first attempt ends
+   * (delivered, or failed and waiting to retry).
+   */
+  sending?(startedBy: string, firstAttempt: Promise<void>): void;
 };
 
 /** Checkpoint key: a provider call of this delivery may have started. */
@@ -115,18 +133,27 @@ export function deliverToSurfaces(
     },
     async publish(conversationId, update) {
       const responseId = startedResponse(update);
-      if (!mounted || !responseId) return;
+      if (!mounted || !responseId || update.type !== "turn") return;
       const { host, sink } = mounted;
-      for (const surface of await host.surfaces(conversationId)) {
+      const surfaces = options.asker
+        ? [await options.asker(update.turn.startedBy)].filter(
+            // The asker may have written through another Channel.
+            (surface): surface is ChannelMessageSurface =>
+              surface?.channelKey === host.channelKey
+          )
+        : await host.surfaces(conversationId);
+      for (const surface of surfaces) {
         const id = `${sink}:${responseId}:${await surfaceKeyOf(surface)}`;
         // Not awaited: the first attempt streams the whole response.
-        void sendDelivery<SurfaceDelivery>(options.tasks, sink, id, {
-          conversationId,
-          responseId,
-          surface
-        }).catch((error: unknown) => {
+        const firstAttempt = sendDelivery<SurfaceDelivery>(
+          options.tasks,
+          sink,
+          id,
+          { conversationId, responseId, surface }
+        ).catch((error: unknown) => {
           console.error(`[channels] could not send ${id}`, error);
         });
+        options.sending?.(update.turn.startedBy, firstAttempt);
       }
     }
   };
@@ -171,6 +198,20 @@ export function onPosting(
  */
 export function posting(options: ChannelStreamOptions): void {
   postingMarks.get(options)?.();
+}
+
+/**
+ * What a response's stream fails with when its turn went on in a later
+ * response (its run was cut and rerun): a Channel posts nothing of it, and
+ * lets the attempt fail, so the delivery tried again reads it as empty.
+ *
+ * @internal
+ */
+export class SupersededResponse extends Error {
+  constructor(responseId: string) {
+    super(`Response ${responseId} was superseded by a later one`);
+    this.name = "SupersededResponse";
+  }
 }
 
 /** Sent for a response interrupted before it produced any text. */
@@ -302,7 +343,9 @@ function readResponse(
         ending =
           end === "ended"
             ? {}
-            : { error: new Error(`Response ${responseId} ${end}`) };
+            : end === "not-found"
+              ? { error: new SupersededResponse(responseId) }
+              : { error: new Error(`Response ${responseId} ${end}`) };
         notify();
       },
       (error: unknown) => {
