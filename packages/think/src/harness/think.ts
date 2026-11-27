@@ -54,7 +54,7 @@ import {
   reconcileScheduledTasks,
   type ThinkScheduledTasks
 } from "../scheduled-tasks";
-import { Workspace } from "@cloudflare/computer";
+import { Workspace, type WorkspaceStub } from "@cloudflare/computer";
 import { workspaceExtension } from "./extensions/workspace";
 import { fetchExtension } from "./extensions/fetch";
 import { skillsExtension } from "./extensions/skills";
@@ -88,7 +88,7 @@ import {
 } from "../submissions";
 import type { TaskStatus } from "agents/tasks";
 import type { CreateFetchToolsOptions } from "../tools/fetch";
-import type { ThinkWorkspace } from "../workspace-files";
+import { isLocalWorkspace, type ThinkWorkspace } from "../workspace-files";
 import { ThinkSession } from "../session";
 import { ThinkConfigStore } from "../config-store";
 import { DEFAULT_SYSTEM_PROMPT, systemPromptForTurn } from "../system-prompt";
@@ -1018,6 +1018,25 @@ export class Think<
   #running:
     | { requestId: string; trigger: string; continuation: boolean }
     | undefined;
+
+  /**
+   * Hand out an RPC stub to this agent's Workspace, as on Think.
+   * `getWorkspace(stub)` from `@cloudflare/computer` calls it to reach the
+   * Workspace from another Worker or Durable Object. Only a Workspace this
+   * agent owns can hand out a stub.
+   */
+  async __getWorkspaceStub(): Promise<WorkspaceStub> {
+    await this.__unsafe_ensureInitialized();
+    const workspace = this.workspace;
+    if (!isLocalWorkspace(workspace)) {
+      throw new Error(
+        "[Think] This agent's workspace belongs to another Durable Object, " +
+          "so it cannot hand out a Workspace stub."
+      );
+    }
+    await workspace.ready();
+    return workspace.stub();
+  }
 
   /**
    * Resolved at the next run's end or transcript change, for
