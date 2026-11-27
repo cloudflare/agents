@@ -2980,10 +2980,7 @@ export class Think<
         };
       }
       await this.#sync();
-      this.#turns.set(operationId, {
-        trigger: "agent-tool",
-        abort: new AbortController()
-      });
+      this.#turns.set(operationId, { trigger: "agent-tool" });
       await session.submit([this.formatAgentToolInput(input)], {
         operationId,
         metadata: {
