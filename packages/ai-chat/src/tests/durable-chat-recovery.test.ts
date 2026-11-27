@@ -45,6 +45,7 @@ interface ChatRecoveryTestStub {
   throwsBeforeHandoffLeftForTest(): Promise<number>;
   openAttemptRunsForTest(): Promise<string[]>;
   runOpenAttemptRunsForTest(): Promise<void>;
+  armHeldFailingTurnForTest(message: string): Promise<void>;
   armFailingReaderTurnForTest(
     message: string,
     prelude: "partial"
@@ -3259,6 +3260,124 @@ describe("platform-transient reader errors (#1964)", () => {
     await socketBarrier(ws, received);
     expect(recoveringFrames()).toBe(2);
     ws.close(1000);
+  }, 30_000);
+
+  it("tells a tab that connects while a turn waits for its next attempt that the chat is recovering (#1620)", async () => {
+    const room = `recovering-connect-live-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+    const requestId = await agentStub.startFailingReaderTurnForTest(
+      "Network connection lost.",
+      1,
+      HELD_BACKOFF
+    );
+
+    // The turn's stream is still open while it waits: the tab is offered it
+    // and is told the chat is recovering.
+    const { ws } = await connectChatWS(
+      `/agents/chat-recovery-test-agent/${room}`
+    );
+    const received = seenFrames(ws) as Array<{
+      type?: string;
+      recovering?: boolean;
+      id?: string;
+    }>;
+    await socketBarrier(ws, received);
+    expect(
+      received.filter(
+        (frame) => frame.type === MessageType.CF_AGENT_CHAT_RECOVERING
+      )
+    ).toEqual([expect.objectContaining({ recovering: true, id: requestId })]);
+
+    await agentStub.endRetryWaitsForTest();
+    expect(await agentStub.startedFailingTurnStatusForTest()).toBe("completed");
+    ws.close(1000);
+  }, 30_000);
+
+  it("sends every tab, the one that asked included, the stored messages once after a recovered turn ends", async () => {
+    const room = `recovered-messages-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+    const path = `/agents/chat-recovery-test-agent/${room}`;
+    const asker = await connectChatWS(path);
+    const other = await connectChatWS(path);
+    const askerFrames = seenFrames(asker.ws) as Array<Record<string, unknown>>;
+    const otherFrames = seenFrames(other.ws) as Array<Record<string, unknown>>;
+    await agentStub.armHeldFailingTurnForTest("Network connection lost.");
+
+    const requestId = crypto.randomUUID();
+    asker.ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+        id: requestId,
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [
+              {
+                id: "u-recovered",
+                role: "user",
+                parts: [{ type: "text", text: "tell me a long story" }]
+              }
+            ]
+          })
+        }
+      })
+    );
+    await vi.waitFor(
+      () =>
+        expect(
+          askerFrames.some(
+            (frame) => frame.type === MessageType.CF_AGENT_CHAT_RECOVERING
+          )
+        ).toBe(true),
+      { timeout: 10_000 }
+    );
+    await agentStub.endRetryWaitsForTest();
+    await vi.waitFor(
+      () =>
+        expect(
+          askerFrames.some(
+            (frame) =>
+              frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+              frame.id === requestId &&
+              frame.done === true
+          )
+        ).toBe(true),
+      { timeout: 10_000 }
+    );
+    await socketBarrier(asker.ws, askerFrames);
+    await socketBarrier(other.ws, otherFrames);
+
+    const stored = await agentStub.getPersistedMessages();
+    for (const frames of [askerFrames, otherFrames]) {
+      const end = frames.findIndex(
+        (frame) =>
+          frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          frame.id === requestId &&
+          frame.done === true
+      );
+      // The recovered attempt's last chunk.
+      let lastChunk = end - 1;
+      while (
+        lastChunk >= 0 &&
+        !(
+          frames[lastChunk].type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          frames[lastChunk].done !== true
+        )
+      ) {
+        lastChunk--;
+      }
+      const lists = frames.filter(
+        (frame, index) =>
+          frame.type === MessageType.CF_AGENT_CHAT_MESSAGES &&
+          index > lastChunk &&
+          index < end
+      );
+      // One list once the recovered reply is done, with what the chat stored.
+      expect(lists).toHaveLength(1);
+      expect(lists[0].messages).toEqual(stored);
+    }
+    asker.ws.close(1000);
+    other.ws.close(1000);
   }, 30_000);
 
   it("ends the turn's run when the user stops it while it waits for its next attempt", async () => {

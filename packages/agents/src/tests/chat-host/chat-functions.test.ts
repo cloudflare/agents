@@ -1,5 +1,9 @@
 import { CHAT_REQUEST_CONTEXT_KEY } from "../../chat";
-import { env, runInDurableObject } from "cloudflare:test";
+import {
+  env,
+  runDurableObjectAlarm,
+  runInDurableObject
+} from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import type { Connection } from "agents";
 import type { ChatTurnHostObject } from "../capabilities/chat-turn";
@@ -2592,6 +2596,71 @@ describe("chat functions over a minimal host", () => {
       await finish().catch(() => {});
       expect(sent).toContainEqual(
         expect.objectContaining({ id: "r2", done: true, outcome: "skipped" })
+      );
+    });
+  });
+
+  it("a recovered reply's stored transcript goes to the tab that asked too, once, before the end frame", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    const sent: Array<Record<string, unknown>> = [];
+    await runInDurableObject(
+      stub,
+      async (instance: ChatTurnHostObject, state) => {
+        await instance.lifecycle.start();
+        // The first attempt streams some text, then fails transiently.
+        instance.reply = [
+          { type: "start", messageId: "a1" },
+          { type: "text-start", id: "t1" },
+          { type: "text-delta", id: "t1", delta: "Part" },
+          { type: "error", errorText: "overloaded" }
+        ];
+        const hooks = instance.host.hooks;
+        (instance.host as { hooks?: ChatHooks }).hooks = {
+          ...hooks,
+          classifyError: () => "transient"
+        };
+        const sender = recordingTab("tab-a", sent);
+        instance.tabs.push(sender);
+        await chatDispatch(
+          instance.deps,
+          instance.lane,
+          sender,
+          chatRequestWith("r1", "u1", "Hi")
+        );
+        await vi.waitFor(() =>
+          expect(instance.tasks.peek("r1")).toMatchObject({
+            status: "pending",
+            waitReason: "retry"
+          })
+        );
+        // The next attempt answers.
+        instance.reply = [
+          { type: "start", messageId: "a1" },
+          { type: "text-start", id: "t2" },
+          { type: "text-delta", id: "t2", delta: " and the rest" },
+          { type: "text-end", id: "t2" },
+          { type: "finish" }
+        ];
+        state.storage.sql.exec(
+          "UPDATE cf_agents_task_runs SET next_at = ? WHERE run_id = 'r1'",
+          Date.now()
+        );
+        await state.storage.setAlarm(Date.now());
+      }
+    );
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await vi.waitFor(() =>
+        expect(sent.some((frame) => frame.done === true)).toBe(true)
+      );
+      const end = sent.findIndex((frame) => frame.done === true);
+      const lists = sent.filter(
+        (frame) => frame.type === "cf_agent_chat_messages"
+      );
+      expect(lists).toHaveLength(1);
+      expect(sent.indexOf(lists[0])).toBeLessThan(end);
+      expect(lists[0].messages).toEqual(
+        await instance.sessions.session("s1").getHistory()
       );
     });
   });

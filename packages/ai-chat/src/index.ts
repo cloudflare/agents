@@ -1607,21 +1607,14 @@ export class AIChatAgent<
 
       // A turn streams or waits to: the tab is offered its stream, or told
       // to wait for it (#1784) and offered it when it starts.
+      // A turn being recovered: the tab is told so (#1620), whether it
+      // waits for its next attempt with its stream open or between streams.
+      const recoveringFrame = await this._buildRecoveringConnectFrame();
+      if (recoveringFrame) {
+        sendIfOpen(connection, JSON.stringify(recoveringFrame));
+      }
       if (open.length > 0) {
         await resumeChat(this._chatDeps(), this._chatLane(), connection);
-      } else {
-        // No active stream to resume: if a recovery is in progress (between
-        // attempts — the interrupted stream ended and the continuation hasn't
-        // started yet), replay the live "recovering…" status so a client that
-        // connects mid-recovery reads the turn as working rather than frozen
-        // (#1620). This converges `AIChatAgent` onto `@cloudflare/think`'s
-        // behavior. Unlike the terminal outcome (which must go through the
-        // resume handshake to reach the client's stream reader), the recovering
-        // frame is a plain status the client reflects directly into state.
-        const recoveringFrame = await this._buildRecoveringConnectFrame();
-        if (recoveringFrame) {
-          sendIfOpen(connection, JSON.stringify(recoveringFrame));
-        }
       }
       // Call consumer's onConnect
       return _onConnect(connection, ctx);

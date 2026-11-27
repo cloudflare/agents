@@ -1183,10 +1183,16 @@ export function chatTurnDefinition(
           sendIfOpen(connection, text);
         }
       };
+      // A recovered reply is sent to the tab that asked too: what the chat
+      // stored (repaired parts, sanitised, or not kept) need not be what the
+      // tab put together from the attempts' streams.
+      const recovered =
+        step.attempt > 1 ||
+        step.checkpoint.get(FAILED_CHECKPOINT) !== undefined;
       if (result.messageId !== undefined && result.status !== "aborted") {
         // A continuation's tab gets it too: it answered, it did not send
         // the reply's question.
-        await sendTranscript(client);
+        await sendTranscript(client && !recovered);
       }
       if (inBand && result.error !== undefined) {
         send({

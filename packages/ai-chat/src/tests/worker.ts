@@ -5187,6 +5187,20 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return this._failingReaderCalls;
   }
 
+  /**
+   * Make the next turn's first attempt stream a little and fail with a
+   * provider asking for a minute's wait: the turn waits to be recovered
+   * until `endRetryWaitsForTest()`.
+   */
+  armHeldFailingTurnForTest(message: string): void {
+    this._failingTurn = {
+      message,
+      remaining: 1,
+      prelude: "partial",
+      responseHeaders: { "retry-after": "60" }
+    };
+  }
+
   /** Make the next turn's reader throw `message` after `prelude`. */
   armFailingReaderTurnForTest(
     message: string,
