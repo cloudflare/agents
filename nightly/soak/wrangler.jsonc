@@ -1,0 +1,14 @@
+{
+  // The soak suite's Worker. The suite deploys it under a unique name
+  // (`nightly-soak-<id>`) and deletes it when it ends.
+  "name": "nightly-soak",
+  "main": "worker.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "ai": { "binding": "AI" },
+  "durable_objects": {
+    "bindings": [{ "class_name": "ProbeThink", "name": "ProbeThink" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ProbeThink"] }]
+}
