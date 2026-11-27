@@ -1647,15 +1647,17 @@ export function chatTurnDefinition(
           }
         }, 0);
       };
-      const record = (chunk: UIMessageChunk) => {
+      /** Store `chunk`; its seq goes on the frame the tabs get (#1951). */
+      const record = (chunk: UIMessageChunk): number => {
         const json = JSON.stringify(chunk);
         const bytes = utf8Length(json);
+        let seq: number;
         // One past the capability's chunk limit goes through the writer,
         // which refuses it as it always has.
         if (bytes > Math.min(sync.maxChunkBytes, ROW_VALUE_BYTES)) {
-          out.append(chunk as never);
+          seq = out.append(chunk as never);
         } else {
-          sync.appendJson(streamId, json, bytes, CHUNK_BATCH);
+          seq = sync.appendJson(streamId, json, bytes, CHUNK_BATCH);
           flushWhenQuiet();
         }
         // A tool call's input and its outcome are written at once: a tool
@@ -1685,6 +1687,7 @@ export function chatTurnDefinition(
         ) {
           sync.flush(streamId);
         }
+        return seq;
       };
       const liveKey = sessionId;
       const live = liveTurnsOf(deps.streams);
@@ -1781,7 +1784,7 @@ export function chatTurnDefinition(
                 type: "start",
                 messageId: continuing?.id ?? fallbackId
               } as UIMessageChunk;
-              record(start);
+              const startSeq = record(start);
               seen.push(start);
               // A new reply the model began with no start reaches the tabs as
               // the model sent it (a plain-text reply starts at its text);
@@ -1790,7 +1793,9 @@ export function chatTurnDefinition(
                 send({
                   body: JSON.stringify(forTabs(start)),
                   done: false,
-                  continuation: true
+                  seq: startSeq,
+                  continuation: true,
+                  messageId: continuing.id
                 });
               }
               controller.enqueue(start);
@@ -1831,13 +1836,18 @@ export function chatTurnDefinition(
               return;
             }
             for (const out of asked ? [next, asked] : [next]) {
-              record(out);
+              const seq = record(out);
               seen.push(out);
               checkAnswered();
+              // A continuation's chunks name the message they go into (D70).
               send({
                 body: JSON.stringify(forTabs(out)),
                 done: false,
-                ...(continuing && { continuation: true })
+                seq,
+                ...(continuing && {
+                  continuation: true,
+                  messageId: continuing.id
+                })
               });
               controller.enqueue(out);
             }

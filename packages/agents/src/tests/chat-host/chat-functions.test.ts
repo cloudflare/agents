@@ -217,7 +217,9 @@ describe("chat functions over a minimal host", () => {
         reconnected,
         JSON.stringify({ type: "cf_agent_stream_resume_ack", id: "r1" })
       );
-      const replayed = sent.filter((frame) => frame.replay === true);
+      const replayed = sent.filter(
+        (frame) => frame.replay === true && frame.replayComplete !== true
+      );
       expect(
         replayed.map((frame) => JSON.parse(frame.body as string).type)
       ).toContain("text-delta");
@@ -991,7 +993,11 @@ describe("chat functions over a minimal host", () => {
       expect(written).toBeLessThan(5);
       const sent: Array<Record<string, unknown>> = [];
       await replayTurn(instance.deps, recordingTab("tab-r", sent), "r1");
-      expect(sent).toHaveLength(5);
+      // Every chunk, then the replay's end for a live stream.
+      expect(
+        sent.filter((frame) => frame.replayComplete !== true)
+      ).toHaveLength(5);
+      expect(sent.at(-1)).toMatchObject({ replayComplete: true });
       release();
       await instance.resultFor("r1");
     });
@@ -2995,6 +3001,39 @@ describe("chat functions over a minimal host", () => {
             frame.id === "r1" && frame.type === "cf_agent_use_chat_response"
         )
       ).toEqual([]);
+    });
+  });
+
+  it("live frames carry each chunk's seq, and a replay repeats them and ends a live stream with replayComplete", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const live: Array<Record<string, unknown>> = [];
+      instance.tabs.push(recordingTab("tab-live", live));
+      const release = await streamThenHold(instance, [
+        { type: "start", messageId: "a1" },
+        { type: "text-start", id: "t1" },
+        { type: "text-delta", id: "t1", delta: "one" }
+      ]);
+      const back: Array<Record<string, unknown>> = [];
+      const tabBack = recordingTab("tab-back", back);
+      await resumeChat(instance.deps, instance.lane, tabBack);
+      await replayTurn(instance.deps, tabBack, "r1");
+      release();
+      await instance.resultFor("r1");
+      const liveSeqs = live
+        .filter((f) => f.id === "r1" && f.done === false && f.body)
+        .map((f) => f.seq);
+      const replayed = back.filter((f) => f.replay === true && f.body);
+      expect(liveSeqs.slice(0, replayed.length)).toEqual(
+        replayed.map((f) => f.seq)
+      );
+      expect(typeof liveSeqs[0]).toBe("number");
+      expect(back.find((f) => f.replayComplete === true)).toMatchObject({
+        id: "r1",
+        done: false,
+        replay: true
+      });
     });
   });
 });

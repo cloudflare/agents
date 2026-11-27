@@ -814,6 +814,17 @@ export async function replayTurn(
   }
   // What this isolate buffered is written first.
   deps.streams.__DO_NOT_USE_WILL_BREAK__sync().flush(streamId);
+  const input = deps.tasks.inputOf<ChatTurnInput>(requestId);
+  const replyId =
+    input?.trigger === "tool-answer" || input?.mode === "continue"
+      ? (liveTurnsOf(deps.streams)
+          .get(deps.session ?? "")
+          ?.replyId() ?? input.replyId)
+      : undefined;
+  const continuation: { continuation?: true; messageId?: string } =
+    input?.trigger === "tool-answer" || input?.mode === "continue"
+      ? { continuation: true, ...(replyId && { messageId: replyId }) }
+      : {};
   const stop = new AbortController();
   try {
     for await (const batch of deps.streams.readBatches(streamId, {
@@ -821,12 +832,16 @@ export async function replayTurn(
       onUpToDate: () => stop.abort()
     })) {
       for (const item of batch) {
+        // As the live frame was: its seq, and a continuation's flag and
+        // message (#1733, D70).
         const text = frameText({
           type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
           id: requestId,
           body: JSON.stringify(item.chunk),
           done: false,
-          replay: true
+          replay: true,
+          seq: item.seq,
+          ...continuation
         } as { type: string });
         if (text !== undefined) sendIfOpen(connection, text);
       }
@@ -837,6 +852,18 @@ export async function replayTurn(
   } finally {
     release();
   }
+  // The stream is still live: the tab draws what it replayed and keeps
+  // listening.
+  const text = frameText({
+    type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+    id: requestId,
+    body: "",
+    done: false,
+    replay: true,
+    replayComplete: true,
+    ...(continuation.continuation && { continuation: true })
+  } as { type: string });
+  if (text !== undefined) sendIfOpen(connection, text);
 }
 
 /**
