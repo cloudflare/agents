@@ -298,18 +298,22 @@ describe.concurrent("Think on a real model, through resets", () => {
         report
       ).toEqual([]);
       // The extension loaded from source served its tool, and the helper
-      // sub-agent (a facet of the room) was asked, at least once a room.
-      for (const part of ["tool-dice_rollDie", "tool-askHelper"])
-        expect(
-          state.messages.some((m) =>
-            m.parts.some(
-              (p) =>
-                p.type === part &&
-                (p as { state?: string }).state === "output-available"
-            )
-          ),
-          `${part}: ${report}`
-        ).toBe(true);
+      // sub-agent (a facet of the room) answered, at least once a room. An
+      // agent tool returns a failure as an object; a helper's answer is its
+      // reply text.
+      const outputs = (part: string) =>
+        state.messages.flatMap((m) =>
+          (m.parts as { type: string; state?: string; output?: unknown }[])
+            .filter((p) => p.type === part && p.state === "output-available")
+            .map((p) => p.output)
+        );
+      expect(outputs("tool-dice_rollDie").length, report).toBeGreaterThan(0);
+      expect(
+        outputs("tool-askHelper").some(
+          (o) => typeof o === "string" && o.trim() !== ""
+        ),
+        report
+      ).toBe(true);
       // One submission record per submitted turn, each completed.
       expect(state.submissions, report).toEqual(
         sent
