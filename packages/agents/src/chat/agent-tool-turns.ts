@@ -16,7 +16,7 @@ import type {
   AgentToolRunInspection,
   AgentToolStoredChunk
 } from "../agent-tool-types";
-import type { TaskCheckpoint, TaskJson } from "../tasks/types";
+import type { TaskJson } from "../tasks/types";
 import { cancelTurn, submitTurn, type ChatLane } from "./chat-functions";
 import {
   chatTurnStreamId,
@@ -37,11 +37,6 @@ export type AgentToolTurnMeta = {
   /** The newest message when the turn was submitted: what follows is the run's. */
   startMessageId: string | null;
 };
-
-/** The checkpoint key of a run's latest progress. */
-const PROGRESS_CHECKPOINT = "agentTool:progress";
-/** The checkpoint key prefix of a run's milestones, one key each. */
-const MILESTONE_CHECKPOINT = "agentTool:milestone:";
 
 /**
  * Start agent-tool run `runId` as one turn on `lane`: `message` is the
@@ -84,22 +79,28 @@ export function agentToolTurnOf(
 }
 
 /**
- * Record progress or a milestone for the turn `checkpoint` belongs to: one
- * statement each, readable while the run is live.
+ * Record progress or a milestone on the agent-tool turn `requestId` (the
+ * tool's `ChatModelCall.requestId`): one field of the run's metadata each,
+ * one statement, kept after the run settles. Progress replaces the last;
+ * each milestone is its own field. `false` when the turn is not one.
  */
 export function recordAgentToolProgress(
-  checkpoint: TaskCheckpoint,
+  deps: ChatDeps,
+  requestId: string,
   report:
     | { kind: "progress"; snapshot: AgentToolProgressSnapshot }
     | { kind: "milestone"; milestone: AgentToolMilestone }
-): void {
-  if (report.kind === "progress") {
-    checkpoint.set(PROGRESS_CHECKPOINT, report.snapshot as unknown as TaskJson);
-    return;
-  }
-  checkpoint.set(
-    `${MILESTONE_CHECKPOINT}${report.milestone.name}`,
-    report.milestone as unknown as TaskJson
+): boolean {
+  if (!agentToolTurnOf(deps, requestId)) return false;
+  return deps.tasks.patchMetadata(
+    requestId,
+    "agentTool",
+    report.kind === "progress"
+      ? { progress: report.snapshot as unknown as TaskJson }
+      : {
+          [`milestone:${report.milestone.name}`]:
+            report.milestone as unknown as TaskJson
+        }
   );
 }
 
@@ -114,23 +115,18 @@ export function inspectAgentToolTurn(
   collect: (messageId: string | undefined) => {
     output: unknown;
     summary: string | null;
-  },
-  milestoneNames: readonly string[] = []
+  }
 ): AgentToolRunInspection | null {
   const id = agentToolTurnId(runId);
   const record = deps.tasks.peek(id);
   if (!record) return null;
-  const progress = deps.tasks.checkpointOf(id, PROGRESS_CHECKPOINT) as
-    | AgentToolProgressSnapshot
-    | undefined;
-  const milestones = milestoneNames
-    .map(
-      (name) =>
-        deps.tasks.checkpointOf(id, `${MILESTONE_CHECKPOINT}${name}`) as
-          | AgentToolMilestone
-          | undefined
-    )
-    .filter((milestone): milestone is AgentToolMilestone => !!milestone);
+  const fields = ((record.metadata as { agentTool?: Record<string, unknown> })
+    ?.agentTool ?? {}) as Record<string, unknown>;
+  const progress = fields.progress as AgentToolProgressSnapshot | undefined;
+  const milestones = Object.entries(fields)
+    .filter(([key]) => key.startsWith("milestone:"))
+    .map(([, milestone]) => milestone as AgentToolMilestone)
+    .sort((left, right) => left.at - right.at);
   const base = {
     runId,
     requestId: id,
