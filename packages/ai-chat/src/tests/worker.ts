@@ -47,7 +47,6 @@ import type {
 import {
   CHAT_RECOVERY_TASK_NAME,
   recentChatTerminal,
-  type ReplyFlushState,
   REPLAY_CHUNK_BYTES,
   CHAT_RECOVERY_PROGRESS_KEY,
   turnSignal
@@ -7087,7 +7086,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
   private _turnStoreCountsForTest(): { taskRuns: number; fibers: number } {
     const taskRuns = this.sql<{ count: number }>`
       SELECT COUNT(*) AS count FROM cf_agents_task_runs
-      WHERE definition = ${AIChatAgent.CHAT_FIBER_NAME}
+      WHERE definition = ${CHAT_TURN_DEFINITION}
         AND status IN ('pending', 'running')
     `;
     const fibers = this.sql<{ count: number }>`

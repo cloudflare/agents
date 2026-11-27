@@ -746,8 +746,20 @@ export class AIChatAgent<
           from = rows[rows.length - 1].seq + 1;
         }
       },
-      // Resolved on each use, so read now.
-      activeRequestId: this._runningChatTurn()
+      // Resolved on each use, so read now: the turn running on the lane,
+      // else the newest turn stream still open (a turn cut off by a reset
+      // until its run is attempted again).
+      activeRequestId:
+        this._runningChatTurn() ??
+        sync
+          .listRows()
+          .find(
+            (row) =>
+              row.state === "streaming" &&
+              row.stream_id.startsWith("chat-turn:")
+          )
+          ?.stream_id.slice("chat-turn:".length) ??
+        null
     };
   }
 
