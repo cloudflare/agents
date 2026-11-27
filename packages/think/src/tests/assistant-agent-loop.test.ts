@@ -269,7 +269,10 @@ describe("Think — agentic loop", () => {
         alwaysOverflow?: boolean
       ): Promise<OverflowResult>;
       testProactive(message: string): Promise<OverflowResult>;
-      testProactiveMultiFire(message: string): Promise<OverflowResult>;
+      testProactiveMultiFire(
+        message: string,
+        maxCompactions?: number
+      ): Promise<OverflowResult>;
       testProactiveNoOp(message: string): Promise<OverflowResult>;
       testChatAbortDuringRecovery(message: string): Promise<OverflowResult>;
       testProgrammaticAbortDuringRecovery(
@@ -841,6 +844,23 @@ describe("Think — agentic loop", () => {
           content: [{ type: "text", text: "Replacement context" }]
         }
       ]);
+    });
+
+    it("keeps sending the compacted history after the guard's budget is spent", async () => {
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        crypto.randomUUID()
+      )) as unknown as OverflowAgent;
+      // One compaction, before step 2; step 3 is past the budget.
+      const result = await agent.testProactiveMultiFire("use the echo tool", 1);
+      expect(result.done).toBe(true);
+      expect(result.compactionEvents).toBe(1);
+      const prompts = await agent.getProactiveStepPrompts();
+      expect(prompts.length).toBe(3);
+      // Step 3 still sends the compacted head, with both tool steps.
+      expect(prompts[2].hasSummary).toBe(true);
+      expect(prompts[2].toolCalls.length).toBe(2);
+      expect(prompts[2].toolResults.length).toBe(2);
     });
 
     it("proactive guard fires twice in one turn (maxCompactions:2) without corrupting the spliced prompt", async () => {
