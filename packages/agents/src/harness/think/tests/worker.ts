@@ -34,6 +34,7 @@ const GATE_RUNS_KEY = "test:gate:runs";
 const RELEASE_KEY = "test:gate:release";
 const DANGEROUS_RUNS_KEY = "test:dangerous:runs";
 const MULTIPLY_RUNS_KEY = "test:multiply:runs";
+const CONTINUE_CALLS_KEY = "test:continue-calls";
 const TOOL_ATTEMPTS_KEY = "test:tool-attempts";
 const THROW_AFTER_KEY = "test:throw-after";
 const RECOVERY_PARTIAL_KEY = "test:recovery:partial";
@@ -476,6 +477,14 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       firstText === "slow then multiply"
     ) {
       parts = callReply([{ name: "multiply", input: { value: 1 } }]);
+    } else if (
+      last?.role === "assistant" &&
+      this.ctx.storage.kv.get<boolean>(CONTINUE_CALLS_KEY) &&
+      !contentText(last?.content).includes("multiplied")
+    ) {
+      // A continuation whose model calls a server tool, once.
+      this.ctx.storage.kv.delete(CONTINUE_CALLS_KEY);
+      parts = callReply([{ name: "multiply", input: { value: 4 } }]);
     } else if (last?.role === "assistant") {
       parts = textReply("continued");
     } else {
@@ -639,6 +648,12 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   // ── RPC for the tests ────────────────────────────────────────────────────
+
+  /** Continue the session's last reply; its model then calls multiply. */
+  continueCallingTool(session?: string): Promise<ThinkReceipt> {
+    this.ctx.storage.kv.put(CONTINUE_CALLS_KEY, true);
+    return this.harness.session(session).continue();
+  }
 
   submit(
     text: string,
