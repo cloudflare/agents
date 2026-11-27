@@ -45,6 +45,12 @@ export type ChatSdkChannelOptions = {
   state?: StateAdapter;
   /** The bot's name, for adapters that read it. */
   userName?: string;
+  /**
+   * For an adapter a Chat SDK `Chat` already owns (its webhooks and its
+   * chat instance): how to make sure that `Chat` initialized it before a
+   * send. The Channel then sends only, and takes no webhooks.
+   */
+  initialize?: () => Promise<void>;
 };
 
 type Capture = { events: Promise<ChannelIngressEnvelope<Message> | null>[] };
@@ -132,7 +138,9 @@ export function chatSdkChannel(
       };
     }
     try {
-      await (initialized ??= adapter.initialize(instance));
+      await (initialized ??= options.initialize
+        ? options.initialize()
+        : adapter.initialize(instance));
       const sent = await post(threadId);
       return { status: "delivered", ...(sent && { reference: sent.id }) };
     } catch (error) {
@@ -148,23 +156,24 @@ export function chatSdkChannel(
   return reportingPosting({
     ...(options.participant && { participant: options.participant }),
     ...(options.route && { route: options.route }),
-    ...(options.participant && {
-      ingress: {
-        async receive(request) {
-          if (!matchesPath(request, options.path)) return null;
-          await (initialized ??= adapter.initialize(instance));
-          const current: Capture = { events: [] };
-          const response = await capture.run(current, () =>
-            adapter.handleWebhook(request)
-          );
-          const events = (await Promise.all(current.events)).filter(
-            (envelope): envelope is ChannelIngressEnvelope<Message> =>
-              envelope !== null
-          );
-          return { events, response };
+    ...(options.participant &&
+      !options.initialize && {
+        ingress: {
+          async receive(request) {
+            if (!matchesPath(request, options.path)) return null;
+            await (initialized ??= adapter.initialize(instance));
+            const current: Capture = { events: [] };
+            const response = await capture.run(current, () =>
+              adapter.handleWebhook(request)
+            );
+            const events = (await Promise.all(current.events)).filter(
+              (envelope): envelope is ChannelIngressEnvelope<Message> =>
+                envelope !== null
+            );
+            return { events, response };
+          }
         }
-      }
-    }),
+      }),
     deliver(surface, message) {
       return send(
         surface,

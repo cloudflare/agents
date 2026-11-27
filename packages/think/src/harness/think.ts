@@ -45,7 +45,11 @@ import {
   type UIMessage
 } from "ai";
 import { ThinkModelResolver } from "../model";
-import type { ThinkMessengers } from "../messengers";
+import {
+  DEFAULT_MESSENGER_CONCURRENCY,
+  type MessengerConcurrency,
+  type ThinkMessengers
+} from "../messengers";
 import {
   messengerChannels,
   type ThinkMessengerChannels
@@ -300,6 +304,9 @@ export class Think<
 
   /** Model calls per turn. Read per call, so a subclass field applies. */
   maxSteps = 10;
+
+  /** How a messenger thread's burst of messages is answered, as on Think. */
+  messengerConcurrency: MessengerConcurrency = DEFAULT_MESSENGER_CONCURRENCY;
 
   readonly harness: ThinkHarness;
   readonly #chat: ThinkChat;
@@ -747,7 +754,9 @@ export class Think<
       harness: this.harness,
       tasks: this.tasks,
       root: () => this.parentPath.length === 0,
-      kv: this.ctx.storage.kv
+      kv: this.ctx.storage.kv,
+      parent: this,
+      concurrency: () => this.messengerConcurrency
     });
     if (this.#messengers) {
       this.lifecycle

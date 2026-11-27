@@ -304,6 +304,11 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         provider: "fake",
         userName: "fake_bot",
         verifyWebhook: false,
+        // A `label-…` agent names group speakers its own way.
+        ...(this.name.startsWith("label-") && {
+          channelSpeakerLabel: (author: { fullName?: string }) =>
+            `Speaker ${author.fullName}`
+        }),
         // A `split-…` agent posts each `|`-separated piece separately.
         ...(this.name.startsWith("split-") && {
           delivery: { splitText: (text: string) => text.split("|") }
