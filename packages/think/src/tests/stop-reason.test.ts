@@ -127,6 +127,11 @@ describe("a stopped turn ends aborted, whatever reason the stop carried", () => 
           expect(result.terminalOutcomes.filter((o) => o === "error")).toEqual(
             []
           );
+          // Once the reply has begun, the tab is told it ended aborted. A
+          // turn stopped in `beforeTurn` sent the tab nothing to end.
+          if (phase !== "hook") {
+            expect(result.terminalOutcomes).toContain("aborted");
+          }
         });
       }
     }

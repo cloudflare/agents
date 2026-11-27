@@ -213,6 +213,15 @@ function taskStatusesFor(
   return [...out];
 }
 
+/** A programmatic turn whose caller's signal had aborted before it began. */
+function stoppedBeforeStart(): SaveMessagesResult {
+  return {
+    requestId: crypto.randomUUID(),
+    status: "aborted",
+    reason: "stopped"
+  };
+}
+
 function saveResult(result: ThinkOperationResult): SaveMessagesResult {
   if (result.status === "done") {
     return { requestId: result.operationId, status: "completed" };
@@ -858,6 +867,8 @@ export class Think<
     await this.#sync();
     const resolved =
       typeof messages === "function" ? await messages(this.messages) : messages;
+    // As on Think: a turn stopped before it starts stores nothing.
+    if (options?.signal?.aborted) return stoppedBeforeStart();
     const known = new Set(this.messages.map((message) => message.id));
     const session = this.harness.session();
     const receipt = await session.submit(
@@ -889,6 +900,7 @@ export class Think<
         reason: "nothing-to-continue"
       };
     }
+    if (options?.signal?.aborted) return stoppedBeforeStart();
     const receipt = await this.harness.session().continue();
     return this.#waitForTurn(receipt.operationId, options?.signal);
   }
@@ -1360,8 +1372,9 @@ export class Think<
         onError: (error) => {
           // A stopped turn is not an error: as on Think, its caller hears
           // neither `onDone` nor `onError`, and `onChatError` does not run.
-          // "aborted" is the harness's reason for a stop (see `saveResult`).
-          if (error === "aborted") return;
+          // "aborted" is the harness's reason for a stop, and "withdrawn" for
+          // a stop that reached the turn while it waited (see `saveResult`).
+          if (error === "aborted" || error === "withdrawn") return;
           const wrapped = this.onChatError(new Error(error));
           return callback.onError(errorText(wrapped));
         }

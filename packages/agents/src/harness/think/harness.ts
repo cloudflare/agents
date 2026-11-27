@@ -1932,7 +1932,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             messageId,
             steps,
             AbortSignal.any([signal, stall.signal]),
-            signal
+            call.signal
           );
           const stallTimeoutMs =
             this.#options.recovery?.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
@@ -2057,7 +2057,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     messageId: string,
     step: number,
     signal: AbortSignal,
-    /** The operation's own signal: a stop aborts it, a stall does not. */
+    /**
+     * The operation's own signal: a stop aborts it; a stall, and the end of
+     * this response, do not.
+     */
     stopSignal: AbortSignal
   ): Promise<{
     readonly stream: AsyncIterable<UIMessageChunk>;
