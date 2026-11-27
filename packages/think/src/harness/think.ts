@@ -856,6 +856,7 @@ export class Think<
   ): Promise<SaveMessagesResult> {
     // As on Think: a turn stopped before it starts builds and stores nothing.
     if (options?.signal?.aborted) return stoppedBeforeStart();
+    await this.#stopping;
     await this.#sync();
     const resolved =
       typeof messages === "function" ? await messages(this.messages) : messages;
@@ -891,6 +892,7 @@ export class Think<
       };
     }
     if (options?.signal?.aborted) return stoppedBeforeStart();
+    await this.#stopping;
     const receipt = await this.harness.session().continue();
     return this.#waitForTurn(receipt.operationId, options?.signal);
   }
@@ -1362,6 +1364,7 @@ export class Think<
     callback: StreamCallback,
     options?: ChatOptions
   ): Promise<void> {
+    await this.#stopping;
     const operationId = crypto.randomUUID();
     const messages =
       typeof userMessage === "function"
@@ -1434,7 +1437,7 @@ export class Think<
 
   /** Stop every turn, running or waiting; each ends `aborted`. */
   protected abortAllRequests(): void {
-    void this.keepAliveWhile(() => this.harness.session().abort());
+    this.#stopEveryTurn();
   }
 
   /**
@@ -1442,7 +1445,19 @@ export class Think<
    * `clearMessages` resets the session as well.
    */
   protected resetTurnState(): void {
-    void this.keepAliveWhile(() => this.harness.session().abort());
+    this.#stopEveryTurn();
+  }
+
+  /**
+   * A stop of every turn that is open now. The harness reads the open turns
+   * once it is ready, so the turns this shell starts afterwards wait for the
+   * stop first, as Think's synchronous reset cuts them off.
+   */
+  #stopping: Promise<unknown> = Promise.resolve();
+  #stopEveryTurn(): void {
+    const stopping = this.harness.session().abort();
+    this.#stopping = stopping;
+    void this.keepAliveWhile(() => stopping);
   }
 
   async cancelAllChats(): Promise<void> {

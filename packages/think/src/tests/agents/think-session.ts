@@ -11365,6 +11365,19 @@ export class ThinkProgrammaticTestAgent extends Think {
     this.resetTurnState();
   }
 
+  /** A turn saved straight after a reset, in the same call. */
+  async saveRightAfterResetForTest(): Promise<string> {
+    this.resetTurnState();
+    const result = await this.saveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "after the reset" }]
+      }
+    ]);
+    return result.status;
+  }
+
   async recoverChatFiberForTest(requestId: string): Promise<void> {
     await this._handleInternalFiberRecovery({
       id: `fiber-${requestId}`,
