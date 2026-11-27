@@ -11785,7 +11785,14 @@ export class ThinkProgrammaticTestAgent extends Think {
     };
   }
 
-  override async beforeTurn(ctx: TurnContext): Promise<void> {
+  private _turnConfigForTest: TurnConfig | null = null;
+
+  /** Every turn's `beforeTurn` returns this config. */
+  async setTurnConfigOverride(config: TurnConfig | null): Promise<void> {
+    this._turnConfigForTest = config;
+  }
+
+  override async beforeTurn(ctx: TurnContext): Promise<TurnConfig | void> {
     const gate = this._turnGate;
     if (gate && !ctx.continuation) {
       this._turnGate = null;
@@ -11833,6 +11840,7 @@ export class ThinkProgrammaticTestAgent extends Think {
           error instanceof Error ? error.message : String(error);
       }
     }
+    return this._turnConfigForTest ?? undefined;
   }
 
   private async _runNestedAdmissionForTest(
