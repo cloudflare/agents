@@ -2138,16 +2138,22 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
   it("terminalizes the exhausted budget BEFORE onChatRecovery and schedules nothing", async () => {
     const h = makeHarness({ seedExhausted: true });
     let reconciled = 0;
+    let streamsEndedAtReconcile: string[] = [];
     h.adapter.turns = {
       attemptScope: new AsyncLocalStorage(),
-      reconcileAgentToolChildRuns: async () => void reconciled++
+      reconcileAgentToolChildRuns: async () => {
+        reconciled++;
+        streamsEndedAtReconcile = [...h.completed];
+      }
     } as unknown as ChatRecoveryTurnBindings;
 
     await h.engine.recoverInterruptedTurn(h.turn, h.wake);
 
     // The give-up continues nothing: the agent-tool child run the turn
-    // held open is closed.
+    // held open is closed. The reply's stream, restored as still active,
+    // ended first, or the run would read as still streaming.
     expect(reconciled).toBe(1);
+    expect(streamsEndedAtReconcile).toEqual(["s1"]);
 
     // Exhausted path: persist gate (no options) + exhaustChatRecovery, with the
     // turn's createdAt; never consults onChatRecovery or schedules.

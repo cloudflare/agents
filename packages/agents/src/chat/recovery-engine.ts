@@ -871,6 +871,9 @@ export class ChatRecoveryEngine {
       ) {
         await wake.persistOrphanedStream(streamId);
       }
+      // Nothing continues the reply: its stream ends here. Left active, it
+      // would also read as a turn still running to the reconcile below.
+      if (streamStillActive) await wake.completeRecoveredStream(streamId);
       await adapter.exhaustChatRecovery(
         incident,
         config,
