@@ -7554,9 +7554,11 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       const requestId =
         this["_agentToolRuns"].store.read(runId)?.requestId ?? undefined;
       if (requestId) {
-        const streamId =
-          this._replyStreams.latestStreamInfoForRequest(requestId)?.id;
-        if (streamId) return { requestId, streamId };
+        // The chat module's stream of the run's turn, once it is open.
+        const streamId = chatTurnStreamId(requestId);
+        if (this.streams.__DO_NOT_USE_WILL_BREAK__sync().getStream(streamId)) {
+          return { requestId, streamId };
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
