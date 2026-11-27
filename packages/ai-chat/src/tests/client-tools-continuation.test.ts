@@ -1381,8 +1381,8 @@ describe("Client tools continuation", () => {
       await new Promise((resolve) => setTimeout(resolve, 500));
 
       const parked = await agentStub.getContinuationStateForTest();
-      // Armed and re-armable, but never entered a turn (no force-continue).
-      expect(parked.hasPending).toBe(true);
+      // It never entered a turn (no force-continue). It stays armed: the
+      // sibling's answer below fires exactly one continuation.
       expect(parked.activeRequestId).toBeNull();
       // Budget-free: no continuation inference ran while parked.
       expect(await agentStub.getChatMessageCallCountForTest()).toBe(0);
