@@ -1820,10 +1820,24 @@ describe("Think — the system prompt a turn sends", () => {
       env.ThinkSystemPromptSkillsWarningAgent as unknown as DurableObjectNamespace<ThinkSystemPromptSkillsWarningAgent>,
       `sys-skills-override-${crypto.randomUUID()}`
     );
-    await agent.runChatTurnForWarningTest();
-    const system = (await agent.getLastSystemPromptForTest()) ?? "";
-    expect(system.indexOf("You are Robbie, a pirate.")).toBe(0);
-    expect(system).toContain("knot-tying: How to tie useful knots.");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await agent.runChatTurnForWarningTest();
+      const system = (await agent.getLastSystemPromptForTest()) ?? "";
+      expect(system.indexOf("You are Robbie, a pirate.")).toBe(0);
+      expect(system).toContain("knot-tying: How to tie useful knots.");
+      // A valid override draws no warning.
+      expect(
+        warn.mock.calls
+          .flat()
+          .some(
+            (value) =>
+              typeof value === "string" && value.includes("getSystemPrompt()")
+          )
+      ).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("sends an inherited or class-field getSystemPrompt above the skill catalog", async () => {
@@ -1881,6 +1895,7 @@ describe("Think — the system prompt a turn sends", () => {
       "No skills are available."
     );
     await expect(agent.getLastSystemPromptForTest()).resolves.toBe(first);
+    await expect(agent.getContextReminder()).resolves.toBeNull();
     expect(await agent.getTurnToolNames()).not.toContain("activate_skill");
   });
 
@@ -1897,6 +1912,7 @@ describe("Think — the system prompt a turn sends", () => {
     await expect(agent.getLastSystemPromptForTest()).resolves.toContain(
       "- map-reading: How to read a map."
     );
+    await expect(agent.getContextReminder()).resolves.toBeNull();
   });
 
   it("sends the context blocks of an async configureSession", async () => {

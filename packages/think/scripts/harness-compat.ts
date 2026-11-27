@@ -183,7 +183,11 @@ if (check) {
     ? (JSON.parse(readFileSync(scoreboardJson, "utf8")) as Scoreboard)
     : { passing: [] as string[] };
   const now = new Set(passing);
-  const regressions = recorded.passing.filter((test) => !now.has(test));
+  // A class-only test is meant to fail on the harness once its successor
+  // replaces it: its leaving the passing list is not a regression.
+  const regressions = recorded.passing.filter(
+    (test) => !now.has(test) && !classOnlyIds.has(test)
+  );
   const recordedSet = new Set(recorded.passing);
   const gains = passing.filter((test) => !recordedSet.has(test));
   if (gains.length > 0) {
