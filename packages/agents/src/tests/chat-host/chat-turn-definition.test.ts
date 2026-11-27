@@ -500,6 +500,8 @@ describe("chatTurnDefinition", () => {
         error: "Could not recover."
       });
       expect(exhausted).toEqual(["recovery_error"]);
+      // The end names the reply it kept, so the host reports it.
+      expect(result).toMatchObject({ messageId: "a1" });
       expect(
         instance.events.find((event) => event.type === "chat:recovery:failed")
       ).toMatchObject({ payload: { reason: "recovery_error" } });

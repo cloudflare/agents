@@ -1749,7 +1749,8 @@ export function chatTurnDefinition(
           return report({
             requestId,
             status: "error",
-            error: budget.terminalMessage
+            error: budget.terminalMessage,
+            ...(partial && { messageId: partial.id })
           });
         }
       }
@@ -1790,7 +1791,10 @@ export function chatTurnDefinition(
             status: "error",
             // The failure the app chose not to recover from, when there
             // was one.
-            error: failed?.text ?? "The turn was interrupted and not continued."
+            error:
+              failed?.text ?? "The turn was interrupted and not continued.",
+            ...(partial &&
+              decision?.persist !== false && { messageId: partial.id })
           });
         }
         // The budget is spent: the app is told why, and the client gets the
@@ -1823,7 +1827,8 @@ export function chatTurnDefinition(
         return report({
           requestId,
           status: "error",
-          error: budget.terminalMessage
+          error: budget.terminalMessage,
+          ...(partial && { messageId: partial.id })
         });
       }
     }
