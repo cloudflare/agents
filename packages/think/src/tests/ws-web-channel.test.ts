@@ -236,6 +236,45 @@ describe("Think — WebSocket chat runs on the web channel (#2255)", () => {
     ws.close();
   });
 
+  it("resolves a continuation's channel when it runs, behind another", async () => {
+    const { agent, ws } = await freshAgent();
+    await sendChat(ws, [userMessage("hello")]);
+    await agent.resetCapturedTurnChannelsForTest();
+
+    await agent.runConcurrentContinuationsForTest(["voice", undefined]);
+
+    expect(await agent.getCapturedTurnChannelsForTest()).toEqual([
+      "voice",
+      "voice"
+    ]);
+    ws.close();
+  });
+
+  it("continues a web regeneration of another channel's message on web", async () => {
+    const { agent, ws } = await freshAgent();
+    await agent.runChannelTurnForTest({ input: "hello", channel: "voice" });
+    const stored = (await agent.getStoredMessages()) as UIMessage[];
+    const voiceUser = stored.find((m) => m.role === "user");
+    await agent.resetCapturedTurnChannelsForTest();
+
+    await sendChat(
+      ws,
+      [{ ...voiceUser!, metadata: undefined }],
+      "regenerate-message"
+    );
+    expect(await agent.getCapturedTurnChannelsForTest()).toEqual(["web"]);
+    // The stored message keeps the channel it was sent on.
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(channelOf(messages.find((m) => m.id === voiceUser!.id))).toBe(
+      "voice"
+    );
+
+    await agent.resetCapturedTurnChannelsForTest();
+    await agent.runChannelTurnForTest({ continuation: true });
+    expect(await agent.getCapturedTurnChannelsForTest()).toEqual(["web"]);
+    ws.close();
+  });
+
   it("still runs server-driven turns without a channel by default", async () => {
     const { agent, ws } = await freshAgent();
 
