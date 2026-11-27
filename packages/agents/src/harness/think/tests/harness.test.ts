@@ -5,7 +5,7 @@ import {
   runDurableObjectAlarm,
   runInDurableObject
 } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "../../../index";
 import type { ThinkHarnessTestObject } from "./worker";
 
@@ -1320,6 +1320,22 @@ describe("ThinkHarness untrusted input", () => {
       reason: "not_client_tool"
     });
     expect(await stub.dangerousRuns()).toBe(0);
+  });
+
+  it("aborts the signal a waiting beforeTurn holds when the operation is stopped", async () => {
+    const stub = fresh();
+    await stub.waitOnSignalInBeforeTurn();
+    const receipt = await stub.submit("hello");
+    await vi.waitFor(
+      async () => expect(await stub.beforeTurnSignalSeen()).toBe("waiting"),
+      { timeout: 5000, interval: 10 }
+    );
+    expect(await stub.abort(receipt.operationId)).toBe(true);
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "unanswered",
+      reason: "aborted"
+    });
+    expect(await stub.beforeTurnSignalSeen()).toBe("aborted");
   });
 
   it("offers the same tools when beforeTurn edits the tool set it is shown", async () => {

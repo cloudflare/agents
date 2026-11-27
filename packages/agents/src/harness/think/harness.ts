@@ -1931,7 +1931,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             reply,
             messageId,
             steps,
-            AbortSignal.any([signal, stall.signal])
+            AbortSignal.any([signal, stall.signal]),
+            signal
           );
           const stallTimeoutMs =
             this.#options.recovery?.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
@@ -2055,7 +2056,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     existing: UIMessage | undefined,
     messageId: string,
     step: number,
-    signal: AbortSignal
+    signal: AbortSignal,
+    /** The operation's own signal: a stop aborts it, a stall does not. */
+    stopSignal: AbortSignal
   ): Promise<{
     readonly stream: AsyncIterable<UIMessageChunk>;
     readonly error: () => unknown;
@@ -2107,7 +2110,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         tools: Object.keys(tools),
         // A copy: a hook that edits it does not change what is offered.
         toolSet: { ...tools },
-        signal
+        signal: stopSignal
       })) ?? {};
     const model = config.model ?? (await resolve(this.#options.model, session));
     if (model === undefined) throw new Error("ThinkHarness has no model");

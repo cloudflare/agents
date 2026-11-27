@@ -56,6 +56,8 @@ const ENDED_KEY = "test:ended";
 const LATE_TOOL_KEY = "test:late-tool";
 const HOLD_AFTER_KEY = "test:hold-after-tool-call";
 const EDIT_TOOLSET_KEY = "test:edit-toolset";
+const WAIT_ON_SIGNAL_KEY = "test:before-turn-waits-on-signal";
+const SIGNAL_SEEN_KEY = "test:before-turn-signal-seen";
 const AFTER_KEY = "test:after-tool-call";
 
 const usage = {
@@ -297,7 +299,21 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         this.ctx.storage.kv.put(RECOVERY_PARTIAL_KEY, partial?.id ?? null);
         return "continue";
       },
-      beforeTurn: async ({ toolSet, session, system: built }) => {
+      beforeTurn: async ({ toolSet, session, system: built, signal }) => {
+        // A hook that waits on I/O, given the operation's signal.
+        if (this.ctx.storage.kv.get<boolean>(WAIT_ON_SIGNAL_KEY)) {
+          this.ctx.storage.kv.put(SIGNAL_SEEN_KEY, "waiting");
+          await new Promise<void>((_, reject) => {
+            signal.addEventListener(
+              "abort",
+              () => {
+                this.ctx.storage.kv.put(SIGNAL_SEEN_KEY, "aborted");
+                reject(signal.reason);
+              },
+              { once: true }
+            );
+          });
+        }
         // As an extension's `sendMessage` from this hook does.
         if (this.ctx.storage.kv.get<boolean>(NOTE_IN_BEFORE_TURN_KEY)) {
           await this.#handles.get(session)?.appendMessage({
@@ -1496,6 +1512,15 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   ended(): string[] {
     return this.ctx.storage.kv.get<string[]>(ENDED_KEY) ?? [];
+  }
+
+  waitOnSignalInBeforeTurn(): void {
+    this.ctx.storage.kv.put(WAIT_ON_SIGNAL_KEY, true);
+  }
+
+  /** How far a `beforeTurn` waiting on its signal got. */
+  beforeTurnSignalSeen(): string | null {
+    return this.ctx.storage.kv.get<string>(SIGNAL_SEEN_KEY) ?? null;
   }
 
   editToolSetInBeforeTurn(): void {

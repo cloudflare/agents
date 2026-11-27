@@ -264,8 +264,8 @@ export type ThinkTurnContext = ThinkHookContext & {
    */
   readonly toolSet: ToolSet;
   /**
-   * @internal The model call's own signal, which aborts when the operation
-   * is stopped, for the same host (the harness-backed Think's `beforeTurn`
+   * @internal The operation's signal, which aborts when the operation is
+   * stopped, for the same host (the harness-backed Think's `beforeTurn`
    * passes it on as `abortSignal`).
    */
   readonly signal: AbortSignal;
