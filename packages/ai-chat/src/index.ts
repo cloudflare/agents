@@ -64,6 +64,7 @@ import {
   inspectAgentToolTurn,
   liveTurnsOf,
   recordAgentToolProgress,
+  progressCreditOf,
   releasedAgentToolRunOfRequest,
   releasedAgentToolRunWaiting,
   startAgentToolTurn,
@@ -301,6 +302,9 @@ export { createToolsFromClientSchemas } from "agents/chat";
  * @template Env Environment type containing bindings
  */
 /** The chat module's turn definition, as AIChatAgent registers it. */
+/** The least time between two progress credits from agent-tool children. */
+const AGENT_TOOL_PROGRESS_CREDIT_MS = 5_000;
+
 const CHAT_TURN_DEFINITION = "__cf_ai_chat_turn";
 
 export class AIChatAgent<
@@ -489,6 +493,26 @@ export class AIChatAgent<
 
   /** The released agent-tool run tables carried forward (reads await it). */
   private _agentToolRunsCarried: Promise<void> | undefined;
+
+  /** When the running turn was last credited for its agent-tool child. */
+  private _lastProgressCreditAt = 0;
+
+  /**
+   * An agent-tool child this agent's turn waits on streamed: that counts as
+   * the turn's progress, so its no-progress window does not run out while
+   * the child works. At most one credit per 5 s, as released.
+   */
+  protected override async _onAgentToolStreamProgress(): Promise<void> {
+    const now = Date.now();
+    if (now - this._lastProgressCreditAt < AGENT_TOOL_PROGRESS_CREDIT_MS)
+      return;
+    const requestId = this._runningChatTurn();
+    if (!requestId) return;
+    this._lastProgressCreditAt = now;
+    this.tasks.patchMetadata(requestId, "chat", {
+      progressCredit: progressCreditOf(this._chatDeps(), requestId) + 1
+    });
+  }
 
   /** The chat turn running now, if any. */
   private _runningChatTurn(): string | null {

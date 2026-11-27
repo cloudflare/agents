@@ -753,6 +753,41 @@ export class TestChatAgent extends AIChatAgent<Env> {
     this._modelGate = new TestGate();
   }
 
+  /**
+   * Hold a turn's model call, let an agent-tool child it waits on stream
+   * twice in quick succession, and return the credits the turn got.
+   */
+  async progressCreditWhileTurnRunsForTest(): Promise<number> {
+    this.holdNextModelCallForTest();
+    const turn = this.saveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "wait on a child" }]
+      }
+    ]);
+    // A bound for a slow machine: the turn reaches its model call.
+    const deadline = Date.now() + 5000;
+    while (!this.isModelCallHeldForTest() && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const hook = this as unknown as {
+      _onAgentToolStreamProgress(): Promise<void>;
+    };
+    await hook._onAgentToolStreamProgress();
+    await hook._onAgentToolStreamProgress();
+    const running = this.tasks.peekList({
+      definition: "__cf_ai_chat_turn",
+      status: ["running"]
+    })[0];
+    const credit = (
+      running?.metadata?.chat as { progressCredit?: number } | undefined
+    )?.progressCredit;
+    this.releaseModelCallForTest();
+    await turn;
+    return credit ?? 0;
+  }
+
   isModelCallHeldForTest(): boolean {
     return this._modelGate?.reached ?? false;
   }

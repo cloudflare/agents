@@ -267,6 +267,8 @@ export {
 } from "./agent-tool-turns";
 /** @internal The turn streaming in this isolate per session, to inject a chunk into. */
 export { liveTurnsOf } from "./chat-host";
+/** @internal The progress credits a host gave a turn (an agent-tool child it waits on streamed). */
+export { progressCreditOf } from "./chat-host";
 
 /**
  * @internal The life of an agent-tool run on the child agent, shared by
