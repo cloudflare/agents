@@ -25,7 +25,11 @@ import {
   interruptedToolPartAsError,
   repairTranscriptBeforeTurn
 } from "./before-turn";
-import { replyIsRemovedAsEmpty } from "./repair-transcript";
+import {
+  replyIsRemovedAsEmpty,
+  stripTrailingReasoning
+} from "./repair-transcript";
+import { settleInterruptedPart } from "./message-builder";
 import { transcriptEndsInAnswer } from "./continuation-turn";
 import { TaskCancellation } from "../tasks/replay";
 import { frameText } from "./chat-frames";
@@ -1282,7 +1286,14 @@ export function chatTurnDefinition(
       const out = (writer ??= await deps.streams.open(streamId, {
         tag: requestId
       }));
-      const continuing = partial;
+      // A text or reasoning part the reply was cut off in is closed: the
+      // continuation writes a part of its own after it.
+      const continuing = partial && {
+        ...partial,
+        parts: partial.parts.map(
+          (part) => settleInterruptedPart(part as never) as typeof part
+        )
+      };
       let started = false;
       // Chunks are written in batches (`CHUNK_BATCH`), as the hosts' reply
       // streams do; a reader flushes first.
@@ -1480,9 +1491,22 @@ export function chatTurnDefinition(
           const soFar = await messageOf(streamOf(seen), continuing).catch(
             () => continuing
           );
+          // Nothing writes into it again: an open text part is closed, and
+          // reasoning it ends in is dropped (no provider takes a reply that
+          // ends that way). One that holds nothing then is not stored.
+          const settled =
+            soFar &&
+            stripTrailingReasoning({
+              ...soFar,
+              parts: soFar.parts.map(
+                (part) => settleInterruptedPart(part as never) as typeof part
+              )
+            });
           const kept = await storeReply(
             out,
-            soFar && repairCutOffTools(soFar, host.hooks, run.clientTools ?? [])
+            settled && !replyIsRemovedAsEmpty(settled)
+              ? repairCutOffTools(settled, host.hooks, run.clientTools ?? [])
+              : undefined
           );
           return report({
             requestId,

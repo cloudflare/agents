@@ -1838,4 +1838,97 @@ describe("chatTurnDefinition", () => {
       });
     });
   });
+
+  it("a continuation closes the text part its reply was cut off in", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-locate",
+            toolCallId: "c1",
+            state: "output-available",
+            input: {},
+            output: {}
+          },
+          { type: "text", text: "Partial ", state: "streaming" }
+        ]
+      } as never);
+      await runTurn(instance, { trigger: "tool-answer" });
+      const stored = await session.getMessage("a1");
+      const texts = (
+        stored as unknown as { parts: Array<{ type: string; state?: string }> }
+      ).parts.filter((part) => part.type === "text");
+      expect(texts[0]).toMatchObject({ text: "Partial ", state: "done" });
+      expect(texts).toHaveLength(2);
+    });
+  });
+
+  it("a reply stopped in its reasoning is stored nowhere; one stopped after its text is stored with the text closed and no trailing reasoning", async () => {
+    for (const [chunks, expected] of [
+      [
+        [
+          { type: "start", messageId: "a1" },
+          { type: "reasoning-start", id: "r1" },
+          { type: "reasoning-delta", id: "r1", delta: "Let me think" }
+        ],
+        undefined
+      ],
+      [
+        [
+          { type: "start", messageId: "a1" },
+          { type: "text-start", id: "t1" },
+          { type: "text-delta", id: "t1", delta: "Partial" },
+          { type: "reasoning-start", id: "r1" },
+          { type: "reasoning-delta", id: "r1", delta: "Let me think" },
+          { type: "reasoning-end", id: "r1" }
+        ],
+        { type: "text", text: "Partial", state: "done" }
+      ]
+    ] as const) {
+      const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+        await instance.lifecycle.start();
+        const stop = new AbortController();
+        const result = await chatTurnDefinition(
+          {
+            tasks: instance.tasks,
+            streams: instance.streams,
+            sessions: instance.sessions,
+            kv: instance.kv,
+            session: "s1"
+          },
+          {
+            respond: async () =>
+              new ReadableStream({
+                start(controller) {
+                  for (const chunk of chunks)
+                    controller.enqueue(chunk as never);
+                  setTimeout(() => stop.abort("stopped by the user"), 20);
+                }
+              })
+          }
+        )({ trigger: "server" }, laterAttempt("sr-1", 1, stop.signal));
+        expect(result).toMatchObject({ status: "aborted" });
+        const reply = await instance.sessions.session("s1").getMessage("a1");
+        if (expected === undefined) expect(reply).toBeNull();
+        else {
+          const parts = (reply as unknown as { parts: unknown[] }).parts;
+          expect(
+            parts.some((p) => (p as { type: string }).type === "reasoning")
+          ).toBe(false);
+          expect(parts.at(-1)).toEqual(expected);
+        }
+      });
+    }
+  });
 });

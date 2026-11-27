@@ -1013,7 +1013,22 @@ export class AIChatAgent<
     return {
       respond: async (call) => {
         // Apps read the transcript the call is for from `this.messages`.
+        const before = this.messages;
         this.messages = [...call.messages] as UIMessage[];
+        // The other tabs learn what the turn stored or removed before it
+        // asks the model (its question, a repaired reply): the whole list,
+        // so each drops what is gone. The tab that sent it has it already.
+        if (
+          before.length !== this.messages.length ||
+          before.some((message, i) => message !== this.messages[i])
+        ) {
+          const origin = (
+            this.tasks.peek(call.requestId)?.metadata as
+              | { chat?: { origin?: string } }
+              | undefined
+          )?.chat?.origin;
+          this._frames.broadcastMessages(this.messages, origin ? [origin] : []);
+        }
         this._callContinues.set(call.requestId, call.mode === "continue");
         if (
           call.trigger === "submit-message" ||
@@ -1037,6 +1052,13 @@ export class AIChatAgent<
             this._callContinues.get(result.requestId) ?? false;
           this._callContinues.delete(result.requestId);
           this.messages = (await this.#session.getHistory()) as UIMessage[];
+          // After a stop's terminal frame every tab gets the list: what the
+          // stream showed and the transcript did not keep (reasoning it
+          // ended in) is dropped. A list before the frame would be merged
+          // with the stream a tab still reads.
+          if (result.status === "aborted") {
+            this._frames.broadcastMessages(this.messages);
+          }
           if (result.status === "error") {
             this._emit("message:error", { error: result.error ?? "" });
           } else if (result.messageId !== undefined) {
