@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, onTestFinished, vi } from "vitest";
 import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS, waitUntilHandled } from "./test-utils";
@@ -142,6 +142,10 @@ describe("Custom body forwarding during tool continuation", () => {
       ] as ChatMessage["parts"]
     };
 
+    // The first request is held in its model call until the second is
+    // queued behind it and the captured context is cleared.
+    await agentStub.holdNextModelCallForTest();
+    onTestFinished(() => agentStub.releaseModelCallForTest());
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
@@ -151,8 +155,7 @@ describe("Custom body forwarding during tool continuation", () => {
           body: JSON.stringify({
             messages: [userMessage, toolCallMessage],
             clientTools: [{ name: "changeBackgroundColor" }],
-            customField: "first-body",
-            delayMs: 1000
+            customField: "first-body"
           })
         }
       })
@@ -160,7 +163,7 @@ describe("Custom body forwarding during tool continuation", () => {
 
     // The first request is running before the second arrives.
     await vi.waitFor(async () => {
-      expect(await agentStub.getChatMessageCallCountForTest()).toBe(1);
+      expect(await agentStub.isModelCallHeldForTest()).toBe(true);
     }, BOUNDS);
 
     ws.send(
@@ -178,8 +181,8 @@ describe("Custom body forwarding during tool continuation", () => {
       })
     );
 
-    // The second request waits behind the first, which is still running:
-    // it captures its body only after the clear.
+    // The second request waits behind the first, which is held: it
+    // captures its body only after the clear.
     await vi.waitFor(async () => {
       expect(await agentStub.queuedTurnCountForTest()).toBe(2);
     }, BOUNDS);
@@ -197,6 +200,7 @@ describe("Custom body forwarding during tool continuation", () => {
 
     // The result was received; the idle wait then covers its apply and the
     // continuation decision, even when no model call follows.
+    await agentStub.releaseModelCallForTest();
     await waitUntilHandled(agentStub, "cf_agent_tool_result", 1);
     await vi.waitFor(async () => {
       expect(await agentStub.hasPendingInteractionForTest()).toBe(false);
