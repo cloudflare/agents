@@ -64,6 +64,7 @@ import type { SkillScriptRunner, SkillSource } from "agents/skills";
 import { mcpConnectionsExtension, mcpExtension } from "agents/internal";
 import {
   admittedSubmissionMetadata,
+  cancelReason,
   isTerminalSubmissionStatus,
   SubmissionStatusQueue,
   TERMINAL_SUBMISSION_STATUSES,
@@ -92,6 +93,7 @@ import type {
   StepContext,
   StreamCallback,
   SubmitMessagesOptions,
+  WaitForSubmissionOptions,
   SubmitMessagesResult,
   ThinkModel,
   ThinkSubmissionInspection,
@@ -171,8 +173,11 @@ function submissionInspection(
       idempotencyKey: status.idempotencyKey
     }),
     ...(status.metadata !== undefined && { metadata: status.metadata }),
+    // A cancel's own reason, as on Think; else how the operation ended.
     ...(status.status === "unanswered" &&
-      status.reason !== undefined && { error: status.reason }),
+      (status.abortReason ?? status.reason) !== undefined && {
+        error: status.abortReason ?? status.reason
+      }),
     ...("messageId" in status &&
       status.messageId !== undefined && { messageId: status.messageId })
   };
@@ -1105,7 +1110,8 @@ export class Think<
   }
 
   async waitForSubmission(
-    submissionId: string
+    submissionId: string,
+    options?: WaitForSubmissionOptions
   ): Promise<ThinkSubmissionInspection | null> {
     const before = await this.harness.inspection(
       this.harness.session().id,
@@ -1123,7 +1129,21 @@ export class Think<
         "waitForSubmission() cannot be called from onSubmissionStatus: the submission settles only after the hook returns"
       );
     }
-    const result = await this.harness.session().wait(submissionId);
+    // A timeout stops only the wait: the submission is returned as it is
+    // then, still open, or `null` when it was deleted meanwhile.
+    const timeout =
+      options?.timeoutMs === undefined
+        ? undefined
+        : AbortSignal.timeout(options.timeoutMs);
+    let result: Awaited<
+      ReturnType<ReturnType<ThinkHarness["session"]>["wait"]>
+    >;
+    try {
+      result = await this.harness.session().wait(submissionId, timeout);
+    } catch (error) {
+      if (!timeout?.aborted) throw error;
+      return this.inspectSubmission(submissionId);
+    }
     // Read again for its times; deleted meanwhile (the app's terminal hook
     // may delete it), the wait's result still says how it ended, and it
     // ended no later than now.
@@ -1171,7 +1191,8 @@ export class Think<
   }
 
   async cancelSubmission(
-    submissionId: string
+    submissionId: string,
+    reason?: unknown
   ): Promise<CancelSubmissionResult> {
     const before = await this.inspectSubmission(submissionId);
     if (!before) return { outcome: "not_found", submissionId };
@@ -1181,7 +1202,7 @@ export class Think<
     const session = this.harness.session().id;
     // Read before the cancel: the app's terminal hook may delete the record.
     const ids = await this.harness.submittedMessageIds(session, submissionId);
-    await this.harness.session().abort(submissionId);
+    await this.harness.abort(session, submissionId, cancelReason(reason));
     await this.harness.session().wait(submissionId);
     const after = (await this.inspectSubmission(submissionId)) ?? before;
     // Only a started submission places its messages; one that never ran

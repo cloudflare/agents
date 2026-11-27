@@ -159,6 +159,24 @@ const OPERATION_DEFINITION = "__cf_think_harness_operation";
  * listed and deleted apart from other operations, and kept across a reset.
  */
 const SUBMISSION_DEFINITION = "__cf_think_harness_submission";
+
+/** The longest caller's reason kept on an aborted operation's run. */
+const MAX_ABORT_REASON = 1024;
+
+/**
+ * The reason a caller gave when it aborted the operation of `record`
+ * ({@link ThinkHarness.abort}), or `undefined` when the run was not
+ * cancelled or was cancelled with the harness's own `"withdrawn"` or
+ * `"aborted"`. Only `abort` cancels an operation's run.
+ */
+function callerAbortReason(record: TaskRecord): string | undefined {
+  return record.status === "aborted" &&
+    record.reason !== undefined &&
+    record.reason !== "withdrawn" &&
+    record.reason !== "aborted"
+    ? record.reason
+    : undefined;
+}
 const DEFINITIONS = [OPERATION_DEFINITION, SUBMISSION_DEFINITION] as const;
 /**
  * The session value (Sessions config) that records a session the harness
@@ -941,7 +959,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         // An existing run is found by its id; a key it was not given
         // would not match its row.
         ...(key !== undefined && !byId && { idempotencyKey: key }),
-        ...(options.metadata !== undefined && { metadata: options.metadata })
+        ...(options.metadata !== undefined && { metadata: options.metadata }),
+        // A submission is accepted first and runs from the alarm, as on
+        // Think: its caller gets it back `pending`.
+        ...(options.submission && { start: "alarm" as const })
       }
     );
     // Two first submissions of one key can race past the checks above;
@@ -1022,8 +1043,18 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     return this.#tasks.deleteRun(record.runId);
   }
 
-  /** @internal Stop one operation, or everything open in a session. */
-  async abort(session: ThinkSessionId, operationId?: string): Promise<boolean> {
+  /**
+   * @internal Stop one operation, or everything open in a session.
+   *
+   * @param reason - The caller's reason, kept as the cancelled run's reason
+   *   and reported as the operation's `abortReason`. Without one the run
+   *   records `"withdrawn"` (it had not started) or `"aborted"`.
+   */
+  async abort(
+    session: ThinkSessionId,
+    operationId?: string,
+    reason?: string
+  ): Promise<boolean> {
     await this.lifecycle.ready();
     const targets =
       operationId === undefined
@@ -1041,7 +1072,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       for (const record of targets) {
         await this.#tasks.cancel(
           record.runId,
-          isQueued(record) ? "withdrawn" : "aborted"
+          reason === undefined
+            ? isQueued(record)
+              ? "withdrawn"
+              : "aborted"
+            : reason.slice(0, MAX_ABORT_REASON)
         );
       }
     } finally {
@@ -1112,7 +1147,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       ...(record.idempotencyKey !== undefined && {
         idempotencyKey: callerKeyOf(record.idempotencyKey)
       }),
-      ...(record.metadata !== undefined && { metadata: record.metadata })
+      ...(record.metadata !== undefined && { metadata: record.metadata }),
+      ...(callerAbortReason(record) !== undefined && {
+        abortReason: callerAbortReason(record)
+      })
     };
   }
 
@@ -2629,7 +2667,15 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             : record.error?.message
         );
       default:
-        return unanswered(record.reason ?? "aborted");
+        // A caller's reason is its own text: whether the operation was
+        // withdrawn or aborted is whether its run had started.
+        return unanswered(
+          callerAbortReason(record) === undefined
+            ? (record.reason ?? "aborted")
+            : record.startedAt === undefined
+              ? "withdrawn"
+              : "aborted"
+        );
     }
   }
 

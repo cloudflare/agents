@@ -175,6 +175,8 @@ export type ThinkOperationInspection = ThinkOperationStatus & {
   readonly settledAt?: number;
   readonly idempotencyKey?: string;
   readonly metadata?: Record<string, TaskJson>;
+  /** The reason the caller that aborted the operation gave, if it gave one. */
+  readonly abortReason?: string;
 };
 
 /**

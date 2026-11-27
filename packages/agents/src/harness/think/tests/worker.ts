@@ -833,6 +833,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return this.harness.pending();
   }
 
+  /** Abort with the caller's own reason, through the internal method. */
+  abortWithReason(operationId: string, reason: string): Promise<boolean> {
+    return this.harness.abort(this.harness.session().id, operationId, reason);
+  }
+
   abort(operationId?: string, session?: string): Promise<boolean> {
     return this.harness.session(session).abort(operationId);
   }

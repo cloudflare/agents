@@ -220,6 +220,69 @@ describe("ThinkHarness turns", () => {
     ]);
   });
 
+  it("accepts a submission first and runs it from the alarm", async () => {
+    const stub = fresh();
+    const receipt = await stub.submit("one", {
+      operationId: "sub-pending",
+      submission: true
+    });
+    // Accepted, not started: its caller gets it back queued, as Think's
+    // `submitMessages` returns `pending`. An operation starts at once.
+    expect(await stub.inspect(receipt.operationId)).toMatchObject({
+      status: "queued"
+    });
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "done"
+    });
+  });
+
+  it("keeps a caller's reason on an aborted operation, and still says whether it had started", async () => {
+    const stub = fresh();
+    // Running: held at the gate.
+    await stub.submit("gate", { operationId: "running" });
+    await stub.gateStarted(1);
+    // Queued behind it.
+    await stub.submit("later", { operationId: "queued" });
+    expect(await stub.abortWithReason("queued", "stop")).toBe(true);
+    expect(await stub.abortWithReason("running", "x".repeat(5000))).toBe(true);
+    await stub.release();
+
+    // The public result tells withdrawn from aborted by whether the run
+    // had started, whatever the caller's text.
+    expect(await stub.wait("queued")).toMatchObject({
+      status: "unanswered",
+      reason: "withdrawn"
+    });
+    expect(await stub.wait("running")).toMatchObject({
+      status: "unanswered",
+      reason: "aborted"
+    });
+    // The caller's text is on the inspection, capped.
+    expect(JSON.parse(await stub.inspectRecord("queued"))).toMatchObject({
+      reason: "withdrawn",
+      abortReason: "stop"
+    });
+    expect(
+      JSON.parse(await stub.inspectRecord("running")).abortReason
+    ).toHaveLength(1024);
+  });
+
+  it("reports no caller's reason for an abort that gave none", async () => {
+    const stub = fresh();
+    await stub.submit("gate", { operationId: "running" });
+    await stub.gateStarted(1);
+    await stub.submit("later", { operationId: "queued" });
+    await stub.abort("queued");
+    await stub.abort("running");
+    await stub.release();
+    const queued = JSON.parse(await stub.inspectRecord("queued"));
+    const running = JSON.parse(await stub.inspectRecord("running"));
+    expect(queued).toMatchObject({ reason: "withdrawn" });
+    expect(running).toMatchObject({ reason: "aborted" });
+    expect(queued.abortReason).toBeUndefined();
+    expect(running.abortReason).toBeUndefined();
+  });
+
   it("treats an empty idempotency key as none, as Think does", async () => {
     const stub = fresh();
     const first = await stub.submit("one", { idempotencyKey: "" });
