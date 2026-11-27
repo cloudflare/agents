@@ -277,5 +277,32 @@
     "test": "ThinkConfigStore > stores, reads and deletes keys",
     "reason": "Pins ThinkConfigStore's own get, set and delete of arbitrary keys through Think's private _cfConfig. An app only reaches the store through configure() and getConfig(), which never delete; nothing an app can observe.",
     "mechanicsOnly": true
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > fires onChatRecovery for an interrupted fiber",
+    "reason": "an interrupted turn built from seeded private stream and fiber rows (`insertInterruptedStream`, `insertInterruptedFiber`), recovered by hand (`triggerFiberRecovery`)",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > onChatRecovery's context after a reset > tells onChatRecovery the partial a reset cut off mid-reply"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > recovers a pre-stream interrupted chat fiber from its early snapshot",
+    "reason": "a seeded private fiber snapshot with no stream rows, recovered by hand",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > onChatRecovery's context after a reset > tells onChatRecovery of a turn a reset cut off before its first chunk, with no partial"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > exposes recoveryRootRequestId on the onChatRecovery context (#1631)",
+    "reason": "a seeded private incident and fiber, recovered by hand",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > onChatRecovery's context after a reset > tells onChatRecovery the partial a reset cut off mid-reply"
+    }
   }
 ]
