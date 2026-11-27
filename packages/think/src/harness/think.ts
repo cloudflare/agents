@@ -940,26 +940,33 @@ export class Think<
               error
             });
           }
-          await this.onChatResponse({
-            // As on Think, a turn that ended before it wrote anything still
-            // reports, with an empty assistant message.
-            message: end.message ?? {
-              id: end.messageId ?? crypto.randomUUID(),
-              role: "assistant",
-              parts: []
-            },
-            requestId: end.operationId,
-            // As `beforeTurn` saw it, if the turn got that far.
-            continuation: continued ?? false,
-            status:
-              end.status === "done"
-                ? "completed"
-                : end.reason === "aborted"
-                  ? "aborted"
-                  : "error",
-            ...(end.status === "unanswered" &&
-              end.reason !== undefined && { error: end.reason })
-          });
+          this.#respondingContext = this.#messengers
+            ? await this.#latestMessengerContext()
+            : undefined;
+          try {
+            await this.onChatResponse({
+              // As on Think, a turn that ended before it wrote anything still
+              // reports, with an empty assistant message.
+              message: end.message ?? {
+                id: end.messageId ?? crypto.randomUUID(),
+                role: "assistant",
+                parts: []
+              },
+              requestId: end.operationId,
+              // As `beforeTurn` saw it, if the turn got that far.
+              continuation: continued ?? false,
+              status:
+                end.status === "done"
+                  ? "completed"
+                  : end.reason === "aborted"
+                    ? "aborted"
+                    : "error",
+              ...(end.status === "unanswered" &&
+                end.reason !== undefined && { error: end.reason })
+            });
+          } finally {
+            this.#respondingContext = undefined;
+          }
         },
         classifyError: (error) => this.#classify(error)
       }
@@ -2136,7 +2143,35 @@ export class Think<
     const active =
       running !== undefined ? this.#messengerContexts.get(running) : undefined;
     if (active) return active;
+    // While `onChatResponse` runs, its turn's, from its user message.
+    if (this.#respondingContext) return this.#respondingContext;
     return messengerOf(this.messages.at(-1));
+  }
+
+  /** The messenger context of the turn whose `onChatResponse` runs. */
+  #respondingContext: MessengerContext | undefined;
+
+  /** A message's messenger context, if a messenger's channel is stamped on it. */
+  #trustedMessengerOf(
+    message: UIMessage | undefined
+  ): MessengerContext | undefined {
+    const channel = message ? channelFromMessages([message]) : undefined;
+    if (channel === undefined) return undefined;
+    const kind = this.#channels?.get(channel)?.kind;
+    const messenger =
+      kind === "messenger" || this.#messengers?.ids.includes(channel);
+    return messenger ? messengerOf(message) : undefined;
+  }
+
+  /** The latest user message's trusted messenger context, as stored. */
+  async #latestMessengerContext(): Promise<MessengerContext | undefined> {
+    const user = [...this.#transcript.messages]
+      .reverse()
+      .find((message) => message.role === "user");
+    if (!user) return undefined;
+    // Read again: a stamp written at the turn's start may be newer.
+    const stored = await (await this.#rootHandle()).getMessage(user.id);
+    return this.#trustedMessengerOf((stored as UIMessage | null) ?? user);
   }
 
   /**
@@ -3067,7 +3102,9 @@ export class Think<
       // As in Think, the turn's messenger context: kept on its user
       // message, or the webhook's, stamped with the channel.
       const webhook = user ? this.#messengers?.contextOf(user.id) : undefined;
-      const context = messengerOf(user) ?? webhook;
+      // A message's own context is trusted only on a messenger's channel,
+      // which only the server stamps: a browser cannot claim a sender.
+      const context = this.#trustedMessengerOf(user) ?? webhook;
       if (context) this.#messengerContexts.set(turn.operationId, context);
       if (messenger !== undefined && user) {
         channel = messenger;
@@ -3087,7 +3124,7 @@ export class Think<
         context: resolveChannelContext(channel, {
           registry: this.#channels,
           requestId: turn.operationId,
-          messengerContext: () => undefined,
+          messengerContext: () => context,
           emit: (event) => emit.call(this, event.type, event.payload)
         }),
         definition: channel ? this.#channels?.get(channel) : undefined

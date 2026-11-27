@@ -232,8 +232,11 @@ describe("deliverToSurfaces", () => {
     );
     // The fake records a stream that broke off as `uncertain`: the cut-off
     // response was read as ended, with nothing of it to post.
-    expect((await stub.getPosts()).map((p) => p.outcome)).not.toContain(
-      "uncertain"
+    const posts = await stub.getPosts();
+    expect(posts.map((p) => p.outcome)).not.toContain("uncertain");
+    // The later run's answer is posted.
+    expect(posts.some((p) => p.text === "Hello" && p.outcome === "ok")).toBe(
+      true
     );
   });
 

@@ -25,6 +25,7 @@ import {
 } from "agents/internal";
 import {
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
+  CHAT_RECOVERY_TASK_NAME,
   type ChatRecoveryIncident
 } from "agents/chat";
 import {
@@ -201,15 +202,32 @@ export function messengerChannels(options: {
     if (!definition || typeof threadId !== "string") return;
     const posted = await partial;
     const text = await textOf(turn.messageIds.at(-1));
-    const posts = recoveredReplyPosts(definition, {
-      outcome: turn.outcome === "failed" ? "interrupted" : "completed",
-      text: text.startsWith(posted) ? text.slice(posted.length) : text,
-      partialPosted: posted.trim().length > 0
-    });
-    await chat().initialize();
-    for (const post of posts) {
-      await definition.adapter.postMessage(threadId, post);
-    }
+    // Posted as a recovered reply is: a durable delivery that keeps its
+    // cursor, so a rejected part does not hold back the parts after it.
+    const claim: RecoveredReplyClaim = {
+      messengerId: definition.id,
+      threadId,
+      partialText: posted
+    };
+    const outcome = recoveredReplyOutcome(
+      claim,
+      turn.outcome === "failed" ? "interrupted" : "completed",
+      text
+    );
+    await sendDelivery(
+      options.tasks,
+      RECOVERED_REPLY_SINK,
+      recoveredReplyId(`retried:${turn.startedBy}`),
+      claim,
+      {
+        sentAt: Date.now(),
+        attempts: 0,
+        progress: {
+          outcome: outcome.outcome,
+          ...(outcome.text !== undefined && { text: outcome.text })
+        }
+      }
+    );
   }
 
   /**
@@ -432,8 +450,22 @@ export function messengerChannels(options: {
             INTERRUPTED_MESSENGER_RESPONSE
         });
       }
+      // As Think does after recovering a reply: what queued behind it is
+      // answered, whatever the reply's stage.
+      drainThread(definition, event.thread.id);
     }
     await options.storage.delete(key);
+  });
+
+  // TEMPORARY: remove in the next minor. A recovery job think@0.24.0
+  // queued: that recovery does not run after the move, so the reply held
+  // for its incident is released as interrupted (the apology).
+  options.tasks.register(CHAT_RECOVERY_TASK_NAME, async (input: unknown) => {
+    const incidentId = (input as { data?: { incidentId?: unknown } } | null)
+      ?.data?.incidentId;
+    if (typeof incidentId === "string") {
+      await release(incidentId, "interrupted");
+    }
   });
 
   // TEMPORARY: remove in the next minor. A recovered reply think@0.24.0
@@ -489,6 +521,14 @@ export function messengerChannels(options: {
     const definition = definitions.find((d) => d.id === asker.channelKey);
     const threadId = (asker.address as { threadId?: unknown }).threadId;
     if (!definition || typeof threadId !== "string") return;
+    drainThread(definition, threadId);
+  }
+
+  /** Drain `threadId`'s stranded queue, in the background. */
+  function drainThread(
+    definition: NormalizedMessengerDefinition,
+    threadId: string
+  ): void {
     const drain = () => drainStrandedQueue(chat(), definition, threadId);
     const keepAlive = (
       options.parent as {
@@ -498,7 +538,7 @@ export function messengerChannels(options: {
     const running = keepAlive ? keepAlive.call(options.parent, drain) : drain();
     void running.catch((error: unknown) => {
       console.error(
-        `[Think] Failed to drain messages queued on ${threadId} after a reset`,
+        `[Think] Failed to drain messages queued on ${threadId}`,
         error
       );
     });

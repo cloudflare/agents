@@ -1520,6 +1520,24 @@ describe("think messengers core", () => {
       ).toEqual(["two", "three"]);
     });
 
+    it("apologizes for a reply think@0.24.0 held when its recovery job runs after a restart", async () => {
+      const name = `orphan-job-${crypto.randomUUID()}`;
+      const agent = () =>
+        getAgentByName(env.ThinkMessengerDeliveryTestAgent, name);
+      await (await agent()).seedReleasedRecoveryJobForTest();
+      await (await agent()).restartForTest().catch(() => undefined);
+      let posted: string[] = [];
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        posted = (await (await agent()).getAdapterCalls()).map(
+          (call) => call.content
+        );
+        if (posted.length > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      expect(posted).toEqual([INTERRUPTED_MESSENGER_RESPONSE]);
+    }, 30_000);
+
     it("never posts again a part of a reply think@0.24.0 settled that was rejected", async () => {
       expect(
         await afterRestart(
@@ -1615,6 +1633,16 @@ describe("think messengers core", () => {
         { id: "t1", text: "hello", threadId: "fake:dm-context" }
       ]);
       expect(await agent.getTurnThreadsForTest()).toEqual(["fake:dm-context"]);
+    });
+
+    it("gives a messenger turn's channel context and response hook its thread", async () => {
+      const agent = await sendBurst(`context-hooks-${crypto.randomUUID()}`, [
+        { id: "h1", text: "hello", threadId: "fake:dm-hooks" }
+      ]);
+      expect(await agent.getContextThreadsForTest()).toEqual({
+        channel: ["fake:dm-hooks"],
+        response: ["fake:dm-hooks"]
+      });
     });
 
     it("runs a messenger's turn on its channel", async () => {

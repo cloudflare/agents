@@ -873,6 +873,55 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       ...this.getTurnThreadsForTest(),
       this.getMessengerContext()?.thread.id ?? ""
     ]);
+    this.ctx.storage.kv.put("channel-threads", [
+      ...(this.ctx.storage.kv.get<string[]>("channel-threads") ?? []),
+      this.activeChannel?.messenger?.thread.id ?? ""
+    ]);
+  }
+
+  /** The messenger thread each response hook saw. */
+  override onChatResponse(): void {
+    this.ctx.storage.kv.put("response-threads", [
+      ...(this.ctx.storage.kv.get<string[]>("response-threads") ?? []),
+      this.getMessengerContext()?.thread.id ?? ""
+    ]);
+  }
+
+  /** The thread each turn's channel context, and its response hook, had. */
+  getContextThreadsForTest(): { channel: string[]; response: string[] } {
+    return {
+      channel: this.ctx.storage.kv.get<string[]>("channel-threads") ?? [],
+      response: this.ctx.storage.kv.get<string[]>("response-threads") ?? []
+    };
+  }
+
+  /**
+   * A reply think@0.24.0 kept unsettled while its incident still recovered,
+   * with the recovery job it had queued, for the next start.
+   */
+  async seedReleasedRecoveryJobForTest(): Promise<void> {
+    const incidentId = `${crypto.randomUUID()}:user-1`;
+    await this.ctx.storage.put(
+      `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`,
+      { incidentId, status: "scheduled" }
+    );
+    await this._seedLegacyRecoveredReply(incidentId, {
+      threadId: "fake:dm-job"
+    });
+    const runId = `chatrec_${crypto.randomUUID()}`;
+    // The Tasks tables exist before a row is written into them.
+    await this.tasks.get(runId);
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_agents_task_runs
+        (run_id, definition, input, status, metadata, idempotency_key,
+         retain, attempt, next_at, cancel_requested, created_at, updated_at,
+         checkpoint)
+      VALUES
+        (${runId}, '__cf_internal_chat_recovery',
+         ${JSON.stringify({ callback: "_chatRecoveryRetry", data: { incidentId }, delaySeconds: 0 })},
+         'pending', NULL, NULL, 0, 0, ${now}, 0, ${now}, ${now}, NULL)
+    `;
   }
 
   /** The messenger thread each turn had, as `beforeTurn` saw it. */
