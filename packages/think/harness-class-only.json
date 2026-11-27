@@ -620,10 +620,10 @@
   {
     "file": "messengers.test.ts",
     "test": "think messengers core > burst replies end to end (#2312) > answers messages queued behind a completed reply",
-    "reason": "drives the class's private messenger runtime (`_messengerRuntime.chat`'s state queue) and its reply recovery (`recoverMessengerReply`, `messengerReplySink`) directly, at the class's `completed` stage",
+    "reason": "drives the class's private messenger runtime (`_messengerRuntime.chat`'s state queue) and its reply recovery (`recoverMessengerReply`, `messengerReplySink`) directly, at the class's `completed` stage; the successor answers messages queued behind a reply that completed",
     "successor": {
       "file": "messengers.test.ts",
-      "test": "think messengers core > burst replies end to end (#2312) > answers a message queued behind a reply a reset cut off"
+      "test": "think messengers core > burst replies end to end (#2312) > answers the first message at once under a configured queue strategy (#2313)"
     }
   },
   {
