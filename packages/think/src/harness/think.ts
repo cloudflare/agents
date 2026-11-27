@@ -568,6 +568,9 @@ export class Think<
         compactedHead?: UIMessage[];
         /** The turn's `stopWhen`, checked as each step ends. */
         stopWhen?: TurnConfig["stopWhen"];
+        /** The writer of the reply's finish metadata, and its last part. */
+        finishWrite?: (part: unknown) => Record<string, unknown> | undefined;
+        lastFinish?: unknown;
         /** Each step's usage and finish reason, for `stopWhen`. */
         stepMeta?: Array<{ usage?: LanguageModelUsage; finishReason?: string }>;
         /** The step whose server tools `stopWhen` waits on. */
@@ -782,6 +785,13 @@ export class Think<
         // never stored. A reply that held only it is not stored at all.
         // As in Think: a structured workflow turn that ends without its
         // final-answer tool's answer fails.
+        finishMetadata: ({ operationId }) => {
+          const own = this.#ownTurn;
+          if (own?.operationId !== operationId) return undefined;
+          const part = own.lastFinish;
+          own.lastFinish = undefined;
+          return part === undefined ? undefined : own.finishWrite?.(part);
+        },
         beforeTurnEnd: ({ operationId }) => {
           const final = this.#finalAnswer;
           if (final?.operationId === operationId && !final.output) {
@@ -3718,10 +3728,16 @@ export class Think<
       this.#ownTurn.continuation = turn.continuation;
     }
     const turnContinuation = this.#ownTurn?.continuation ?? turn.continuation;
-    const lastAllowed = turn.step >= (config.maxSteps ?? this.maxSteps) - 1;
-    const endsTurn = (part: unknown) =>
-      lastAllowed ||
-      (part as { finishReason?: string }).finishReason !== "tool-calls";
+    // The writer hears the reply's finish once, when the harness ends the
+    // turn's stream (`finishMetadata`), with the last call's finish part.
+    if (writer && this.#ownTurn?.operationId === turn.operationId) {
+      this.#ownTurn.finishWrite = (part) =>
+        writer({
+          // SAFETY: the parts are the AI SDK's stream parts.
+          part: part as Parameters<MessageMetadataCallback>[0]["part"],
+          continuation: turnContinuation
+        });
+    }
     const sentSystem =
       final && typeof system === "string"
         ? [system, thinkFinalAnswerInstruction(final.name)]
@@ -3762,7 +3778,12 @@ export class Think<
           // the call that ends it (not a tool round's).
           const kind = (part as { type?: string }).type;
           if (kind === "start" && turn.step > 0) return undefined;
-          if (kind === "finish" && !endsTurn(part)) return undefined;
+          if (kind === "finish") {
+            if (this.#ownTurn?.operationId === turn.operationId) {
+              this.#ownTurn.lastFinish = part;
+            }
+            return undefined;
+          }
           return writer({
             // SAFETY: the parts are the AI SDK's stream parts.
             part: part as Parameters<MessageMetadataCallback>[0]["part"],
