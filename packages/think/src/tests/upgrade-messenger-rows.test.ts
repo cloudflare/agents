@@ -164,7 +164,12 @@ async function writeInterruptedReplyRun(
   await storage.put(`__cf_messenger_recovery:${runId}`, {
     event,
     stage,
-    tag: { stage, kind: "interim", turnEnded: false },
+    // 0.24's `defaultDeliveryTag(stage)`.
+    tag: {
+      stage,
+      kind: stage === "completed" ? "final" : "interim",
+      turnEnded: stage === "completed"
+    },
     thread: {
       _type: "chat:Thread",
       adapterName: "fake",
@@ -190,21 +195,25 @@ async function writeRecoveredReply(
   });
 }
 
-/** Start the object and wait until its posts reach `count`, or 20 s. */
+/**
+ * Start the object and wait until its posts reach `count` and no reply run
+ * is left open, or 20 s. A run still open then fails the test.
+ */
 async function postsAfterUpgrade(
   name: string,
   count: number
 ): Promise<string[]> {
   const agent = await getAgentByName(env.ThinkMessengerDeliveryTestAgent, name);
   let posted: string[] = [];
+  let open = -1;
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
     posted = (await agent.getAdapterCalls()).map((call) => call.content);
-    if (posted.length >= count && (await agent.openReplyRunsForTest()) === 0) {
-      break;
-    }
+    open = await agent.openReplyRunsForTest();
+    if (posted.length >= count && open === 0) break;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
+  expect(open).toBe(0);
   return posted;
 }
 
@@ -298,22 +307,34 @@ describe("messenger rows think@0.24.0 left, after the upgrade", () => {
         }
       );
       await writeRecoveredReply(storage, incidentId, {});
+      // As 0.24's `chatRecoveryTaskRunOptions` wrote an initial job: not
+      // retained, keyed by its callback and incident. Due a little after
+      // the upgrade's start, so the held reply's silence is seen first.
       storage.sql.exec(
         `INSERT INTO cf_agents_task_runs
-           (run_id, definition, input, state, retain, attempt, next_at,
-            created_at, updated_at)
-         VALUES (?, '__cf_internal_chat_recovery', ?, 'pending', 1, 0, ?, ?, ?)`,
+           (run_id, definition, input, state, metadata, idempotency_key,
+            retain, attempt, next_at, created_at, updated_at)
+         VALUES (?, '__cf_internal_chat_recovery', ?, 'pending', ?, ?, 0, 0,
+                 ?, ?, ?)`,
         `chatrec_${crypto.randomUUID()}`,
         JSON.stringify({
           callback: "_chatRecoveryRetry",
           data: { incidentId },
-          delaySeconds: 0
+          delaySeconds: 3
         }),
-        now,
+        JSON.stringify({ callback: "_chatRecoveryRetry", incidentId }),
+        `chat-recovery:_chatRecoveryRetry:${incidentId}`,
+        now + 3_000,
         now - 1_000,
         now - 1_000
       );
     });
+    // Held while its job waits: nothing is posted at the upgrade's start.
+    const agent = await getAgentByName(
+      env.ThinkMessengerDeliveryTestAgent,
+      name
+    );
+    expect(await agent.getAdapterCalls()).toEqual([]);
     expect(await postsAfterUpgrade(name, 1)).toEqual([
       INTERRUPTED_MESSENGER_RESPONSE
     ]);

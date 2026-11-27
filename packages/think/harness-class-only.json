@@ -686,7 +686,7 @@
     "reason": "seeds the class's own interrupted chat-turn run (`insertInterruptedFiber`, main's `__cf_internal_chat_turn` row with its snapshot, not a released shape) and replays it through the class's private `triggerFiberRecovery`",
     "successor": {
       "file": "channel-recovery.test.ts",
-      "test": "recovery × channels, after a real reset > re-applies a channel's policy to a turn a reset cut off"
+      "test": "recovery × channels, after a real reset > re-applies the channel's policy to a continuation a reset cut off mid-reply"
     }
   },
   {

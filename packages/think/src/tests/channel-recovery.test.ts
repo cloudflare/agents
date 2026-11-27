@@ -1,4 +1,4 @@
-import { env } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { getAgentByName } from "agents";
 import { describe, expect, it, vi } from "vitest";
 import type { UIMessage } from "ai";
@@ -342,6 +342,72 @@ describe("recovery × channels, after a real reset", () => {
     expect(await agent.getCapturedTurnChannelsForTest()).toEqual([""]);
     expect((await agent.getBeforeTurnLog()).at(-1)?.system).not.toContain(
       "VOICE MODE"
+    );
+  });
+
+  it("re-applies the channel's policy to a continuation a reset cut off mid-reply", async () => {
+    const room = `channel-reset-mid-${crypto.randomUUID()}`;
+    const agent = () => getAgentByName(env.ThinkTestAgent, room);
+    await (
+      await agent()
+    ).useSlowModelForTest(["one ", "two ", "three ", "four ", "five "], 150);
+    // A browser's turn runs on the web channel.
+    const res = await exports.default.fetch(
+      `http://example.com/agents/think-test-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const ws = res.webSocket;
+    if (!ws) throw new Error("no socket");
+    ws.accept();
+    let chunks = 0;
+    ws.addEventListener("message", (event) => {
+      const frame = JSON.parse(String(event.data)) as {
+        type?: string;
+        body?: string;
+      };
+      if (
+        frame.type === "cf_agent_use_chat_response" &&
+        frame.body?.includes("text-delta")
+      ) {
+        chunks++;
+      }
+    });
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_use_chat_request",
+        id: crypto.randomUUID(),
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [
+              {
+                id: crypto.randomUUID(),
+                role: "user",
+                parts: [{ type: "text", text: "cut me off" }]
+              }
+            ]
+          })
+        }
+      })
+    );
+    // Mid-reply: after some text.
+    await vi.waitFor(() => expect(chunks).toBeGreaterThanOrEqual(2), {
+      timeout: 10_000,
+      interval: 10
+    });
+    await (await agent()).resetIsolateForTest().catch(() => undefined);
+    await vi.waitFor(
+      async () =>
+        expect(
+          (await (await agent()).getCapturedTurnChannelsForTest()).length
+        ).toBeGreaterThan(0),
+      { timeout: 15_000, interval: 50 }
+    );
+    expect(await (await agent()).getCapturedTurnChannelsForTest()).toEqual([
+      "web"
+    ]);
+    expect((await (await agent()).getBeforeTurnLog()).at(-1)?.system).toContain(
+      "WEB MODE"
     );
   });
 });
