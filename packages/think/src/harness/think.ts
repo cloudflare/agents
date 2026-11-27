@@ -3294,11 +3294,14 @@ function withOperationIds<
     ...ctx,
     requestId: operationIdOf(ctx.requestId),
     recoveryRootRequestId: operationIdOf(ctx.recoveryRootRequestId),
+    // The definition derives both from the run id in its own formats
+    // (`<run>:`, `chat-turn:<run>`); an app is given the operation id for
+    // each, as `onChatRecovery` gives them.
     ...(ctx.incidentId !== undefined && {
-      incidentId: operationIdOf(ctx.incidentId)
+      incidentId: operationIdOf(ctx.requestId)
     }),
     ...(ctx.streamId !== undefined && {
-      streamId: operationIdOf(ctx.streamId)
+      streamId: operationIdOf(ctx.requestId)
     })
   };
 }
