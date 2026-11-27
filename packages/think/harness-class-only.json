@@ -28,133 +28,133 @@
   },
   {
     "file": "hooks.test.ts",
-    "test": "Think — host bridge methods > _insideInferenceLoop is false outside a turn",
+    "test": "Think \u2014 host bridge methods > _insideInferenceLoop is false outside a turn",
     "reason": "reads the class's private `_insideInferenceLoop` flag (`isInsideInferenceLoop`), the seam `addMessages` uses to hold its broadcast mid-turn",
     "successor": {
       "file": "hooks.test.ts",
-      "test": "Think — host bridge methods > sends a client the transcript addMessages changes outside a turn, before and after one"
+      "test": "Think \u2014 host bridge methods > sends a client the transcript addMessages changes outside a turn, before and after one"
     }
   },
   {
     "file": "hooks.test.ts",
-    "test": "Think — host bridge methods > _insideInferenceLoop is false after a completed turn",
+    "test": "Think \u2014 host bridge methods > _insideInferenceLoop is false after a completed turn",
     "reason": "reads the class's private `_insideInferenceLoop` flag (`isInsideInferenceLoop`), the seam `addMessages` uses to hold its broadcast mid-turn",
     "successor": {
       "file": "hooks.test.ts",
-      "test": "Think — host bridge methods > sends a client the transcript addMessages changes outside a turn, before and after one"
+      "test": "Think \u2014 host bridge methods > sends a client the transcript addMessages changes outside a turn, before and after one"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — dynamic configuration > should not let legacy config overwrite newer think_config values on rerun",
+    "test": "Think \u2014 dynamic configuration > should not let legacy config overwrite newer think_config values on rerun",
     "reason": "Reruns the legacy config lift through Think's private _migrateLegacyConfigToThinkTable seam.",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — dynamic configuration > keeps newer config when a restart lifts the legacy row again"
+      "test": "Think \u2014 dynamic configuration > keeps newer config when a restart lifts the legacy row again"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — context blocks > should use context blocks in system prompt assembly even when called directly",
+    "test": "Think \u2014 context blocks > should use context blocks in system prompt assembly even when called directly",
     "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — the system prompt a turn sends > sends the context blocks, loaded on their own"
+      "test": "Think \u2014 the system prompt a turn sends > sends the context blocks, loaded on their own"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — context blocks > should render empty writable blocks in system prompt",
+    "test": "Think \u2014 context blocks > should render empty writable blocks in system prompt",
     "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — the system prompt a turn sends > sends an empty writable block"
+      "test": "Think \u2014 the system prompt a turn sends > sends an empty writable block"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — context blocks > keeps Think's default prompt out when a skills agent does not override getSystemPrompt",
+    "test": "Think \u2014 context blocks > keeps Think's default prompt out when a skills agent does not override getSystemPrompt",
     "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — the system prompt a turn sends > sends the skill catalog without Think's default prompt when getSystemPrompt is not overridden"
+      "test": "Think \u2014 the system prompt a turn sends > sends the skill catalog without Think's default prompt when getSystemPrompt is not overridden"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — context blocks > puts an overridden getSystemPrompt above the skills block",
+    "test": "Think \u2014 context blocks > puts an overridden getSystemPrompt above the skills block",
     "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — the system prompt a turn sends > sends an overridden getSystemPrompt above the skill catalog"
+      "test": "Think \u2014 the system prompt a turn sends > sends an overridden getSystemPrompt above the skill catalog"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — context blocks > keeps an inherited or class-field getSystemPrompt alongside skills",
+    "test": "Think \u2014 context blocks > keeps an inherited or class-field getSystemPrompt alongside skills",
     "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — the system prompt a turn sends > sends an inherited or class-field getSystemPrompt above the skill catalog"
+      "test": "Think \u2014 the system prompt a turn sends > sends an inherited or class-field getSystemPrompt above the skill catalog"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — context blocks > loads skills from files in the Workspace and follows edits without rebuilding the prompt",
+    "test": "Think \u2014 context blocks > loads skills from files in the Workspace and follows edits without rebuilding the prompt",
     "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — the system prompt a turn sends > keeps the system prompt the same while Workspace skills change"
+      "test": "Think \u2014 the system prompt a turn sends > keeps the system prompt the same while Workspace skills change"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — context blocks > folds a changed skills catalog into the prompt when history is cleared",
+    "test": "Think \u2014 context blocks > folds a changed skills catalog into the prompt when history is cleared",
     "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — the system prompt a turn sends > folds a changed skill catalog into the system prompt once history is cleared"
+      "test": "Think \u2014 the system prompt a turn sends > folds a changed skill catalog into the system prompt once history is cleared"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — async configureSession > should have working context blocks from async config",
+    "test": "Think \u2014 async configureSession > should have working context blocks from async config",
     "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — the system prompt a turn sends > sends the context blocks of an async configureSession"
+      "test": "Think \u2014 the system prompt a turn sends > sends the context blocks of an async configureSession"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — error handling > should recover and continue chatting after error",
+    "test": "Think \u2014 error handling > should recover and continue chatting after error",
     "reason": "the turn's failure is injected through the class's private `_transformInferenceResult` seam (`_errorConfig`, via `testChatWithError`)",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — error handling > answers the next turn after a model failure"
+      "test": "Think \u2014 error handling > answers the next turn after a model failure"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — error handling > should persist partial assistant message on error",
+    "test": "Think \u2014 error handling > should persist partial assistant message on error",
     "reason": "the turn's failure is injected through the class's private `_transformInferenceResult` seam (`_errorConfig`, via `testChatWithError`)",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — error handling > keeps the partial reply of a turn whose model reports an error"
+      "test": "Think \u2014 error handling > keeps the partial reply of a turn whose model reports an error"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — error handling > bridges an in-band stream error to chat:request:failed",
+    "test": "Think \u2014 error handling > bridges an in-band stream error to chat:request:failed",
     "reason": "the in-band error is fed through the class's private `_pumpReply` (`runInBandStreamErrorForTest`)",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — error handling > bridges an in-band stream error to chat:request:failed on the RPC path"
+      "test": "Think \u2014 error handling > bridges an in-band stream error to chat:request:failed on the RPC path"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > marks the incident failed when onChatRecovery throws",
+    "test": "Think \u2014 onChatRecovery > marks the incident failed when onChatRecovery throws",
     "reason": "seeds a fiber row and reads the class's recovery incident records (cf:chat-recovery:incident:*)",
     "successor": {
       "file": "chat-recovery-public.test.ts",
@@ -163,113 +163,113 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatResponse > should report in-band stream errors through RPC chat onError",
+    "test": "Think \u2014 onChatResponse > should report in-band stream errors through RPC chat onError",
     "reason": "it reads the stream's status from the class's private reply-stream records (`_replyStreams`, via `getLatestStreamStatusForTest`)",
     "successor": {
       "file": "think-session.test.ts",
-      "test": "Think — onChatResponse > reports an in-band stream error to the RPC caller, the response hook and observability"
+      "test": "Think \u2014 onChatResponse > reports an in-band stream error to the RPC caller, the response hook and observability"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — chatRecovery > hands off recovery after the durable turn run exists and before turn completion",
+    "test": "Think \u2014 chatRecovery > hands off recovery after the durable turn run exists and before turn completion",
     "reason": "when the recovery handoff is accepted relative to the durable turn run (`recoveryAcceptanceForTest`: acceptedBeforeCompletion, durableAtAcceptance): the class's handoff timing",
     "mechanicsOnly": true
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — chatRecovery > keeps pre-handoff failure on the current Task and replaces only post-handoff failure",
+    "test": "Think \u2014 chatRecovery > keeps pre-handoff failure on the current Task and replaces only post-handoff failure",
     "reason": "the transport the class uses for recovery work, counted as Tasks and schedules before and after the handoff (`testRecoveryDispatchHandoffForTest`)",
     "mechanicsOnly": true
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > deletes the incident record once recovery completes",
+    "test": "Think \u2014 onChatRecovery > deletes the incident record once recovery completes",
     "reason": "the class's private incident row is deleted on completion (`beginIncidentForTest`, `updateIncidentForTest`, `getChatRecoveryIncidentsForTest`)",
     "mechanicsOnly": true
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > sweeps incidents that have been inactive past the TTL",
+    "test": "Think \u2014 onChatRecovery > sweeps incidents that have been inactive past the TTL",
     "reason": "the class's incident TTL sweep over seeded private incident rows (`seedIncidentForTest`)",
     "mechanicsOnly": true
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > replaces an aged file part with the exact eviction marker",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > replaces an aged file part with the exact eviction marker",
     "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
     "successor": {
       "file": "media-eviction.test.ts",
-      "test": "mediaEviction — a pass that runs on its own > leaves the exact marker in an aged file part and keeps its prose"
+      "test": "mediaEviction \u2014 a pass that runs on its own > leaves the exact marker in an aged file part and keeps its prose"
     }
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > writes raw decoded bytes to the Workspace with the right mime type",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > writes raw decoded bytes to the Workspace with the right mime type",
     "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
     "successor": {
       "file": "media-eviction.test.ts",
-      "test": "mediaEviction — a pass that runs on its own > writes the raw decoded bytes to the Workspace"
+      "test": "mediaEviction \u2014 a pass that runs on its own > writes the raw decoded bytes to the Workspace"
     }
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > evicts a data-URL string nested in a tool output",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > evicts a data-URL string nested in a tool output",
     "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
     "successor": {
       "file": "media-eviction.test.ts",
-      "test": "mediaEviction — a pass that runs on its own > evicts a data URL nested in a tool output and keeps the output's shape"
+      "test": "mediaEviction \u2014 a pass that runs on its own > evicts a data URL nested in a tool output and keeps the output's shape"
     }
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > leaves recent messages alone",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > leaves recent messages alone",
     "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
     "successor": {
       "file": "media-eviction.test.ts",
-      "test": "mediaEviction — a pass that runs on its own > leaves the recent messages alone, even with keepRecentMessages 0"
+      "test": "mediaEviction \u2014 a pass that runs on its own > leaves the recent messages alone, even with keepRecentMessages 0"
     }
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > starts a pass where the last one got to, so it re-reads only new rows",
-    "reason": "Pins how many stored rows a pass reads after a pass that evicted nothing (the cursor's cost), through Think's private _evictAgedMediaBestEffort seam; nothing an app can observe. The cursor after an eviction is shown through passes that run on their own in 'mediaEviction — a pass that runs on its own > a backlog pass reads only what is new since the cursor, not the whole path again'.",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > starts a pass where the last one got to, so it re-reads only new rows",
+    "reason": "Pins how many stored rows a pass reads after a pass that evicted nothing (the cursor's cost), through Think's private _evictAgedMediaBestEffort seam; nothing an app can observe. The cursor after an eviction is shown through passes that run on their own in 'mediaEviction \u2014 a pass that runs on its own > a backlog pass reads only what is new since the cursor, not the whole path again'.",
     "mechanicsOnly": true
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > evicts a payload larger than one row, leaving the bytes in one place",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > evicts a payload larger than one row, leaving the bytes in one place",
     "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
     "successor": {
       "file": "media-eviction.test.ts",
-      "test": "mediaEviction — a pass that runs on its own > evicts a payload larger than one row and leaves the bytes in one place"
+      "test": "mediaEviction \u2014 a pass that runs on its own > evicts a payload larger than one row and leaves the bytes in one place"
     }
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > bounds each pass and drains the reported backlog",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > bounds each pass and drains the reported backlog",
     "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
     "successor": {
       "file": "media-eviction.test.ts",
-      "test": "mediaEviction — a pass that runs on its own > drains a backlog on its own when each pass is bounded"
+      "test": "mediaEviction \u2014 a pass that runs on its own > drains a backlog on its own when each pass is bounded"
     }
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > reaches older media past large text rows that fill a pass",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > reaches older media past large text rows that fill a pass",
     "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
     "successor": {
       "file": "media-eviction.test.ts",
-      "test": "mediaEviction — a pass that runs on its own > reaches older media past large text rows that fill a pass"
+      "test": "mediaEviction \u2014 a pass that runs on its own > reaches older media past large text rows that fill a pass"
     }
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > mediaEviction:false keeps the image visible to the model",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > mediaEviction:false keeps the image visible to the model",
     "reason": "Drives a pass through Think's private _evictAgedMediaBestEffort seam.",
     "successor": {
       "file": "media-eviction.test.ts",
-      "test": "mediaEviction — a pass that runs on its own > keeps the image with mediaEviction false: no pass is scheduled"
+      "test": "mediaEviction \u2014 a pass that runs on its own > keeps the image with mediaEviction false: no pass is scheduled"
     }
   },
   {
@@ -280,7 +280,7 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > fires onChatRecovery for an interrupted fiber",
+    "test": "Think \u2014 onChatRecovery > fires onChatRecovery for an interrupted fiber",
     "reason": "an interrupted turn built from seeded private stream and fiber rows (`insertInterruptedStream`, `insertInterruptedFiber`), recovered by hand (`triggerFiberRecovery`)",
     "successor": {
       "file": "chat-recovery-public.test.ts",
@@ -289,7 +289,7 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > recovers a pre-stream interrupted chat fiber from its early snapshot",
+    "test": "Think \u2014 onChatRecovery > recovers a pre-stream interrupted chat fiber from its early snapshot",
     "reason": "a seeded private fiber snapshot with no stream rows, recovered by hand",
     "successor": {
       "file": "chat-recovery-public.test.ts",
@@ -298,7 +298,7 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > exposes recoveryRootRequestId on the onChatRecovery context (#1631)",
+    "test": "Think \u2014 onChatRecovery > exposes recoveryRootRequestId on the onChatRecovery context (#1631)",
     "reason": "a seeded private incident and fiber, recovered by hand",
     "successor": {
       "file": "chat-recovery-public.test.ts",
@@ -312,6 +312,69 @@
     "successor": {
       "file": "messengers.test.ts",
       "test": "think messengers core > streamed replies on adapters without native streaming > answers a webhook its platform sent twice once"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > recovered replies reach the thread (#2106) > apologizes on start for a pending reply whose incident is gone",
+    "reason": "calls the class's private start step `_replayMessengerRecoveryDeliveries` and waits on its delivery run (`tasks.peek` of `recoveredReplyId`); the successor seeds the same released row and restarts the object",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > recovered replies reach the thread (#2106) > apologizes after a restart for a reply think@0.24.0 left unsettled"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > recovered replies reach the thread (#2106) > keeps a pending reply on start while its incident is still recovering",
+    "reason": "holds a released reply for the class's own recovery incident (`cf:chat-recovery:incident:`), which the previous engine ran; after the move that recovery does not run (left-over jobs complete without doing anything), so the shell apologizes, as for an incident that is gone",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > recovered replies reach the thread (#2106) > apologizes after a restart for a reply think@0.24.0 left unsettled"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > recovered replies reach the thread (#2106) > holds a migrated reply whose incident still recovers, so recovery's release delivers it",
+    "reason": "releases the held delivery through the class's private `_releaseMessengerRecovery` after its private start step; the shell has no previous-engine recovery to release it, so a released reply left unsettled is apologized for",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > recovered replies reach the thread (#2106) > apologizes after a restart for a reply think@0.24.0 left unsettled"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > recovered replies reach the thread (#2106) > resumes a multi-post recovered reply after its last checkpoint",
+    "reason": "calls the class's private start step `_replayMessengerRecoveryDeliveries`; the successor seeds the same released row (cursor 1) and restarts the object",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > recovered replies reach the thread (#2106) > posts the rest of a reply think@0.24.0 settled, from its cursor, after a restart"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > recovered replies reach the thread (#2106) > retries a recovered reply whose live delivery fails, never re-sending a rejected post",
+    "reason": "sends and releases the class's `think-messenger-recovery` delivery directly (`sendDelivery`/`releaseDelivery`, a class-private payload) and reads its checkpoint; the successor rejects a post of a released reply across a restart",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > recovered replies reach the thread (#2106) > never posts again a part of a reply think@0.24.0 settled that was rejected"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > recovered replies reach the thread (#2106) > posts each chunk once when overlapping deliveries share a recovered reply",
+    "reason": "releases the class's held delivery twice at once beside its private start step (`releaseDelivery`, `_replayMessengerRecoveryDeliveries`); the successor delivers a released reply's posts each once, from its cursor",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > recovered replies reach the thread (#2106) > posts the rest of a reply think@0.24.0 settled, from its cursor, after a restart"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > recovered replies reach the thread (#2106) > releases the reply with its outcome before recovery reports completion",
+    "reason": "reads the class's staged reply state (`tasks.checkpointOf` of `recoveredReplyId`) when its recovery emits `chat:recovery:completed`",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > recovered replies reach the thread (#2106) > posts the recovered answer instead of the apology (conversation: self)"
     }
   }
 ]
