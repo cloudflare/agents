@@ -23,6 +23,7 @@ import {
   isResp,
   rid,
   settle,
+  transcriptShape,
   user,
   type Cls,
   type Frame
@@ -220,17 +221,22 @@ async function fuzzRoom(cls: Cls, mode: string, seed: number) {
   const person = async (slot: number) => {
     const r = actor(slot + 1);
     while (Date.now() < deadline) {
+      // Every step makes the same draws whatever the socket did, so a close
+      // the server caused does not shift this tab's later choices.
+      const leave = r() < 0.03;
+      const think = 300 + Math.floor(r() * 2200);
+      const x = r();
+      const tag = pick(r, TAGS);
+      const which = r();
       let tab = current(slot);
-      if (tab.closed || r() < 0.03) {
+      if (tab.closed || leave) {
         tab.close();
         tab = await reopen(slot);
         log(`reconnect ${slot}`);
       }
-      await wait(300 + Math.floor(r() * 2200));
+      await wait(think);
       if (Date.now() >= deadline || tab.closed) continue;
-      const x = r();
       if (x < 0.62) {
-        const tag = pick(r, TAGS);
         const id = rid(`q${slot}`);
         const m = user(`${tag} msg ${submits++}`);
         tab.request(id, [m], { clientTools: CLIENT_TOOLS });
@@ -238,7 +244,7 @@ async function fuzzRoom(cls: Cls, mode: string, seed: number) {
         log(`send ${id} ${tag} on ${slot}`);
       } else if (x < 0.8) {
         const mine = sent.filter((q) => q.slot === slot).slice(-3);
-        const target = mine[Math.floor(r() * mine.length)];
+        const target = mine[Math.floor(which * mine.length)];
         if (target) {
           tab.send({ type: MT.CANCEL, id: target.id });
           log(`cancel ${target.id} on ${slot}`);
@@ -247,9 +253,13 @@ async function fuzzRoom(cls: Cls, mode: string, seed: number) {
         tab.send({ type: MT.CLEAR });
         log(`clear on ${slot}`);
       } else if (x < 0.88) {
+        // The last request this tab saw stream that has not ended on it.
+        const ended = new Set(
+          tab.frames.filter((f) => isResp(f) && f.done).map((f) => f.id)
+        );
         const streaming = [...tab.frames]
           .reverse()
-          .find((f) => isResp(f) && !f.done);
+          .find((f) => isResp(f) && !f.done && !ended.has(f.id));
         if (streaming?.id) {
           tab.send({ type: MT.CANCEL, id: streaming.id });
           log(`cancel streaming ${streaming.id} on ${slot}`);
@@ -382,22 +392,25 @@ async function fuzzRoom(cls: Cls, mode: string, seed: number) {
         requests: sent.map((q) => ({
           ...q,
           stored: stored.has(q.uid),
-          frames: slots[q.slot].map((t) =>
-            t.frames
-              .filter((f) => isResp(f) && f.id === q.id)
-              .map(
-                (f) =>
-                  `${f.done ? `done:${f.outcome ?? ""}` : "chunk"}${f.replay ? ":replay" : ""}`
-              )
-          )
+          frames: slots
+            .flat()
+            .map((t) =>
+              t.frames
+                .filter((f) => isResp(f) && f.id === q.id)
+                .map(
+                  (f) =>
+                    `${f.done ? `done:${f.outcome ?? ""}` : "chunk"}${f.replay ? ":replay" : ""}`
+                )
+            )
         })),
+        transcript: transcriptShape(msgs),
         events: state.events
       },
       null,
       1
     )
   );
-  return { room, seed, submits, resets, bad, trace };
+  return { room, seed, submits, resets, starts: state.starts, bad, trace };
 }
 
 const ROOMS: [Cls, string][] = [
@@ -409,16 +422,19 @@ const ROOMS: [Cls, string][] = [
 
 describe.concurrent("reset fuzz", () => {
   ROOMS.forEach(([cls, mode], i) => {
-    it(`${cls}, ${mode}: ${MINUTES} min of seeded actions and resets, then every invariant`, async () => {
+    const seed = SEED + i;
+    // The seed is in the name, so a green run shows it too.
+    it(`${cls}, ${mode} (FUZZ_SEED=${SEED}, room seed ${seed}): ${MINUTES} min of seeded actions and resets, then every invariant`, async () => {
       process.env.PROBE_URL = inject("probeUrl");
       process.env.PROBE_KEY = inject("probeKey");
-      const seed = SEED + i;
       const res = await fuzzRoom(cls, mode, seed);
       expect(res.submits, "the fuzz sent nothing").toBeGreaterThan(0);
       expect(
         res.resets,
         "the fuzz never reset the object"
       ).toBeGreaterThanOrEqual(1);
+      // The object restarted after a reset: it started more than once.
+      expect(res.starts, "the object never restarted").toBeGreaterThan(1);
       expect(
         res.bad,
         `seed ${SEED} (room ${res.room}, room seed ${seed}, ${res.submits} requests, ${res.resets} resets)\n${res.bad.join("\n")}\nlast of the trace:\n${res.trace.slice(-60).join("\n")}`

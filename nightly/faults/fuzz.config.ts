@@ -10,6 +10,8 @@ export default defineConfig({
     globalSetup: [path.join(import.meta.dirname, "deploy.ts")],
     // No retries: a failure is a bug in the product or the driver.
     retry: 0,
+    // Every test's name, with its seed, also on a green run.
+    reporters: ["verbose"],
     // The four rooms run at once: the fuzz time, then up to 150 s to
     // settle and a minute for the late tab and the checks.
     maxConcurrency: 4,
