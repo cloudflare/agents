@@ -4,7 +4,7 @@
 
 import path from "node:path";
 import type { TestProject } from "vitest/node";
-import { deploy, remove } from "../shared/deploy";
+import { deploy, remove, workerName } from "../shared/deploy";
 
 const DIR = import.meta.dirname;
 
@@ -15,7 +15,8 @@ export default async function setup(project: TestProject) {
     project.provide("probeKey", process.env.PROBE_KEY ?? "");
     return;
   }
-  const name = `nightly-faults-${Date.now().toString(36)}`;
+  // The fault suite and the fuzz share this Worker; each job deploys its own.
+  const name = workerName(project.config.name.replace(/^nightly-/, ""));
   const key = crypto.randomUUID();
   try {
     const url = await deploy({

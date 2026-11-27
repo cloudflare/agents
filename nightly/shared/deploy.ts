@@ -19,6 +19,15 @@ declare module "vitest" {
   }
 }
 
+/**
+ * A suite's Worker name: `nightly-<suite>-<NIGHTLY_RUN>` in CI, where the
+ * workflow sets `NIGHTLY_RUN` per job and deletes every Worker ending in it
+ * when the job ends; `nightly-<suite>-<time>` elsewhere.
+ */
+export function workerName(suite: string): string {
+  return `nightly-${suite}-${process.env.NIGHTLY_RUN ?? Date.now().toString(36)}`;
+}
+
 export function wrangler(args: string[], cwd: string): string {
   try {
     return execFileSync(WRANGLER, args, {

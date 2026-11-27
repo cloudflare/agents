@@ -11,11 +11,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { UIMessage } from "ai";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { deploy, remove } from "../shared/deploy";
+import { deploy, remove, workerName } from "../shared/deploy";
 import { MT, Tab, ctl, rid, sleep, user, type Cls } from "../shared/probe";
 
 const DIR = import.meta.dirname;
-const NAME = `nightly-upgrade-${Date.now().toString(36)}`;
+const NAME = workerName("upgrade");
 const KEY = crypto.randomUUID();
 const RELEASE = ["agents", "@cloudflare/ai-chat", "@cloudflare/think"];
 const CHATS: Cls[] = ["chat", "think"];

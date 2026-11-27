@@ -125,27 +125,37 @@ jobs:
     if: ${{ github.event_name == 'schedule' || inputs.run_deployed }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    # Every Worker this job deploys is named nightly-<suite>-<NIGHTLY_RUN>,
+    # so the last step can delete exactly this job's Workers.
+    env:
+      NIGHTLY_RUN: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.key }}
     strategy:
       fail-fast: false
       max-parallel: 2
       matrix:
         include:
           - name: Think and AIChatAgent faults (root and facets)
+            key: faults
             dir: nightly
             run: pnpm run faults
           - name: reset fuzz (seeded)
+            key: fuzz
             dir: nightly
             run: pnpm run fuzz
           - name: upgrade from the latest release
+            key: upgrade
             dir: nightly
             run: pnpm run upgrade
           - name: Pi and OpenCode harnesses
+            key: harnesses
             dir: nightly
             run: pnpm run harnesses
           - name: Think soak on a real model
+            key: soak
             dir: nightly
             run: pnpm run soak
           - name: ai-chat recovery after a redeploy
+            key: aichat
             dir: packages/ai-chat
             run: pnpm run test:e2e:deployed
             env_deployed: true
@@ -178,6 +188,22 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           RUN_DEPLOYED_E2E: ${{ matrix.env_deployed && '1' || '' }}
         run: ${{ matrix.run }}
+      # The suites delete their Workers; this catches the ones a failed or
+      # cancelled step left behind.
+      - name: Delete this job's Workers
+        if: always()
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts" |
+            jq -r --arg suffix "-$NIGHTLY_RUN" '.result[] | select(.id | startswith("nightly-")) | select(.id | endswith($suffix)) | .id' |
+            while read -r name; do
+              echo "deleting $name"
+              curl -fsS -X DELETE -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/$name?force=true" > /dev/null
+            done
 
   # One issue tracks a failing nightly: opened (or commented on) for each red
   # scheduled run, closed by the first green one.
