@@ -152,6 +152,7 @@ import { nanoid } from "nanoid";
 import {
   cancelTurn,
   chatClientView,
+  hasPendingToolInteraction,
   chatDispatch,
   stopAllTurns,
   submitTurn,
@@ -2444,16 +2445,15 @@ export class AIChatAgent<
    * `input-available` while it runs.
    */
   protected hasPendingInteraction(): boolean {
-    // A stored reply that waits on a client: an unanswered call (an
-    // `input-available` or `approval-requested` part) in the latest message.
-    const last = this.messages.at(-1);
-    return (
-      last?.role === "assistant" &&
-      last.parts.some((part) => {
-        const state = (part as { state?: unknown }).state;
-        return state === "input-available" || state === "approval-requested";
-      })
-    );
+    // Every unanswered call in the stored transcript counts, as the release
+    // counts them; the client tools are the stored request's.
+    return hasPendingToolInteraction({
+      messages: this.messages,
+      streaming: null,
+      clientToolNames: new Set(
+        (this._lastClientTools ?? []).map((tool) => tool.name)
+      )
+    });
   }
 
   /**
