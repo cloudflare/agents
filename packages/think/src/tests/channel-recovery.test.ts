@@ -118,8 +118,9 @@ describe("recovery × channels", () => {
       user: null
     });
 
-    const scheduled = await agent.triggerFiberRecovery();
-    expect(scheduled.scheduledRetryCount).toBe(1);
+    // Recovery schedules one retry. Its attempt may run before the work
+    // left can be counted, so what is checked is the retry it ran.
+    await agent.triggerFiberRecovery();
     await agent.runScheduledRecoveryRetryForTest();
 
     // (a) The channel stamp survives recovery.
@@ -130,8 +131,9 @@ describe("recovery × channels", () => {
     // the path that previously dropped channel context (`_retryLastUserTurn`
     // admitted the turn without re-resolving the channel), so the recovered
     // turn silently ran with default policy instead of the channel's.
+    // One retry turn ran, with the channel's policy.
     const channels = await agent.getCapturedTurnChannelsForTest();
-    expect(channels.at(-1)).toBe("voice");
+    expect(channels).toEqual(["voice"]);
     const systems = await agent.getCapturedTurnSystemsForTest();
     expect(systems.at(-1)).toContain("VOICE MODE");
   });
