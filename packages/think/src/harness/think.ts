@@ -2524,14 +2524,36 @@ export class Think<
   /** The running model call's own stall timeout, from `beforeTurn`. */
   #turnStallTimeoutMs: number | undefined;
 
-  #recoveryOptions(): { maxAttempts?: number; stallTimeoutMs: number } {
+  #recoveryOptions(): {
+    maxAttempts?: number;
+    stallTimeoutMs: number;
+    chatRecovery?: Exclude<ChatRecoveryConfig, true>;
+  } {
     const config = this.chatRecovery;
     const stallTimeoutMs =
       this.#turnStallTimeoutMs ?? this.chatStreamStallTimeoutMs;
-    if (config === true || config.maxAttempts === undefined) {
-      return { stallTimeoutMs };
-    }
-    return { maxAttempts: config.maxAttempts, stallTimeoutMs };
+    // Think's released config, as it is: the turn definition's recovery
+    // budget honours its fields.
+    if (config === true) return { stallTimeoutMs };
+    const { onExhausted, shouldKeepRecovering } = config;
+    return {
+      ...(config.maxAttempts !== undefined && {
+        maxAttempts: config.maxAttempts
+      }),
+      stallTimeoutMs,
+      chatRecovery: {
+        ...config,
+        // The definition names a turn by its run; an app knows it by its
+        // request (the operation) id, as on Think.
+        ...(onExhausted && {
+          onExhausted: (ctx) => onExhausted(withOperationIds(ctx))
+        }),
+        ...(shouldKeepRecovering && {
+          shouldKeepRecovering: (ctx) =>
+            shouldKeepRecovering(withOperationIds(ctx))
+        })
+      }
+    };
   }
 
   async #onRecovery(context: {
@@ -3241,6 +3263,47 @@ export class Think<
       cancel: () => end()
     });
   }
+}
+
+/** A run id (`["", operationId]`) as the operation id it names. */
+function operationIdOf(id: string): string {
+  if (!id.startsWith("[")) return id;
+  try {
+    const parsed: unknown = JSON.parse(id);
+    return Array.isArray(parsed) && typeof parsed[1] === "string"
+      ? parsed[1]
+      : id;
+  } catch {
+    return id;
+  }
+}
+
+/**
+ * A recovery context with its ids as the operation ids an app knows, the
+ * ones `onChatRecovery` is given: one incident id across every hook.
+ */
+function withOperationIds<
+  T extends {
+    requestId: string;
+    recoveryRootRequestId: string;
+    incidentId?: string;
+    streamId?: string;
+  }
+>(ctx: T): T {
+  return {
+    ...ctx,
+    requestId: operationIdOf(ctx.requestId),
+    recoveryRootRequestId: operationIdOf(ctx.recoveryRootRequestId),
+    // The definition derives both from the run id in its own formats
+    // (`<run>:`, `chat-turn:<run>`); an app is given the operation id for
+    // each, as `onChatRecovery` gives them.
+    ...(ctx.incidentId !== undefined && {
+      incidentId: operationIdOf(ctx.requestId)
+    }),
+    ...(ctx.streamId !== undefined && {
+      streamId: operationIdOf(ctx.requestId)
+    })
+  };
 }
 
 /**

@@ -1,3 +1,4 @@
+import { subscribe } from "agents/observability";
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { SubmissionStatusQueue } from "../../submissions";
 import { hasToolCall, Output, tool } from "ai";
@@ -569,6 +570,11 @@ function trackTurnAttemptReasons(agent: Think): void {
   };
 }
 
+/** The storage key of the ids recovery hooks were given. */
+const STORED_RECOVERY_IDS = "test:recovery-ids";
+/** The storage key of the ids `onChatRecovery` was given. */
+const STORED_RECOVERY_CALLS_IDS = "test:recovery-call-ids";
+
 /** How long a held recovery attempt would wait by itself: never, in a test. */
 const HELD_ATTEMPT_SECONDS = 3600;
 
@@ -765,6 +771,49 @@ async function waitForRunStepsForTest(agent: Think): Promise<void> {
   }
 }
 
+/**
+ * Whether a recovery attempt is there to run. While an incident is open and
+ * no attempt waits yet, this waits for the agent's next recovery event (an
+ * attempt being scheduled, or the incident ending) and for the work that
+ * event belongs to, then looks again. No timer: a recovery that never moves
+ * on is the test's own timeout.
+ */
+async function recoveryAttemptOwedForTest(agent: Think): Promise<boolean> {
+  let moved: () => void = () => {};
+  const unsubscribe = subscribe("chat", (event) => {
+    if (event.name === agent.name && event.type.startsWith("chat:recovery:")) {
+      moved();
+    }
+  });
+  try {
+    for (;;) {
+      // Listen before looking, so an event between the two is not missed.
+      const next = new Promise<void>((resolve) => {
+        moved = resolve;
+      });
+      await waitForThinkIdleForTest(agent);
+      await waitForRunStepsForTest(agent);
+      const waiting =
+        recoveryWorkCountForTest(agent, "_chatRecoveryContinue") +
+        recoveryWorkCountForTest(agent, "_chatRecoveryRetry");
+      if (waiting > 0) return true;
+      const incidents = await (
+        agent as unknown as { ctx: DurableObjectState }
+      ).ctx.storage.list<{ status?: string }>({
+        prefix: "cf:chat-recovery:incident:"
+      });
+      const open = [...incidents.values()].some(
+        (incident) =>
+          incident.status === "scheduled" || incident.status === "attempting"
+      );
+      if (!open) return false;
+      await next;
+    }
+  } finally {
+    unsubscribe();
+  }
+}
+
 async function runRecoveryWorkForTest(
   agent: Think,
   callback: "_chatRecoveryContinue" | "_chatRecoveryRetry"
@@ -783,6 +832,12 @@ async function runRecoveryWorkForTest(
   const payload = rows[0]?.payload;
   if (!payload) {
     await waitForThinkIdleForTest(agent);
+    // Nothing waits. An attempt that ended schedules the next one just
+    // after, so an incident still open means it is about to: wait for that
+    // and run it, where returning now would run nothing.
+    if (await recoveryAttemptOwedForTest(agent)) {
+      await runRecoveryWorkForTest(agent, callback);
+    }
     return;
   }
   const host = agent as unknown as {
@@ -1633,6 +1688,10 @@ export class ThinkTestAgent extends Think {
   override async onChatRecovery(
     ctx: ChatRecoveryContext
   ): Promise<ChatRecoveryOptions> {
+    this.ctx.storage.kv.put(STORED_RECOVERY_CALLS_IDS, [
+      ...(this.ctx.storage.kv.get<unknown[]>(STORED_RECOVERY_CALLS_IDS) ?? []),
+      { incidentId: ctx.incidentId, streamId: ctx.streamId }
+    ]);
     this._recoveryCallsForTest.push({
       recoveryKind: ctx.recoveryKind,
       attempt: ctx.attempt,
@@ -3485,6 +3544,51 @@ export class ThinkTestAgent extends Think {
       this.chatRecovery = chatRecovery;
       this._stashInBeforeTurnForTest = stash;
     }
+  }
+
+  /**
+   * Keep a stall on every model call and a `chatRecovery` whose
+   * `shouldKeepRecovering` and `onExhausted` record their ids durably, for
+   * as long as the agent lives; then ask once. Read the ids with
+   * {@link recoveryIdsForTest}.
+   */
+  async armGiveUpForTest(maxAttempts: number): Promise<void> {
+    this._modelStallForTest = { afterParts: 2, calls: 1000 };
+    this.chatStreamStallTimeoutMs = 50;
+    const kv = this.ctx.storage.kv;
+    const record = (
+      hook: string,
+      ctx: { incidentId: string; streamId?: string }
+    ) =>
+      kv.put(STORED_RECOVERY_IDS, [
+        ...(kv.get<unknown[]>(STORED_RECOVERY_IDS) ?? []),
+        { hook, incidentId: ctx.incidentId, streamId: ctx.streamId ?? null }
+      ]);
+    this.chatRecovery = {
+      maxAttempts,
+      shouldKeepRecovering: (ctx: {
+        incidentId: string;
+        streamId?: string;
+      }) => {
+        record("shouldKeepRecovering", ctx);
+        return true;
+      },
+      onExhausted: (ctx: { incidentId: string; streamId?: string }) => {
+        record("onExhausted", ctx);
+      }
+    } as unknown as ChatRecoveryConfig;
+    await this.testChat("stall, then give up");
+  }
+
+  /** The ids each recovery hook was given, in order, across resets. */
+  async recoveryIdsForTest(): Promise<{
+    hooks: Array<{ hook: string; incidentId: string; streamId: string | null }>;
+    onChatRecovery: Array<{ incidentId: string; streamId: string }>;
+  }> {
+    return {
+      hooks: this.ctx.storage.kv.get(STORED_RECOVERY_IDS) ?? [],
+      onChatRecovery: this.ctx.storage.kv.get(STORED_RECOVERY_CALLS_IDS) ?? []
+    };
   }
 
   async testChat(message: string): Promise<TestChatResult> {
