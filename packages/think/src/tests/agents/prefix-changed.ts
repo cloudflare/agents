@@ -78,4 +78,11 @@ export class ThinkPrefixChangedAgent extends Think {
   async say(text: string): Promise<void> {
     await this.chat(text, quiet);
   }
+
+  lastText(): string {
+    const last = this.messages[this.messages.length - 1];
+    return last.parts
+      .flatMap((p) => (p.type === "text" ? [p.text] : []))
+      .join("");
+  }
 }

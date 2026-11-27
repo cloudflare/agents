@@ -4,7 +4,6 @@ import {
   readUIMessageStream,
   stepCountIs,
   streamText,
-  toUIMessageStream,
   type ModelMessage,
   type ToolSet,
   type UIMessage,
@@ -2176,9 +2175,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       }
     });
     const owner = placed.owner;
-    const stream = toUIMessageStream({
-      stream: result.stream,
-      tools: offered,
+    // The result's own method, which AI SDK 6 and 7 both have.
+    const stream = result.toUIMessageStream({
       originalMessages: [] as UIMessage[],
       generateMessageId: () => messageId,
       // The participant who started the turn runs its client tools.
