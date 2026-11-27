@@ -778,28 +778,47 @@ export class ChatRecoveryEngine {
       try {
         const { incidentId, delivery } = turn.ended;
         const incident = await this.readIncident(incidentId);
-        // Still the incident's schedule, with its turn started and nothing
-        // scheduled since: the attempt did not get to write the outcome. A
-        // later schedule (the turn was cut off again, and its next attempt
-        // runs elsewhere) owns the reply, and a settled incident has its
-        // outcome.
-        if (
+        // A later schedule: the turn was cut off again and its next attempt
+        // runs elsewhere. That attempt owns the reply; nothing ended here.
+        const later =
+          incident !== null && (incident.scheduleCount ?? 0) > delivery;
+        // Still this turn's schedule, with nothing written since: the
+        // attempt did not get to write the outcome.
+        const unrecorded =
           incident?.status === "scheduled" &&
           incident.scheduleCount === delivery &&
-          incident.startedDelivery === delivery
-        ) {
-          const ended = streamStatus === "error" ? "error" : "completed";
+          incident.startedDelivery === delivery;
+        // What the attempt recorded, or would have: a completed recovery
+        // deletes its incident.
+        const outcome =
+          incident === null
+            ? "completed"
+            : incident.status === "failed"
+              ? "error"
+              : unrecorded
+                ? streamStatus === "error"
+                  ? "error"
+                  : "completed"
+                : undefined;
+        if (!later && outcome) {
           if (streamStillActive) await wake.completeRecoveredStream(streamId);
+          // The host's own settlement (a submission, in Think) follows the
+          // incident's write in the attempt, so it can be missing even
+          // when the incident has its outcome. It does nothing when done.
           await wake.onStreamEnded?.({
             requestId,
             recoveryRootRequestId,
-            streamStatus: ended
+            streamStatus: outcome
           });
-          await this.updateIncident(
-            incidentId,
-            ended === "error" ? "failed" : "completed",
-            ended === "error" ? "Recovered chat stream had errored." : undefined
-          );
+          if (unrecorded) {
+            await this.updateIncident(
+              incidentId,
+              outcome === "error" ? "failed" : "completed",
+              outcome === "error"
+                ? "Recovered chat stream had errored."
+                : undefined
+            );
+          }
         }
         // The turn's run is still open while it is replayed here.
         await adapter.turns?.reconcileAgentToolChildRuns(requestId);

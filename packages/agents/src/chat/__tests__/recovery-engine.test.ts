@@ -2279,7 +2279,7 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
       expect(t.streamsEnded).toEqual([]);
     });
 
-    it("leaves an incident that already has its outcome, or is gone", async () => {
+    it("leaves a stopped recovery as it is", async () => {
       const stopped = ended({
         status: "skipped",
         reason: "user_cancelled",
@@ -2290,13 +2290,35 @@ describe("ChatRecoveryEngine.recoverInterruptedTurn (fake adapter + wake hooks)"
       untouched(stopped.h);
       expect(stopped.h.events).toEqual([]);
       expect(await stopped.stored()).toMatchObject({ status: "skipped" });
+      expect(stopped.streamsEnded).toEqual([]);
+    });
 
-      // The attempt recorded `completed` just before the reset.
-      const gone = ended(null);
-      await gone.run();
-      untouched(gone.h);
-      expect(gone.h.events).toEqual([]);
-      expect(gone.reconciled).toEqual(["req-1"]);
+    it("lets the host settle what followed an outcome the attempt did record", async () => {
+      // The attempt wrote the incident's outcome and the isolate went away
+      // before the host's own settlement (Think's submission). The
+      // incident is not written again; the host is told, with that
+      // outcome.
+      const completed = ended(null);
+      await completed.run();
+      untouched(completed.h);
+      expect(completed.h.events).toEqual([]);
+      expect(completed.streamsEnded).toEqual(["req-1:completed"]);
+      expect(completed.reconciled).toEqual(["req-1"]);
+
+      const failed = ended({
+        status: "failed",
+        reason: "model error",
+        scheduleCount: 2,
+        startedDelivery: 2
+      });
+      await failed.run();
+      untouched(failed.h);
+      expect(failed.h.events).toEqual([]);
+      expect(await failed.stored()).toMatchObject({
+        status: "failed",
+        reason: "model error"
+      });
+      expect(failed.streamsEnded).toEqual(["req-1:error"]);
     });
   });
 
