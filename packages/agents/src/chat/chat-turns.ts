@@ -92,6 +92,7 @@ import {
   type ServerTurnOutcome
 } from "./server-turn";
 import {
+  requestMessages,
   persistRepairedTranscript,
   removeEmptyReplyToContinue,
   settleInterruptedReply,
@@ -1825,10 +1826,13 @@ export class ChatTurns<
       ...options,
       clientToolNames: this.clientToolNames()
     });
-    // Without the replies that hold nothing: the repair removed them.
+    // Without the replies that hold nothing (the repair removed them), and
+    // without the reasoning a stored reply ends in, which the request
+    // leaves out but the transcript keeps.
+    const stored = await persistRepairedTranscript(messages, result, sink);
     return {
       ...result,
-      messages: await persistRepairedTranscript(messages, result, sink)
+      messages: requestMessages(stored, options.continuation)
     };
   }
 

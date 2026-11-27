@@ -24,7 +24,6 @@ import type {
   FiberRecoveryContext,
   FiberRecoveryResult,
   FiberRunRow,
-  FiberStashContext,
   FiberStatus,
   InternalFiberOptions,
   ListFibersOptions,
@@ -33,6 +32,7 @@ import type {
 } from "./fiber-types";
 import { armFacetWake } from "./lifecycle/durable-object-lifecycle";
 import { backoffDelay } from "./retries";
+import { withFiberStash } from "./fiber-stash";
 import type { Tasks } from "./tasks/tasks";
 import { TaskSettlement } from "./tasks/settlement";
 import type {
@@ -87,30 +87,9 @@ type FiberLocal = {
   outcome?: { ok: true; value: unknown } | { ok: false; error: unknown };
 };
 
-const fiberStash = new AsyncLocalStorage<FiberStashContext>();
-
-/**
- * Run `fn` with `context` as the current fiber for `stashCurrentFiber()`.
- *
- * @internal
- */
-export function withFiberStash<T>(context: FiberStashContext, fn: () => T): T {
-  return fiberStash.run(context, fn);
-}
-
-/**
- * Checkpoint data for the fiber running in the current async context.
- * Throws outside a fiber.
- *
- * @internal
- */
-export function stashCurrentFiber(data: unknown): void {
-  const context = fiberStash.getStore();
-  if (!context) {
-    throw new Error("stash() called outside a fiber");
-  }
-  context.stash(data);
-}
+// The current fiber's stash sink lives in `fiber-stash.ts`, which imports
+// nothing, so chat code can set it without loading the Lifecycle.
+export { stashCurrentFiber, withFiberStash } from "./fiber-stash";
 
 /** @internal What fiber runs need from the Agent that hosts them. */
 export type FiberHost = {
@@ -176,7 +155,7 @@ async function runBody(
     // The run's claim wake, renewed every heartbeat while this runs, keeps
     // the object alive.
     const value = await local.context(() =>
-      fiberStash.run({ id, signal, stash }, () =>
+      withFiberStash({ id, signal, stash }, () =>
         local.fn({ id, signal, stash, snapshot: null })
       )
     );

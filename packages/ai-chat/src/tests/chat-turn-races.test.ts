@@ -1635,7 +1635,7 @@ describe("chat turn races", () => {
     ws.close(1000);
   });
 
-  it("a reply that ends in reasoning is never sent to the model that way", async () => {
+  it("keeps a reply that ends in reasoning as it was stored, for the app's request", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
     const seen = record(ws);
@@ -1676,17 +1676,22 @@ describe("chat turn races", () => {
     }
 
     expect(await agent.getChatMessageCallCountForTest()).toBe(1);
-    expect(await agent.getEndsInReasoningAtModelCallForTest()).toEqual([]);
+    // The app builds its request from `this.messages`, the transcript as
+    // stored (as released): leaving reasoning out is the app's.
+    expect(await agent.getEndsInReasoningAtModelCallForTest()).not.toEqual([]);
+    // Stored as it was: only the request leaves the reasoning out.
     const stored = (await agent.getPersistedMessages()) as ChatMessage[];
     expect(stored[1].parts.map((part) => part.type)).toEqual([
       "step-start",
-      "text"
+      "text",
+      "step-start",
+      "reasoning"
     ]);
-    expect(repaired).toEqual([1]);
+    expect(repaired).toEqual([]);
     ws.close(1000);
   });
 
-  it("a new question removes an earlier reply that held only reasoning, in every tab", async () => {
+  it("a new question keeps an earlier reply that held only reasoning, and leaves it out of the request", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
     const { ws: otherTab } = await connectChatWS(
@@ -1722,16 +1727,16 @@ describe("chat turn races", () => {
       unsubscribe();
     }
 
-    // The event carries the reply as it was stored, so an app can keep it.
-    expect(removedMessages).toEqual([cutOff]);
+    // A reply the model finished is the user's: nothing is removed.
+    expect(removedMessages).toEqual([]);
 
     const stored = (await agent.getPersistedMessages()) as ChatMessage[];
-    expect(stored.map((message) => message.id)).not.toContain("assistant-1");
-    expect(stored.slice(0, 2).map((message) => message.id)).toEqual([
+    expect(stored.slice(0, 3).map((message) => message.id)).toEqual([
       "user-1",
+      "assistant-1",
       "user-2"
     ]);
-    // The other tab is told with the whole list, so it drops the reply.
+    // No tab is sent a list without it.
     const lists = seenByOtherTab.filter(
       (
         m
@@ -1746,10 +1751,59 @@ describe("chat turn races", () => {
           m.messages.some((message) => message.id === "user-2") &&
           !m.messages.some((message) => message.id === "assistant-1")
       )
-    ).toBe(true);
-    expect(await agent.getEndsInReasoningAtModelCallForTest()).toEqual([]);
+    ).toBe(false);
+    // The app builds its request from `this.messages`, the transcript as
+    // stored (as released): leaving reasoning out is the app's.
+    expect(await agent.getEndsInReasoningAtModelCallForTest()).not.toEqual([]);
     ws.close(1000);
     otherTab.close(1000);
+  });
+
+  it("keeps a reasoning-only reply for a tab that joins and an app that persists while onChatMessage runs", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const seen = record(ws);
+    const agent = await getAgentByName(env.TestChatAgent, room);
+    const finished: ChatMessage = {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        { type: "step-start" },
+        { type: "reasoning", text: "Let me think", state: "done" }
+      ] as ChatMessage["parts"]
+    };
+    await agent.persistMessages([user1, finished]);
+    await agent.holdNextModelCallForTest();
+    sendChatRequest(ws, "req-2", [user1, finished, user2]);
+    await waitUntil(() => agent.isModelCallHeldForTest());
+
+    // While the app builds its request: a tab joins, and the app stores
+    // its messages.
+    const { ws: late } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const seenLate = record(late);
+    await agent.persistCurrentMessagesForTest();
+    await agent.releaseModelCallForTest();
+    await waitUntil(() => responses(seen, "req-2").some((m) => m.done));
+    await agent.waitForIdleForTest();
+
+    const stored = (await agent.getPersistedMessages()) as ChatMessage[];
+    expect(stored.map((message) => message.id)).toContain("assistant-1");
+    const firstList = seenLate.find(
+      (
+        m
+      ): m is Extract<
+        OutgoingMessage,
+        { type: MessageType.CF_AGENT_CHAT_MESSAGES }
+      > => m.type === MessageType.CF_AGENT_CHAT_MESSAGES
+    );
+    expect(firstList?.messages.map((message) => message.id)).toContain(
+      "assistant-1"
+    );
+    // The app builds its request from `this.messages`, the transcript as
+    // stored (as released): leaving reasoning out is the app's.
+    expect(await agent.getEndsInReasoningAtModelCallForTest()).not.toEqual([]);
+    ws.close(1000);
+    late.close(1000);
   });
 
   it("a tab is sent the text-start of a continuation that follows a cut-off text part", async () => {

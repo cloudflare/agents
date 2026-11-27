@@ -1035,6 +1035,39 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     return seen;
   }
 
+  /** A question and a reply the model finished with reasoning only. */
+  async seedReasoningOnlyReply(): Promise<void> {
+    await this.harness.session().messages();
+    const handle = this.#handles.get("");
+    await handle?.appendMessage({
+      id: "q-reasoning",
+      role: "user",
+      parts: [{ type: "text", text: "think about it" }]
+    });
+    await handle?.appendMessage({
+      id: "a-reasoning",
+      role: "assistant",
+      parts: [
+        { type: "step-start" },
+        { type: "reasoning", text: "Let me think", state: "done" }
+      ]
+    } as never);
+  }
+
+  /** The type of each assistant message's last block in the last prompt. */
+  lastPromptAssistantEnds(): string[] {
+    const prompt = this.prompts.at(-1) ?? [];
+    return prompt.flatMap((m) =>
+      m.role !== "assistant"
+        ? []
+        : [
+            Array.isArray(m.content)
+              ? String((m.content.at(-1) as { type?: unknown })?.type)
+              : "text"
+          ]
+    );
+  }
+
   /** Compact on the Sessions handle, around the harness (as auto-compaction). */
   async compactOnHandle(session: string): Promise<boolean> {
     return (await this.#handles.get(session)?.compact()) != null;

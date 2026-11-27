@@ -3184,7 +3184,7 @@ describe("Think — before-turn repair", () => {
     await closeWS(tabB);
   });
 
-  it("removes the reasoning a cut-off reply ends in before it continues it", async () => {
+  it("leaves the reasoning a reply ends in out of the request that continues it, and keeps it stored", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
     const { ws } = await connectWS(room);
@@ -3221,14 +3221,20 @@ describe("Think — before-turn repair", () => {
 
     expect((await agent.continueLastTurnForTest()).status).toBe("completed");
 
-    // The stored reply lost its trailing reasoning and kept the result.
+    // The stored reply keeps its reasoning and its result.
     const stored = ((await agent.getMessages()) as UIMessage[]).find(
       (message) => message.id === "assistant-reasoning"
     );
-    expect(stored?.parts.map((part) => part.type)).toEqual([
+    expect(stored?.parts.map((part) => part.type).slice(0, 4)).toEqual([
       "step-start",
-      "tool-client_action"
+      "tool-client_action",
+      "step-start",
+      "reasoning"
     ]);
+    // The continuation's answer follows it (as before this rule, in a
+    // message of its own here).
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(messages.at(-1)?.parts.at(-1)).toMatchObject({ type: "text" });
     // And no assistant message of the model request ends in reasoning.
     const prompt = (
       (await agent.getTextOnlyPromptsForTest()) as Array<

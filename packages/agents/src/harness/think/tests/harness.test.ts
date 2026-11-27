@@ -524,6 +524,17 @@ describe("ThinkHarness turns", () => {
 });
 
 describe("ThinkHarness hooks", () => {
+  it("keeps a reply that finished with reasoning only, and leaves the reasoning out of the next request", async () => {
+    const stub = fresh();
+    await stub.seedReasoningOnlyReply();
+    expect(text(await stub.prompt("hello"))).toBe("echo: hello");
+    // Still in the transcript, as the user saw it.
+    expect(await stub.messageIds()).toContain("a-reasoning");
+    // No assistant message of the request ends in reasoning (Anthropic
+    // rejects that), and the reasoning-only reply is not sent at all.
+    expect(await stub.lastPromptAssistantEnds()).not.toContain("reasoning");
+  });
+
   it("lets beforeTurn replace the system prompt", async () => {
     const stub = fresh();
     await stub.setSystem("Be brief.");

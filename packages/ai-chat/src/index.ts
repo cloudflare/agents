@@ -1040,7 +1040,7 @@ export class AIChatAgent<
       respond: async (call) => {
         // Apps read the transcript the call is for from `this.messages`.
         const before = this.messages;
-        this.messages = [...call.messages] as UIMessage[];
+        this.messages = [...call.transcript] as UIMessage[];
         // The other tabs learn what the turn stored or removed before it
         // asks the model (its question, a repaired reply): the whole list,
         // so each drops what is gone. The tab that sent it has it already.

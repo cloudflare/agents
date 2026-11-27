@@ -188,6 +188,15 @@ export interface RepairInterruptedToolPartsOptions {
    * into. Defaults to `false`.
    */
   keepEmptyLastMessage?: boolean;
+  /**
+   * Remove the reasoning an assistant message ends in
+   * ({@link stripTrailingReasoning}) from what is returned and stored.
+   * Defaults to `true`: a reply cut off in its reasoning. The before-turn
+   * repair passes `false`, because a stored reply may have completed that
+   * way: it is kept, and the reasoning is left out of the model request
+   * only ({@link requestMessages}).
+   */
+  stripReasoning?: boolean;
 }
 
 export interface RepairInterruptedToolPartsResult {
@@ -341,7 +350,10 @@ export function repairInterruptedToolParts(
     }
 
     const settled = messageChanged ? { ...message, parts } : message;
-    const stripped = stripTrailingReasoning(settled);
+    const stripped =
+      options.stripReasoning === false
+        ? settled
+        : stripTrailingReasoning(settled);
     removedReasoningParts += countReasoning(settled) - countReasoning(stripped);
     repaired.push(stripped);
     if (
@@ -427,6 +439,39 @@ function settleInterruptedReplyParts(
   return parts.every((part, index) => part === settled.parts[index])
     ? result
     : { ...result, messages: [{ ...settled, parts }] };
+}
+
+/**
+ * The messages a model request is built from: each assistant message
+ * without the reasoning it ends in ({@link stripTrailingReasoning}), and
+ * without the messages that leaves empty ({@link replyIsEmpty}). Anthropic
+ * rejects a request in which an assistant message's final block is
+ * thinking. What is stored is not changed: a reply that completed with
+ * only reasoning stays in the transcript.
+ *
+ * @param keepLast - Keep the last message even when it is left empty: a
+ *   continuation turn writes into it.
+ * @returns `messages` itself when nothing ends in reasoning.
+ */
+export function requestMessages(
+  messages: UIMessage[],
+  keepLast = false
+): UIMessage[] {
+  let changed = false;
+  const request: UIMessage[] = [];
+  for (const [index, message] of messages.entries()) {
+    const stripped = stripTrailingReasoning(message);
+    if (stripped !== message) changed = true;
+    if (
+      replyIsEmpty(stripped) &&
+      !(keepLast && index === messages.length - 1)
+    ) {
+      changed = true;
+      continue;
+    }
+    request.push(stripped);
+  }
+  return changed ? request : messages;
 }
 
 /**
