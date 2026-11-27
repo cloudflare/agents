@@ -298,6 +298,7 @@ interface ChatRecoveryTestStub {
     }
   ): Promise<string>;
   startedFailingTurnStatusForTest(): Promise<string>;
+  endedRequestIdsForTest(): Promise<string[]>;
   endRetryWaitsForTest(): Promise<number>;
   openChatLaneRunsForTest(): Promise<number>;
   setStashData(data: unknown): Promise<void>;
@@ -3340,76 +3341,32 @@ describe("onChatRecovery", () => {
   // just broadcast transiently — otherwise a client disconnected at that moment
   // never learns the turn failed and stays frozen on reconnect. Brings ai-chat
   // to parity with Think's `_fireResponseHook`, which records on `error`.
-  it("records a durable terminal for a non-exhaustion error and replays it on reconnect (#1645)", async () => {
+  it("tells a tab that reconnects how the request it waited on ended in error (#1645)", async () => {
     const room = `terminal-error-${crypto.randomUUID()}`;
     const agentStub = await getTestAgent(room);
-
     const STREAM_ERROR = "Provider returned HTTP 500.";
 
-    // Drive a turn that ends in a terminal stream error, purely server-side
-    // (no client connected at the moment of failure).
+    // A turn ends in a stream error with no client connected.
     expect(await agentStub.driveErroredTurnForTest(STREAM_ERROR)).toBe("error");
+    const [requestId] = await agentStub.endedRequestIdsForTest();
 
-    // The error is durably recorded (not just broadcast transiently).
-    expect(await agentStub.getPendingChatTerminalForTest()).toMatchObject({
+    // A tab that was waiting on that request reconnects and asks: it learns
+    // the turn failed, rather than being told nothing streams.
+    const asked = await endsOnReconnect(room, [requestId]);
+    expect(
+      asked.end,
+      `expected the request's end on reconnect; received frame types: ${JSON.stringify(asked.types)}`
+    ).toMatchObject({
+      id: requestId,
+      done: true,
+      error: true,
       body: STREAM_ERROR
     });
 
-    // End-to-end: a client connecting now and running the standard resume probe
-    // learns the turn failed — it receives the terminal error frame rather than
-    // a bare RESUME_NONE that would leave it frozen.
-    const { ws } = await connectChatWS(
-      `/agents/chat-recovery-test-agent/${room}`
-    );
-    const received: Array<Record<string, unknown>> = [];
-    ws.addEventListener("message", (e) => {
-      let frame: Record<string, unknown>;
-      try {
-        frame = JSON.parse(e.data as string) as Record<string, unknown>;
-      } catch {
-        return;
-      }
-      received.push(frame);
-      if (frame.type === MessageType.CF_AGENT_STREAM_RESUMING) {
-        ws.send(
-          JSON.stringify({
-            type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
-            id: frame.id
-          })
-        );
-      }
-    });
-
-    ws.send(
-      JSON.stringify({ type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST })
-    );
-    // The terminal replay the ACK starts, then the barrier.
-    await vi.waitFor(() =>
-      expect(
-        received.some(
-          (m) =>
-            m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-            m.error === true &&
-            m.done === true
-        )
-      ).toBe(true)
-    );
-    await socketBarrier(ws, received);
-    ws.close(1000);
-
-    const terminal = received.find(
-      (m) =>
-        m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
-        m.error === true &&
-        m.done === true
-    );
-    expect(
-      terminal,
-      `expected a terminal error frame on reconnect; received frame types: ${JSON.stringify(
-        received.map((m) => m.type)
-      )}`
-    ).toBeDefined();
-    expect(terminal?.body).toBe(STREAM_ERROR);
+    // A tab that names no request learns nothing of ended ones.
+    const unnamed = await endsOnReconnect(room, []);
+    expect(unnamed.end).toBeUndefined();
+    expect(unnamed.types).toContain(MessageType.CF_AGENT_STREAM_RESUME_NONE);
   });
 
   // #1645 (clear-on-chat-clear): clearing the conversation must also drop the
@@ -3594,6 +3551,66 @@ describe("stall watchdog (chatStreamStallTimeoutMs)", () => {
     ).toBe(0);
   });
 });
+
+/**
+ * A tab connects and asks about the requests it still waits on, as the
+ * client does after a reconnect. Returns the end frame it was given for one
+ * of them, if any, and the types of every frame it got.
+ */
+async function endsOnReconnect(
+  room: string,
+  requestIds: string[]
+): Promise<{ end?: Record<string, unknown>; types: unknown[] }> {
+  const { ws } = await connectChatWS(
+    `/agents/chat-recovery-test-agent/${room}`
+  );
+  const received: Array<Record<string, unknown>> = [];
+  const answered = new Promise<void>((resolve) => {
+    ws.addEventListener("message", (event: MessageEvent) => {
+      let frame: Record<string, unknown>;
+      try {
+        frame = JSON.parse(event.data as string) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      received.push(frame);
+      if (frame.type === MessageType.CF_AGENT_STREAM_RESUMING) {
+        // An ended request is offered like a stream: accept it.
+        ws.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+            id: frame.id
+          })
+        );
+      }
+      if (
+        frame.type === MessageType.CF_AGENT_STREAM_RESUME_NONE ||
+        (frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          frame.done === true)
+      ) {
+        resolve();
+      }
+    });
+  });
+  ws.send(
+    JSON.stringify({
+      type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST,
+      requestIds,
+      probeId: crypto.randomUUID()
+    })
+  );
+  await answered;
+  await socketBarrier(ws, received);
+  ws.close(1000);
+  return {
+    end: received.find(
+      (frame) =>
+        frame.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+        frame.done === true
+    ),
+    types: received.map((frame) => frame.type)
+  };
+}
 
 /** The text of every stored assistant message, joined. */
 async function storedAssistantText(agentStub: {
