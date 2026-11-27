@@ -2427,6 +2427,17 @@ export class ThinkCodemodeObject extends DurableObject<Cloudflare.Env> {
         needsApproval: true,
         execute: async () => "ran"
       }),
+      // Two names that sanitize alike.
+      "get-file": tool({
+        description: "Get a file (dashed)",
+        inputSchema: z.object({}),
+        execute: async () => "dashed"
+      }),
+      get_file: tool({
+        description: "Get a file (underscored)",
+        inputSchema: z.object({}),
+        execute: async () => "underscored"
+      }),
       ask: tool({
         description: "Ask the user (direct)",
         inputSchema: z.object({ question: z.string() }),

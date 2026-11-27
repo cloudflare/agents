@@ -52,6 +52,38 @@ describe("codemode as an extension", () => {
     expect(reply).toContain("Calls: tools.multiply");
   });
 
+  it("fails a call whose input doesn't match the tool's schema", async () => {
+    const stub = fresh();
+    const reply =
+      text(await stub.prompt("async () => await tools.multiply({})")) ?? "";
+    expect(reply).toContain("The script failed");
+    expect(reply).toContain('Invalid input for tool "multiply"');
+  });
+
+  it("reports a BigInt result as its digits", async () => {
+    const stub = fresh();
+    const reply = text(await stub.prompt("async () => 10n")) ?? "";
+    expect(reply).toContain("The script returned.");
+    expect(reply).toContain('Result: "10"');
+  });
+
+  it("runs an arrow function that ends with a semicolon", async () => {
+    const stub = fresh();
+    const reply = text(await stub.prompt("async () => 1;")) ?? "";
+    expect(reply).toContain("Result: 1");
+  });
+
+  it("keeps two tools callable whose names sanitize alike", async () => {
+    const stub = fresh();
+    const reply =
+      text(
+        await stub.prompt(
+          "async () => [await tools.get_file({}), await tools.get_file_2({})]"
+        )
+      ) ?? "";
+    expect(reply).toContain('Result: ["dashed","underscored"]');
+  });
+
   it("finds and describes functions from the script", async () => {
     const stub = fresh();
     const reply =

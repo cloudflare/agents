@@ -2732,6 +2732,18 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           errorText: `Tool "${toolName}" can't be called from another tool.`
         };
       }
+      // A script's input is checked against the tool's schema, as the AI
+      // SDK checks the model's.
+      if (tool.inputSchema !== undefined) {
+        const checked = await asSchema(tool.inputSchema).validate?.(input);
+        if (checked && !checked.success) {
+          return {
+            ok: false,
+            errorText: `Invalid input for tool "${toolName}": ${checked.error.message}`
+          };
+        }
+        if (checked) input = checked.value;
+      }
       // The approval is for this exact call: the same position, tool and
       // input. A rerun that calls something else there asks again.
       const approved = scope.approved;

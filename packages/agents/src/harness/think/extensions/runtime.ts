@@ -96,8 +96,9 @@ class ToolEntryDraft
   setCallers(name: string, callers: readonly ToolCaller[]): boolean {
     const entry = this.entries.get(name);
     if (!entry) return false;
-    this.entries.set(name, {
-      ...entry,
+    // The same entry, changed in place: a schema still resolving for it
+    // lands on this object, not on a copy the draft no longer holds.
+    Object.assign(entry, {
       definition: { ...entry.definition, callers: [...callers] }
     });
     return true;

@@ -180,7 +180,11 @@ function report(
     ""
   ];
   if (ran.error === undefined) {
-    lines.push(`Result: ${JSON.stringify(ran.result) ?? "undefined"}`);
+    // A BigInt is reported as its digits, not as a serialization error.
+    const result = JSON.stringify(ran.result, (_key, value: unknown) =>
+      typeof value === "bigint" ? value.toString() : value
+    );
+    lines.push(`Result: ${result ?? "undefined"}`);
   }
   lines.push(`Calls: ${calls.length > 0 ? calls.join(", ") : "none"}`);
   if (ran.logs && ran.logs.length > 0) lines.push("Logs:", ...ran.logs);
@@ -267,9 +271,16 @@ export function codemodeExtension(options: CodemodeOptions): ThinkExtension {
       }
       const key = JSON.stringify([budget, [...entries], [...owners]]);
       if (last?.key !== key) {
+        // Two tools whose names sanitize alike (`get-file`, `get_file`)
+        // both stay callable: a later one gets a numbered name.
+        const taken = new Set<string>();
         const fns: Fn[] = [...entries].map(([tool, entry]) => {
           const namespace = namespaceOf(owners.get(tool) ?? "tools");
-          const name = sanitizeToolName(tool);
+          let name = sanitizeToolName(tool);
+          for (let n = 2; taken.has(`${namespace}.${name}`); n++) {
+            name = `${sanitizeToolName(tool)}_${n}`;
+          }
+          taken.add(`${namespace}.${name}`);
           return {
             tool,
             namespace,
@@ -337,7 +348,9 @@ export function codemodeExtension(options: CodemodeOptions): ThinkExtension {
                 )?.declaration ?? null
             }
           };
-          const code = normalizeCode(input.code);
+          // An arrow function ends without its statement's semicolon,
+          // which the executor would wrap inside its call.
+          const code = normalizeCode(input.code).replace(/;\s*$/, "");
           const ran = await options.executor.execute(code, [
             ...providers.values(),
             lookup

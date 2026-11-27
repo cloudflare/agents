@@ -363,6 +363,30 @@ describe("extensions: the build", () => {
     expect(ran).toEqual(["owner"]);
   });
 
+  it("keeps a tool's schema when the extension that set it changes its callers at once", async () => {
+    const manager = new ExtensionManager(harnessHookRules);
+    manager.load(
+      "owner",
+      loadInProcess("owner", (ctx) =>
+        ctx.tools.transform((tools) => {
+          tools.set("x", {
+            ...tool({
+              description: "x",
+              inputSchema: z.object({ value: z.number() }),
+              execute: async () => "ok"
+            })
+          });
+          // In the same transform, before the schema has resolved.
+          tools.setCallers("x", ["code"]);
+        })
+      )
+    );
+    const { tools } = await manager.build("");
+    const schema = (tools.x as { inputSchema?: { jsonSchema?: unknown } })
+      .inputSchema;
+    expect(JSON.stringify(schema?.jsonSchema ?? schema)).toContain("value");
+  });
+
   it("keeps a tool callable on the build it came from after a later build drops it", async () => {
     let offered = true;
     const manager = new ExtensionManager(harnessHookRules);
