@@ -1914,11 +1914,17 @@ export class Think<
     const stopping = this.harness
       .session()
       .abort(operationId)
-      .then((stopped) => {
-        // Nothing was open under that id, so no turn end will clear it.
-        if (!stopped) this.#callerStops.delete(operationId);
-        return stopped;
-      });
+      .then(
+        (stopped) => {
+          // Nothing was open under that id, so no turn end will clear it.
+          if (!stopped) this.#callerStops.delete(operationId);
+          return stopped;
+        },
+        (error: unknown) => {
+          this.#callerStops.delete(operationId);
+          throw error;
+        }
+      );
     void this.keepAliveWhile(() => stopping).catch((error: unknown) =>
       console.error("[Think] Stopping a turn failed", error)
     );
