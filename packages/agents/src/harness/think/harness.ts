@@ -262,6 +262,12 @@ type ParkedCall = {
   readonly inflight?: readonly string[];
   /** This park, among the parks of one call: a late outcome is for it only. */
   readonly generation?: string;
+  /**
+   * Calls answered as interrupted because they were still running at an
+   * earlier park. Each is the same invocation, so its late outcome replaces
+   * the interruption in any later park.
+   */
+  readonly provisional?: readonly string[];
 };
 
 /** What the `invoke`s under one tool call share. */
@@ -281,6 +287,8 @@ type InvokeScope = {
   readonly running: Map<string, Promise<unknown>>;
   /** Calls whose outcome was unknown when the approval reran the tool. */
   readonly unknown?: ReadonlySet<string>;
+  /** Calls answered as interrupted for now (`ParkedCall.provisional`). */
+  readonly provisional: Set<string>;
   /** Each call's outcome as kept, once it settled (none: it reruns). */
   readonly settled: Map<string, ToolOutcome | undefined>;
   /** Where the park kept its calls, once it parked. */
@@ -2783,6 +2791,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             errorText: PARK_CUT_ERROR
           };
           scope.made[toolCallId] = interrupted;
+          scope.provisional.add(toolCallId);
           return interrupted;
         }
       }
@@ -2906,7 +2915,16 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             await this.#parkedEdit(at.session, at.messageId, async () => {
               const stored = await this.#parkedCalls(at.session, at.messageId);
               const call = stored[at.toolCallId];
-              if (!call || call.generation !== at.generation) return;
+              // Its own park, or a later one that answered it as
+              // interrupted for now: the same invocation, so this is its
+              // outcome. Any other later park reran it, and keeps its own.
+              const provisional = call?.provisional?.includes(toolCallId);
+              if (
+                !call ||
+                (call.generation !== at.generation && !provisional)
+              ) {
+                return;
+              }
               stored[at.toolCallId] = {
                 ...call,
                 calls: kept
@@ -2914,7 +2932,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                   : call.calls,
                 inflight: (call.inflight ?? []).filter(
                   (id) => id !== toolCallId
-                )
+                ),
+                ...(call.provisional && {
+                  provisional: call.provisional.filter(
+                    (id) => id !== toolCallId
+                  )
+                })
               };
               await this.#handle(at.session).internal_setAnnotation(
                 PARKED_KIND,
@@ -3190,7 +3213,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                 parking,
                 park: markParked,
                 running: new Map(),
-                settled: new Map()
+                settled: new Map(),
+                provisional: new Set(kept?.provisional)
               };
               const running = executeTool(tool, input, {
                 toolCallId,
@@ -3248,7 +3272,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                   calls,
                   pending,
                   generation,
-                  ...(inflight.length > 0 && { inflight })
+                  ...(inflight.length > 0 && { inflight }),
+                  ...(scope.provisional.size > 0 && {
+                    provisional: [...scope.provisional]
+                  })
                 });
                 // The approval names the exact call it asks for, so an
                 // answer to an earlier request (other input at the same

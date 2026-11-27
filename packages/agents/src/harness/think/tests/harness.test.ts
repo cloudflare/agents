@@ -912,6 +912,37 @@ describe("ThinkHarness: a tool that calls other tools (invoke)", () => {
     }
   }, 60_000);
 
+  it("keeps a write's receipt that settles after a later park answered it as interrupted", async () => {
+    const stub = fresh();
+    await stub.prompt("compose pending");
+    const [first] = await stub.lastToolCalls();
+    expect(await stub.pendingRuns()).toBe(1);
+    // Approved while the write runs: it is interrupted for now, and the
+    // script asks its second approval.
+    const once = await stub.answer({
+      type: "approval",
+      approvalId: first?.approvalId ?? "",
+      approved: true
+    });
+    await stub.wait(once.operationId);
+    const [second] = await stub.lastToolCalls();
+    expect(second?.approvalId).not.toBe(first?.approvalId);
+    // The write, from before the first approval, settles now.
+    await stub.releasePending();
+    await vi.waitFor(async () =>
+      expect(await stub.toolAttempts()).toContain("after pending_write:1")
+    );
+    const twice = await stub.answer({
+      type: "approval",
+      approvalId: second?.approvalId ?? "",
+      approved: true
+    });
+    expect(text(await stub.wait(twice.operationId))).toContain(
+      "pending receipt"
+    );
+    expect(await stub.pendingRuns()).toBe(1);
+  });
+
   it("keeps the newer read when one from an earlier approval settles after the next park", async () => {
     const stub = fresh();
     await stub.prompt("compose rounds");

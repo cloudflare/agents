@@ -395,27 +395,57 @@ export function codemodeTransforms(options: CodemodeOptions): ThinkExtension {
 }
 
 /**
- * The script without the semicolon that ends it, past any trailing
- * whitespace and comments. One scan back from the end, so no script makes
- * it slow (it runs on the agent, before the sandbox's time limit).
+ * The script without the semicolon that ends it, and the comments after
+ * it. One scan forward that skips strings, template literals, regular
+ * expressions and comments, so neither a `//` in a URL nor a `*` + `/` in
+ * a comment is taken for what it isn't, and no script makes it slow (it
+ * runs on the agent, before the sandbox's time limit).
  */
 export function withoutFinalSemicolon(code: string): string {
-  let end = code.length;
-  for (;;) {
-    while (end > 0 && /\s/.test(code[end - 1] ?? "")) end--;
-    if (end >= 2 && code.startsWith("*/", end - 2)) {
-      const open = code.lastIndexOf("/*", end - 3);
-      if (open < 0) return code;
-      end = open;
-      continue;
+  // The last character outside a comment that isn't whitespace.
+  let last = -1;
+  for (let i = 0; i < code.length; i++) {
+    const char = code[i] ?? "";
+    const next = code[i + 1];
+    if (char === "/" && next === "/") {
+      const line = code.indexOf("\n", i);
+      if (line < 0) break;
+      i = line;
+    } else if (char === "/" && next === "*") {
+      const close = code.indexOf("*/", i + 2);
+      if (close < 0) break;
+      i = close + 1;
+    } else if (
+      char === '"' ||
+      char === "'" ||
+      char === "`" ||
+      (char === "/" && startsRegExp(code[last]))
+    ) {
+      i = literalEnd(code, i);
+      last = i;
+    } else if (!/\s/.test(char)) {
+      last = i;
     }
-    const lineStart = code.lastIndexOf("\n", end - 1) + 1;
-    const slash = code.indexOf("//", lineStart);
-    if (slash >= 0 && slash < end) {
-      end = slash;
-      continue;
-    }
-    break;
   }
-  return code[end - 1] === ";" ? code.slice(0, end - 1) : code;
+  return code[last] === ";" ? code.slice(0, last) : code;
+}
+
+/** Whether a `/` after this character starts a regular expression. */
+function startsRegExp(before: string | undefined): boolean {
+  return before === undefined || "(,=:[!&|?{};+-*%<>~^".includes(before);
+}
+
+/** Where the string, template or regular expression at `start` ends. */
+function literalEnd(code: string, start: number): number {
+  const quote = code[start];
+  let inClass = false;
+  for (let i = start + 1; i < code.length; i++) {
+    const char = code[i];
+    if (char === "\\") i++;
+    else if (quote === "/" && char === "[") inClass = true;
+    else if (quote === "/" && char === "]") inClass = false;
+    else if (char === quote && !inClass) return i;
+    else if (char === "\n" && quote !== "`") return i;
+  }
+  return code.length - 1;
 }

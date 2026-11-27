@@ -58,6 +58,8 @@ const WRITE_RUNS_KEY = "write-runs";
 const READ_RUNS_KEY = "read-runs";
 const RECEIPT_RUNS_KEY = "receipt-runs";
 const RECEIPT_HOPS_KEY = "receipt-hops";
+const PENDING_RUNS_KEY = "pending-runs";
+const PENDING_RELEASE_KEY = "pending-release";
 const DANGEROUS_FLAVOR_KEY = "dangerous-flavor";
 const COMPOSE_ABORTED_KEY = "test:compose-aborted";
 const NOTE_IN_BEFORE_TURN_KEY = "test:note-in-before-turn";
@@ -275,7 +277,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
               abortable: z.boolean().optional(),
               write: z.boolean().optional(),
               receipt: z.boolean().optional(),
-              rounds: z.boolean().optional()
+              rounds: z.boolean().optional(),
+              pending: z.boolean().optional()
             }),
             execute: async (
               {
@@ -286,7 +289,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
                 abortable,
                 write,
                 receipt,
-                rounds
+                rounds,
+                pending
               },
               options
             ) => {
@@ -303,6 +307,32 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
                 ]);
                 if (!written.ok) return written.errorText;
                 return done.ok ? `${written.output}` : done.errorText;
+              }
+              // A write still running at the first approval, then a second
+              // approval.
+              if (pending) {
+                const kv = this.ctx.storage.kv;
+                const before = kv.get<number>(PENDING_RUNS_KEY) ?? 0;
+                const writing = invoke("pending_write", {});
+                let answered = false;
+                const settle = () => {
+                  answered = true;
+                };
+                void writing.then(settle, settle);
+                while (
+                  !answered &&
+                  (kv.get<number>(PENDING_RUNS_KEY) ?? 0) <= before
+                ) {
+                  await new Promise((resolve) => setTimeout(resolve, 5));
+                }
+                const [written, first] = await Promise.all([
+                  writing,
+                  invoke("dangerous", { flavor: "one" })
+                ]);
+                if (!first.ok) return first.errorText;
+                const second = await invoke("dangerous", { flavor: "two" });
+                if (!second.ok) return second.errorText;
+                return written.ok ? `${written.output}` : written.errorText;
               }
               // A read beside one approval, then a second approval.
               if (rounds) {
@@ -451,6 +481,26 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
                   : new Promise((resolve) => setTimeout(resolve, 0)));
               }
               return "receipt";
+            }
+          }),
+          callers: ["code"] as const
+        },
+        // Code-only, not safe to rerun: a write that runs on past a park
+        // until released.
+        pending_write: {
+          ...tool({
+            description: "Write, when released",
+            inputSchema: z.object({}),
+            execute: async () => {
+              const kv = this.ctx.storage.kv;
+              kv.put(
+                PENDING_RUNS_KEY,
+                (kv.get<number>(PENDING_RUNS_KEY) ?? 0) + 1
+              );
+              while (!kv.get(PENDING_RELEASE_KEY)) {
+                await new Promise((resolve) => setTimeout(resolve, 5));
+              }
+              return "pending receipt";
             }
           }),
           callers: ["code"] as const
@@ -844,7 +894,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
               abortable: text === "compose abortable",
               write: text === "compose write",
               receipt: text === "compose receipt",
-              rounds: text === "compose rounds"
+              rounds: text === "compose rounds",
+              pending: text === "compose pending"
             }
           }
         ]);
@@ -1144,6 +1195,14 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   composeAborted(): boolean {
     return this.ctx.storage.kv.get<boolean>(COMPOSE_ABORTED_KEY) ?? false;
+  }
+
+  pendingRuns(): number {
+    return this.ctx.storage.kv.get<number>(PENDING_RUNS_KEY) ?? 0;
+  }
+
+  releasePending(): void {
+    this.ctx.storage.kv.put(PENDING_RELEASE_KEY, true);
   }
 
   setReceiptHops(hops: number): void {

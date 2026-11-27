@@ -84,10 +84,40 @@ describe("codemode as an extension", () => {
     expect(withoutFinalSemicolon('async () => "http://x"')).toBe(
       'async () => "http://x"'
     );
+    // A URL's `//` is no comment: the semicolon after it goes.
+    expect(
+      withoutFinalSemicolon(
+        'async () => await tools.fetch({ url: "https://example.com" });'
+      )
+    ).toBe('async () => await tools.fetch({ url: "https://example.com" })');
+    expect(withoutFinalSemicolon('async () => f("a//b"); // done')).toBe(
+      'async () => f("a//b")'
+    );
+    expect(withoutFinalSemicolon("async () => 'it\\'s'; // x")).toBe(
+      "async () => 'it\\'s'"
+    );
+    // A line comment that ends in a block comment's close.
+    expect(withoutFinalSemicolon("async () => 1; // a */")).toBe(
+      "async () => 1"
+    );
+    // A block comment that holds a line comment's start.
+    expect(withoutFinalSemicolon("async () => 1; /* a // b */")).toBe(
+      "async () => 1"
+    );
+    expect(withoutFinalSemicolon("async () => /[/;]/.test(x);")).toBe(
+      "async () => /[/;]/.test(x)"
+    );
     // A comment with many possible ends and no way to finish: a
     // backtracking pattern tries every end.
     const ends = "1;" + "/**/".repeat(40) + "x";
     expect(withoutFinalSemicolon(ends)).toBe(ends);
+  });
+
+  it("runs an arrow function that ends with a URL and a semicolon", async () => {
+    const stub = fresh();
+    const reply =
+      text(await stub.prompt('async () => "https://example.com";')) ?? "";
+    expect(reply).toContain("https://example.com");
   });
 
   it("runs an arrow function that ends with a semicolon and a comment", async () => {
