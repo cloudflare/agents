@@ -2565,6 +2565,14 @@ export class Think<
       return { requestId: "", status: "skipped", continuation: false };
     }
     this.#assertNotInsideTurn("programmatic");
+    // As on Think, which hands this to continueLastTurn: with no assistant
+    // message to continue, nothing runs.
+    if (wait.continuation) {
+      await this.#sync();
+      if (this.#transcript.messages.at(-1)?.role !== "assistant") {
+        return { requestId: "", status: "skipped", continuation: true };
+      }
+    }
     // As saveMessages: a turn stopped before it starts builds nothing.
     const cut = await this.#cutOffByStop(wait.signal);
     if (cut) {
