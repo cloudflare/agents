@@ -1128,7 +1128,8 @@ export class AIChatAgent<
           const continuation =
             this._callContinues.get(result.requestId) ?? false;
           this._callContinues.delete(result.requestId);
-          this.messages = (await this.#session.getHistory()) as UIMessage[];
+          // `this.messages` follows storage through the Sessions change feed
+          // (`mirrorTranscript`): the turn's writes are in it already.
           if (result.status === "error") {
             this._emit("message:error", { error: result.error ?? "" });
           } else if (result.messageId !== undefined) {
