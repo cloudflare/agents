@@ -16323,6 +16323,26 @@ export class ThinkRecoveryTestAgent extends Think {
 // ── ThinkNonRecoveryTestAgent ───────────────────────────────
 // Simulates previously compiled JavaScript that set chatRecovery = false.
 
+/**
+ * A recovery agent with one client tool (declared without `execute`, so a
+ * client answers it) and one server tool, for `waitUntilStable`.
+ */
+export class ThinkStableToolsTestAgent extends ThinkRecoveryTestAgent {
+  override getTools(): ToolSet {
+    return {
+      client_action: tool({
+        description: "Runs on the client",
+        inputSchema: z.object({ action: z.string() })
+      }),
+      preview_tool: tool({
+        description: "Runs on the server",
+        inputSchema: z.object({ url: z.string() }),
+        execute: async () => "preview"
+      })
+    };
+  }
+}
+
 export class ThinkNonRecoveryTestAgent extends Think {
   // @ts-expect-error `false` is no longer accepted, but stale JavaScript must
   // still take the always-on durable recovery path.

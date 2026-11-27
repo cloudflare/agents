@@ -22,6 +22,7 @@ import type {
   ThinkProgrammaticTestAgent,
   ThinkAsyncHookTestAgent,
   ThinkRecoveryTestAgent,
+  ThinkStableToolsTestAgent,
   ThinkNonRecoveryTestAgent,
   ThinkLegacySessionApiAgent,
   TestChatResult
@@ -7340,6 +7341,64 @@ describe("Think — onChatRecovery", () => {
 // ── waitUntilStable / hasPendingInteraction ───────────────────────
 
 describe("Think — waitUntilStable", () => {
+  async function stableToolsAgent() {
+    const agent = await getAgentByName(
+      env.ThinkStableToolsTestAgent as unknown as DurableObjectNamespace<ThinkStableToolsTestAgent>,
+      `stable-tools-${crypto.randomUUID()}`
+    );
+    // One real turn, so the agent has assembled its tools.
+    await agent.testChat("Hello");
+    return agent;
+  }
+
+  it("waits on a stored call to a tool the server declares without execute: a client answers it", async () => {
+    const agent = await stableToolsAgent();
+    await agent.persistTestMessage({
+      id: "user-2",
+      role: "user",
+      parts: [{ type: "text", text: "Use a tool" }]
+    } as UIMessage);
+    await agent.persistTestMessage({
+      id: "assistant-2",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-client",
+          toolName: "client_action",
+          state: "input-available",
+          input: { action: "test" }
+        }
+      ]
+    } as unknown as UIMessage);
+    expect(await agent.hasPendingInteractionForTest()).toBe(true);
+    expect(await agent.waitUntilStableForTest(200)).toBe(false);
+  });
+
+  it("does not wait on a stored unanswered call to a server tool: nothing will answer it", async () => {
+    const agent = await stableToolsAgent();
+    await agent.persistTestMessage({
+      id: "user-2",
+      role: "user",
+      parts: [{ type: "text", text: "Render a preview" }]
+    } as UIMessage);
+    await agent.persistTestMessage({
+      id: "assistant-2",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-preview_tool",
+          toolCallId: "tc-server",
+          toolName: "preview_tool",
+          state: "input-available",
+          input: { url: "https://example.com" }
+        }
+      ]
+    } as unknown as UIMessage);
+    expect(await agent.hasPendingInteractionForTest()).toBe(false);
+    expect(await agent.waitUntilStableForTest(1000)).toBe(true);
+  });
+
   it("returns true immediately when no pending interactions", async () => {
     const agent = await freshRecoveryAgent("stable-immediate");
 

@@ -1989,15 +1989,25 @@ export class Think<
     return undefined;
   }
 
-  /** Whether the latest message has a tool call waiting on a client. */
+  /**
+   * Whether the latest message has a tool call waiting on a client, as on
+   * Think: an approval, or a call with no result to a tool the server does
+   * not run. An unanswered call to a server tool is dead (a cut-off reply
+   * stored it that way), and nothing will answer it.
+   */
   protected hasPendingInteraction(): boolean {
     const last = this.#transcript.messages.at(-1);
-    return (last?.parts ?? []).some(
-      (part) =>
-        "toolCallId" in part &&
-        (part.state === "input-available" ||
-          part.state === "approval-requested")
-    );
+    const parts = last?.parts ?? [];
+    if (!parts.some((part) => "toolCallId" in part)) return false;
+    const tools = this.getTools();
+    return parts.some((part) => {
+      if (!("toolCallId" in part)) return false;
+      if (part.state === "approval-requested") return true;
+      if (part.state !== "input-available") return false;
+      const server =
+        tools[getToolName(part as Parameters<typeof getToolName>[0])];
+      return server?.execute === undefined;
+    });
   }
 
   /**
