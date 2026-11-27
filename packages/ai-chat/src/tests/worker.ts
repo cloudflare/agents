@@ -686,7 +686,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
         result.status === "error"
       ) {
         this._fallbackOnFailedContinuation = false;
-        this.setTestBody({});
+        await this.setTestBody({});
         await this.saveMessages([
           ...this.messages,
           {
@@ -1836,7 +1836,10 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   getActiveRequestId(): string | null {
-    return this._replyStreams.activeRequestId;
+    return (
+      this._openChatTurns().find((run) => run.status === "running")?.runId ??
+      null
+    );
   }
 
   getStreamChunks(
@@ -2089,11 +2092,8 @@ export class TestChatAgent extends AIChatAgent<Env> {
    * If controllers leak, this count grows with each request.
    */
   getAbortControllerCount(): number {
-    return (
-      this as unknown as {
-        _turns: { aborts: { size: number } };
-      }
-    )._turns.aborts.size;
+    return this._openChatTurns().filter((run) => run.status === "running")
+      .length;
   }
 }
 
@@ -2554,7 +2554,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     }
     this._chatResponseResults = [];
     this._onErrorCallsForTest = [];
-    this.setTestBody({ failOnAbort: options.phase });
+    await this.setTestBody({ failOnAbort: options.phase });
     const started = new Promise<void>((resolve) => {
       this._stopWithReasonStarted = resolve;
     });
@@ -2618,16 +2618,13 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     } finally {
       self._frames.broadcast = broadcast;
       this._stopWithReasonStarted = undefined;
-      this.setTestBody({});
+      await this.setTestBody({});
     }
   }
 
   getAbortControllerCount(): number {
-    return (
-      this as unknown as {
-        _turns: { aborts: { size: number } };
-      }
-    )._turns.aborts.size;
+    return this._openChatTurns().filter((run) => run.status === "running")
+      .length;
   }
 
   getStartedRequestIds(): string[] {
@@ -2752,9 +2749,11 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     await this.saveMessages([...this.messages, message]);
   }
 
-  setTestBody(body: Record<string, unknown>): void {
-    (this as unknown as { _lastBody: Record<string, unknown> })._lastBody =
-      body;
+  async setTestBody(body: Record<string, unknown>): Promise<void> {
+    // The chat module's request context: what a server turn runs with.
+    await this.sessions
+      .session()
+      .internal_setConfig(CHAT_REQUEST_CONTEXT_KEY, JSON.stringify({ body }));
   }
 
   async enqueueSyntheticUserMessage(
@@ -2806,7 +2805,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
       body?: Record<string, unknown>;
     }
   ): Promise<SaveMessagesResult> {
-    if (options.body) this.setTestBody(options.body);
+    if (options.body) await this.setTestBody(options.body);
     const controller = new AbortController();
     if (options.preAbort) {
       controller.abort(new Error("pre-aborted"));
@@ -2864,7 +2863,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     cancelAfterMs: number,
     body?: Record<string, unknown>
   ): Promise<SaveMessagesResult> {
-    if (body) this.setTestBody(body);
+    if (body) await this.setTestBody(body);
     setTimeout(() => {
       (this as unknown as { abortAllRequests(): void }).abortAllRequests();
     }, cancelAfterMs);
@@ -2887,7 +2886,11 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     text: string,
     answers: boolean[]
   ): Promise<{ result: SaveMessagesResult; asked: number }> {
-    this.setTestBody({ format: "plaintext", chunkCount: 2, chunkDelayMs: 5 });
+    await this.setTestBody({
+      format: "plaintext",
+      chunkCount: 2,
+      chunkDelayMs: 5
+    });
     let asked = 0;
     const result = await (
       this as unknown as {
@@ -2920,7 +2923,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     cancelAfterMs: number,
     body: Record<string, unknown>
   ): Promise<{ running: SaveMessagesResult; queued: SaveMessagesResult }> {
-    this.setTestBody(body);
+    await this.setTestBody(body);
     const turn = (text: string) =>
       this.saveMessages((messages) => [
         ...messages,
@@ -6359,11 +6362,8 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
   }
 
   getAbortControllerCount(): number {
-    return (
-      this as unknown as {
-        _turns: { aborts: { size: number } };
-      }
-    )._turns.aborts.size;
+    return this._openChatTurns().filter((run) => run.status === "running")
+      .length;
   }
 
   async waitForIdleForTest(): Promise<void> {
