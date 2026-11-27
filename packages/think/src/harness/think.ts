@@ -34,6 +34,7 @@ import {
   type ThinkErrorClass,
   type ThinkOperationResult,
   type ThinkOperationStatus,
+  type ThinkStreamCallback,
   type ThinkToolCallDecision,
   type ThinkTurnConfig,
   type ThinkTurnContext
@@ -910,6 +911,7 @@ export class Think<
           await this.#chunkHooks;
           const continued = this.#continued.get(end.operationId);
           this.#continued.delete(end.operationId);
+          this.#newReplies.delete(end.operationId);
           this.#turnFinished(
             end.operationId,
             end.status === "done"
@@ -1871,6 +1873,60 @@ export class Think<
     );
   }
 
+  /**
+   * The operations that answer the history with a new reply and no message
+   * of their own (continueLastTurn, an empty saveMessages): as on Think, a
+   * continuation, though the harness writes a new assistant message.
+   */
+  readonly #newReplies = new Set<string>();
+
+  #isContinuation(turn: { operationId: string; continuation: boolean }) {
+    return turn.continuation || this.#newReplies.has(turn.operationId);
+  }
+
+  /**
+   * `ThinkSession.chat()` for a new reply with no message of its own: the
+   * reply's chunks to `callbacks` as they stream, then its end.
+   */
+  async #streamReply(
+    operationId: string,
+    callbacks: ThinkStreamCallback
+  ): Promise<void> {
+    const session = this.harness.session();
+    let delivered = Promise.resolve();
+    const deliver = (fn: () => void | Promise<void>) => {
+      delivered = delivered.then(fn).catch((error: unknown) => {
+        console.error("[Think] chat callback failed", error);
+      });
+    };
+    const unsubscribe = session.subscribe((event) => {
+      if (event.type === "chunk" && event.operationId === operationId) {
+        deliver(() => callbacks.onEvent(JSON.stringify(event.chunk)));
+      }
+    });
+    try {
+      const receipt = await this.#replyAgain(operationId);
+      deliver(() => callbacks.onStart?.({ operationId: receipt.operationId }));
+      const result = await session.wait(receipt.operationId);
+      unsubscribe();
+      await delivered;
+      if (result.status === "done") await callbacks.onDone();
+      else await callbacks.onError(result.reason ?? "unanswered");
+    } finally {
+      unsubscribe();
+    }
+  }
+
+  /** Ask the harness for a new reply over the history as it stands. */
+  #replyAgain(operationId: string) {
+    this.#newReplies.add(operationId);
+    return this.harness.enqueue(
+      this.harness.session().id,
+      { kind: "reply" },
+      { operationId }
+    );
+  }
+
   /** A new operation id for a turn a method call asks for (`programmatic`). */
   #programmaticTurn(): string {
     const operationId = crypto.randomUUID();
@@ -1974,7 +2030,8 @@ export class Think<
     const operationId = this.#programmaticTurn();
     if (channel !== undefined) this.#explicitChannels.set(operationId, channel);
     try {
-      return await this.harness.session().continue({ operationId });
+      // As on Think: a new assistant message, not an append.
+      return await this.#replyAgain(operationId);
     } catch (error) {
       this.#explicitChannels.delete(operationId);
       throw error;
@@ -2078,10 +2135,15 @@ export class Think<
       typeof messages === "function" ? await messages(this.messages) : messages;
     const known = new Set(this.messages.map((message) => message.id));
     const session = this.harness.session();
-    const receipt = await session.submit(
-      resolved.filter((message) => !known.has(message.id)),
-      { operationId: this.#programmaticTurn() }
-    );
+    const fresh = resolved.filter((message) => !known.has(message.id));
+    // As on Think: nothing new to store still runs a new reply over the
+    // history as it stands.
+    const receipt =
+      fresh.length === 0
+        ? await this.#replyAgain(this.#programmaticTurn())
+        : await session.submit(fresh, {
+            operationId: this.#programmaticTurn()
+          });
     return this.#waitForTurn(receipt.operationId, options?.signal);
   }
 
@@ -2565,43 +2627,52 @@ export class Think<
       return { requestId: "", status: "skipped", continuation: false };
     }
     this.#assertNotInsideTurn("programmatic");
-    // As on Think, which hands this to continueLastTurn: with no assistant
-    // message to continue, nothing runs.
+    // As on Think: a continuation is continueLastTurn's turn, through an
+    // override too; the result carries the reply it wrote.
     if (wait.continuation) {
-      await this.#sync();
-      if (this.#transcript.messages.at(-1)?.role !== "assistant") {
-        return { requestId: "", status: "skipped", continuation: true };
-      }
+      const result = await this.continueLastTurn(undefined, {
+        ...(wait.signal && { signal: wait.signal }),
+        ...(wait.channel !== undefined && { channel: wait.channel })
+      });
+      const settled =
+        result.status === "completed" && result.requestId
+          ? await this.harness.session().wait(result.requestId)
+          : undefined;
+      const message =
+        settled?.status === "done" && settled.messageId !== undefined
+          ? this.#transcript.messages.find((m) => m.id === settled.messageId)
+          : undefined;
+      return {
+        ...result,
+        continuation: true,
+        ...(message && { message: message as unknown as SessionMessage })
+      };
     }
     // As saveMessages: a turn stopped before it starts builds nothing.
     const cut = await this.#cutOffByStop(wait.signal);
-    if (cut) {
-      return {
-        ...cutOffBeforeStart(cut),
-        continuation: wait.continuation === true
-      };
-    }
+    if (cut) return { ...cutOffBeforeStart(cut), continuation: false };
     const session = this.harness.session();
-    let receipt;
-    if (wait.continuation) receipt = await this.#continue(wait.channel);
-    else {
-      const input = wait.input;
-      const messages =
-        typeof input === "function"
-          ? await input(this.messages)
-          : toInput(
-              input as Exclude<
-                TurnInputMessages,
-                (current: UIMessage[]) => unknown
-              >
-            );
-      receipt = await session.submit(
-        // As in Think: the channel is stamped on the durable user message,
-        // so a continuation or a recovered turn resolves it again.
-        wait.channel ? stampTurnContext(messages, wait.channel) : messages,
-        { operationId: this.#programmaticTurn() }
-      );
-    }
+    const input = wait.input;
+    const messages =
+      typeof input === "function"
+        ? await input(this.messages)
+        : toInput(
+            input as Exclude<
+              TurnInputMessages,
+              (current: UIMessage[]) => unknown
+            >
+          );
+    const operationId = this.#programmaticTurn();
+    // As on Think: a function that adds nothing still runs a new reply.
+    const receipt =
+      messages.length === 0
+        ? await this.#replyAgain(operationId)
+        : await session.submit(
+            // As in Think: the channel is stamped on the durable user
+            // message, so a continuation or a recovered turn resolves it.
+            wait.channel ? stampTurnContext(messages, wait.channel) : messages,
+            { operationId }
+          );
     wait.signal?.addEventListener(
       "abort",
       () => void session.abort(receipt.operationId),
@@ -2615,7 +2686,7 @@ export class Think<
         : undefined;
     return {
       ...saveResult(result),
-      continuation: wait.continuation === true,
+      continuation: false,
       ...(message && { message: message as unknown as SessionMessage })
     };
   }
@@ -2923,24 +2994,31 @@ export class Think<
     );
     this.#chatClears.set(operationId, false);
     try {
-      await this.harness.session().chat(
-        messages,
-        {
-          onStart: () => callback.onStart({ requestId: operationId }),
-          onEvent: (json) => callback.onEvent(json),
-          onDone: () => callback.onDone(),
-          onError: (error) => {
-            // A stopped turn is not an error: as on Think, its caller hears
-            // neither `onDone` nor `onError`, and `onChatError` does not run.
-            // "aborted" is the harness's reason for a stop, and "withdrawn" for
-            // a stop that reached the turn while it waited (see `saveResult`).
-            if (error === "aborted" || error === "withdrawn") return;
-            const wrapped = this.onChatError(new Error(error));
-            return callback.onError(errorText(wrapped));
-          }
-        },
-        { operationId }
-      );
+      // As on Think: no message to add still streams a new reply over the
+      // history as it stands.
+      const chat =
+        messages.length === 0
+          ? (callbacks: ThinkStreamCallback) =>
+              this.#streamReply(operationId, callbacks)
+          : (callbacks: ThinkStreamCallback) =>
+              this.harness
+                .session()
+                .chat(messages, callbacks, { operationId })
+                .then(() => {});
+      await chat({
+        onStart: () => callback.onStart({ requestId: operationId }),
+        onEvent: (json) => callback.onEvent(json),
+        onDone: () => callback.onDone(),
+        onError: (error) => {
+          // A stopped turn is not an error: as on Think, its caller hears
+          // neither `onDone` nor `onError`, and `onChatError` does not run.
+          // "aborted" is the harness's reason for a stop, and "withdrawn" for
+          // a stop that reached the turn while it waited (see `saveResult`).
+          if (error === "aborted" || error === "withdrawn") return;
+          const wrapped = this.onChatError(new Error(error));
+          return callback.onError(errorText(wrapped));
+        }
+      });
       if (
         this.#chatClears.get(operationId) === true &&
         !options?.signal?.aborted
@@ -3278,7 +3356,7 @@ export class Think<
         explicit ??
         (web
           ? "web"
-          : ((turn.continuation ? this.#lastTurnChannel : undefined) ??
+          : ((this.#isContinuation(turn) ? this.#lastTurnChannel : undefined) ??
             channelFromMessages(history)));
       // A browser's new user message is stamped `web` here, as Think stamps
       // it at intake: the client's own write cannot carry the key, and the
@@ -3353,17 +3431,18 @@ export class Think<
       return resolved;
     };
     const identity = this.#turnOf(turn.operationId);
+    const continuation = this.#isContinuation(turn);
     this.#running = {
       requestId: turn.operationId,
       trigger: identity.trigger,
-      continuation: turn.continuation
+      continuation
     };
     // The first call of an operation says whether it continues a reply.
     if (!this.#continued.has(turn.operationId)) {
       this.#recordUnexecutedTools(tools);
-      this.#continued.set(turn.operationId, turn.continuation);
+      this.#continued.set(turn.operationId, continuation);
       this.#clearsAtStart.set(turn.operationId, this.#clears);
-      this.#turnStarted(turn.operationId, identity.trigger, turn.continuation);
+      this.#turnStarted(turn.operationId, identity.trigger, continuation);
     }
     // As in Think: the capability block for the turn's tools follows the
     // prompt, unless a `beforeTurn` gives its own.
@@ -3386,7 +3465,7 @@ export class Think<
       get model() {
         return resolveDefault();
       },
-      continuation: turn.continuation,
+      continuation,
       requestId: turn.operationId,
       trigger: identity.trigger,
       abortSignal: turn.signal,
