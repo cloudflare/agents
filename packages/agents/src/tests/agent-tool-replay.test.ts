@@ -34,6 +34,20 @@ function runText(
     .join("");
 }
 
+describe("an awaited agent-tool run cleared while it runs", () => {
+  it("resolves aborted as cleared, with its agent type, at the root", async () => {
+    const agent = await getAgentByName(
+      env.TestAgentToolReplayAgent,
+      `clear-awaited-${crypto.randomUUID()}`
+    );
+    expect(await agent.clearWhileAwaitedForTest()).toEqual({
+      status: "aborted",
+      error: "agent tool run cleared",
+      agentType: "TestAgentToolStubChild"
+    });
+  });
+});
+
 describe("an awaited agent-tool run stopped by its caller", () => {
   // The chat module stops a turn with a `TaskCancellation`, not an Error:
   // the run's error is its reason, and the child's run is cancelled.

@@ -5873,6 +5873,11 @@ function makeDelayedSSEChunkResponse(
     async start(controller) {
       try {
         for (const chunk of chunks) {
+          // A pause, as a tool that takes its time leaves between steps.
+          if (typeof chunk.pauseMs === "number") {
+            await delayWithAbort(chunk.pauseMs, signal);
+            continue;
+          }
           await delayWithAbort(delayMs, signal);
           controller.enqueue(
             encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`)
@@ -5909,6 +5914,10 @@ type AgentToolInput = {
   streamError?: string;
   /** Text streamed (and persisted) before `streamError`'s error chunk. */
   streamErrorText?: string;
+  /** Answer in two steps: a tool call and its output, then text. */
+  toolThenText?: boolean;
+  /** Report a milestone this long into the reply. */
+  milestoneAfterMs?: number;
 };
 
 const FACET_OOM_TEST_TASK_NAME = "__cf_test_facetRecoveryOom";
@@ -6305,6 +6314,40 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     this._turnStoresForTest.push(this._turnStoreCountsForTest());
     const bodyText = `AIChat child handled: ${prompt}`;
     await delayWithAbort(Number(input?.delayMs ?? 0), options?.abortSignal);
+    if (input?.milestoneAfterMs !== undefined) {
+      setTimeout(
+        () => void this.reportProgress({ milestone: "found", data: { n: 1 } }),
+        input.milestoneAfterMs
+      );
+    }
+    if (input?.toolThenText) {
+      return makeDelayedSSEChunkResponse(
+        [
+          { type: "start-step" },
+          {
+            type: "tool-input-available",
+            toolCallId: "lookup-1",
+            toolName: "lookup",
+            input: { q: prompt }
+          },
+          {
+            type: "tool-output-available",
+            toolCallId: "lookup-1",
+            output: { found: true }
+          },
+          { type: "finish-step" },
+          { pauseMs: 1500 },
+          { type: "start-step" },
+          { type: "text-start" },
+          { type: "text-delta", delta: bodyText },
+          { type: "text-end" },
+          { type: "finish-step" },
+          { type: "finish" }
+        ],
+        Number(input?.chunkDelayMs ?? 0),
+        options?.abortSignal
+      );
+    }
     if (input?.streamError) {
       return makeDelayedSSEChunkResponse(
         [

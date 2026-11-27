@@ -96,6 +96,35 @@ function ensureReleasedAgentToolTable(sql: SqlStorage): void {
 }
 
 export class TestAgentToolReplayAgent extends Agent {
+  /** Clear the runs while an awaited run is still running, and return what the call gave. */
+  async clearWhileAwaitedForTest(): Promise<{
+    status: string;
+    error?: string;
+    agentType: string;
+  }> {
+    const runId = crypto.randomUUID();
+    const running = this.runAgentTool(TestAgentToolStubChild, {
+      runId,
+      input: { staysRunning: true, tailHangs: true } as StubRunInput
+    });
+    const child = await this.subAgent(TestAgentToolStubChild, runId);
+    // A bound for a slow machine: the child has the run once it started.
+    const deadline = Date.now() + 5000;
+    while (
+      (await child.inspectAgentToolRun(runId))?.status !== "running" &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    await this.clearAgentToolRuns();
+    const result = await running;
+    return {
+      status: result.status,
+      ...(result.error !== undefined && { error: result.error }),
+      agentType: result.agentType
+    };
+  }
+
   /**
    * Stop an awaited run the way the chat module stops the turn that runs
    * it: its signal aborts with a `TaskCancellation`. Returns what the call

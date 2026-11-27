@@ -36,6 +36,8 @@ type ParentStub = DurableObjectStub & {
       chunkDelayMs?: number;
       structured?: boolean;
       streamError?: string;
+      toolThenText?: boolean;
+      milestoneAfterMs?: number;
     },
     runId?: string
   ): Promise<RunAgentToolResult>;
@@ -767,6 +769,38 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(laterChunks.every((chunk) => chunk.sequence > 0)).toBe(true);
     // afterSequence is a per-chunk cursor: everything past sequence 0.
     expect(laterChunks).toEqual(chunks.slice(1));
+  });
+
+  it("forwards every step of a multi-step reply to a parent that follows the run live", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+    const result = await parent.runChild(
+      {
+        prompt: "look it up",
+        chunkDelayMs: 30,
+        toolThenText: true,
+        milestoneAfterMs: 50
+      },
+      runId
+    );
+    expect(result.status).toBe("completed");
+    const chunks = (await parent.getEventsForTest())
+      .filter((event) => event.event.kind === "chunk")
+      .map(
+        (event) =>
+          (
+            JSON.parse(
+              (event.event as { kind: "chunk"; body: string }).body
+            ) as { type: string }
+          ).type
+      );
+    // The tool step (with the milestone reported meanwhile), then the
+    // text step, then the finish.
+    expect(chunks).toContain("data-agent-milestone");
+    expect(chunks).toContain("tool-output-available");
+    expect(chunks).toContain("text-delta");
+    expect(chunks.filter((type) => type === "finish-step")).toHaveLength(2);
+    expect(chunks.at(-1)).toBe("finish");
   });
 
   it("forwards the reply's finish to a parent that follows the run live", async () => {

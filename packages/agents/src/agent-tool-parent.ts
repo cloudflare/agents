@@ -248,6 +248,13 @@ export class AgentToolParent {
    * yet, so concurrent calls count them against `maxConcurrentAgentTools`.
    * Each leaves when its call returns.
    */
+  /**
+   * Awaited runs a caller in this isolate waits on, and those of them a
+   * clear deleted (by agent type): the caller reports the clear, not a run
+   * that vanished.
+   */
+  private readonly _agentToolAwaited = new Set<string>();
+  private readonly _agentToolClearedWhileAwaited = new Map<string, string>();
   private readonly _agentToolRunsStarting = new Set<string>();
   /** Edge-trigger latch for the live-detached-count warning. */
   private _detachedLiveCountWarned = false;
@@ -328,6 +335,7 @@ export class AgentToolParent {
           });
         }
       }
+      this._agentToolAwaited.add(runId);
       return this._waitAgentToolTask<Output>(runId);
     }
 
@@ -522,13 +530,19 @@ export class AgentToolParent {
         )
         .catch(() => {});
     };
-    await this.host.tasks.run(AGENT_TOOL_TASK, null, {
-      runId,
-      metadata,
-      retain: true,
-      start: "now",
-      local
-    });
+    this._agentToolAwaited.add(runId);
+    try {
+      await this.host.tasks.run(AGENT_TOOL_TASK, null, {
+        runId,
+        metadata,
+        retain: true,
+        start: "now",
+        local
+      });
+    } catch (error) {
+      this._agentToolAwaited.delete(runId);
+      throw error;
+    }
     if (signal?.aborted) onAbort();
     else signal?.addEventListener("abort", onAbort, { once: true });
     let result: RunAgentToolResult<Output>;
@@ -585,10 +599,26 @@ export class AgentToolParent {
   private async _waitAgentToolTask<Output>(
     runId: string
   ): Promise<RunAgentToolResult<Output>> {
-    const record = await this.host.tasks.wait(runId);
+    let record: TaskRecord | null;
+    try {
+      record = await this.host.tasks.wait(runId);
+    } finally {
+      this._agentToolAwaited.delete(runId);
+    }
     const settled = record && this._agentToolTaskResult<Output>(record);
     if (record && settled) {
+      this._agentToolClearedWhileAwaited.delete(runId);
       return this._agentToolResultWithOutput<Output>(record, settled);
+    }
+    const cleared = this._agentToolClearedWhileAwaited.get(runId);
+    if (cleared !== undefined) {
+      this._agentToolClearedWhileAwaited.delete(runId);
+      return {
+        runId,
+        agentType: cleared,
+        status: "aborted",
+        error: AGENT_TOOL_CLEARED_REASON
+      };
     }
     return {
       runId,
@@ -1920,6 +1950,9 @@ export class AgentToolParent {
       // The run goes before its child is cleaned up, so a reset during the
       // cleanup leaves no cleared run behind (one a reset cut off inside the
       // cancel is dropped when the runs are next listed).
+      if (this._agentToolAwaited.has(row.run_id)) {
+        this._agentToolClearedWhileAwaited.set(row.run_id, row.agent_type);
+      }
       this.host.tasks.deleteRun(row.run_id);
       if (open === "pending" || open === "running") {
         try {
