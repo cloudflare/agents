@@ -49,10 +49,6 @@ import {
   type InterruptedToolPart
 } from "../../chat/chat-host";
 import { TaskSettlement } from "../../tasks/settlement";
-import {
-  ChatStreamStalledError,
-  iterateWithStallWatchdog
-} from "../../chat/stall-watchdog";
 import { StreamAccumulator } from "../../chat/stream-accumulator";
 import type {
   AgentHarness,
@@ -1521,9 +1517,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         recovery: {
           // The first attempt, then one per interruption it survives.
           maxAttempts: (recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS) + 1,
-          // The loop watches each model call itself: a tool may take longer
-          // than the model may stay silent.
-          stallTimeoutMs: 0
+          // The definition times only the model, not a tool that runs.
+          stallTimeoutMs: recovery?.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS
         }
       },
       hooks: {
@@ -1924,7 +1919,6 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         );
         if (action._tag === "call-model") {
           const chunks: UIMessageChunk[] = [];
-          const stall = new AbortController();
           const model = await this.#modelCall(
             call,
             turn,
@@ -1932,44 +1926,28 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             reply,
             messageId,
             steps,
-            AbortSignal.any([signal, stall.signal])
+            signal
           );
-          const stallTimeoutMs =
-            this.#options.recovery?.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
-          try {
-            for await (const chunk of untilAborted(
-              iterateWithStallWatchdog(model.stream, stallTimeoutMs, () =>
-                stall.abort(new ChatStreamStalledError("Model stream stalled"))
-              ),
-              signal
-            )) {
-              if (chunk.type === "start") {
-                if (started) continue;
-                started = true;
-              } else if (chunk.type === "finish") {
-                finish = chunk;
-                continue;
-              } else if (chunk.type === "error" || chunk.type === "abort") {
-                // The model's error is thrown below, out of band.
-                continue;
-              }
-              chunks.push(chunk);
-              yield chunk;
+          for await (const chunk of untilAborted(model.stream, signal)) {
+            if (chunk.type === "start") {
+              if (started) continue;
+              started = true;
+            } else if (chunk.type === "finish") {
+              finish = chunk;
+              continue;
+            } else if (chunk.type === "error" || chunk.type === "abort") {
+              // The model's error is thrown below, out of band.
+              continue;
             }
-          } catch (error) {
-            // The watchdog ends a silent stream by throwing: that is the
-            // stall, handled below. Anything else is not the model's.
-            if (!stall.signal.aborted) throw error;
+            chunks.push(chunk);
+            yield chunk;
           }
           if (signal.aborted) return;
-          const stalled = stall.signal.aborted;
-          const failure = stalled ? stall.signal.reason : model.error();
+          const failure = model.error();
           if (failure !== undefined) {
             // What the failed call streamed is part of the reply kept.
             const streamed = await continued(reply, chunks);
             if (streamed) live.reply = settledPartial(streamed);
-            // A stall is an interruption: the next attempt continues.
-            if (stalled) throw new ModelCallError("retry", failure);
             try {
               await this.#extensions.hook("onError", {
                 error: failure,
