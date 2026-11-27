@@ -7,6 +7,8 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "ai": { "binding": "AI" },
+  // The extension's tools run in Dynamic Workers minted through this.
+  "worker_loaders": [{ "binding": "LOADER" }],
   "durable_objects": {
     "bindings": [{ "class_name": "ProbeThink", "name": "ProbeThink" }]
   },
