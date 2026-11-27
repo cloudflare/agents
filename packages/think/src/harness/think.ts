@@ -864,11 +864,11 @@ export class Think<
       | ((current: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>),
     options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
+    // As on Think: a turn stopped before it starts builds and stores nothing.
+    if (options?.signal?.aborted) return stoppedBeforeStart();
     await this.#sync();
     const resolved =
       typeof messages === "function" ? await messages(this.messages) : messages;
-    // As on Think: a turn stopped before it starts stores nothing.
-    if (options?.signal?.aborted) return stoppedBeforeStart();
     const known = new Set(this.messages.map((message) => message.id));
     const session = this.harness.session();
     const receipt = await session.submit(
