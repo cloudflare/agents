@@ -3118,4 +3118,35 @@ describe("chat functions over a minimal host", () => {
       expect(sent).toHaveLength(1);
     });
   });
+
+  it("a tab that stops a waiting request it did not send is told it ended", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const release = await streamThenHold(instance, [
+        { type: "start", messageId: "a1" }
+      ]);
+      // Sent by a tab that has gone; stopped by another.
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        recordingTab("tab-gone", []),
+        chatRequestWith("r2", "u2", "two")
+      );
+      const sent: Array<Record<string, unknown>> = [];
+      const stopper = recordingTab("tab-stop", sent);
+      instance.tabs.push(stopper);
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        stopper,
+        JSON.stringify({ type: "cf_agent_chat_request_cancel", id: "r2" })
+      );
+      expect(sent).toContainEqual(
+        expect.objectContaining({ id: "r2", done: true, outcome: "aborted" })
+      );
+      release();
+      await instance.resultFor("r2");
+    });
+  });
 });

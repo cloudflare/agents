@@ -2220,13 +2220,14 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   /** The client requests waiting on the chat lane, in order. */
   getAdmissionsForTest(): Array<{ requestId: string; stopped: boolean }> {
     try {
+      // A request that waits is its chat-turn run on the lane that has not
+      // started (the running turn is not a record).
       return this.sql<{ request_id: string; stopped: number | null }>`
-        SELECT json_extract(metadata, '$.requestId') AS request_id,
+        SELECT run_id AS request_id,
                json_extract(metadata, '$.chat.stopped') AS stopped
         FROM cf_agents_task_runs
-        WHERE lane = 'chat' AND status IN ('pending', 'running')
-          AND json_type(input, '$.admission') IS NOT NULL
-          AND json_type(checkpoint, '$.snapshot') IS NULL
+        WHERE lane = 'chat' AND status = 'pending'
+          AND definition = ${AIChatAgent.CHAT_TURN_DEFINITION}
         ORDER BY seq
       `.map((row) => ({
         requestId: row.request_id,

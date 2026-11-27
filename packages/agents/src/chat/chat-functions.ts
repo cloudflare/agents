@@ -249,7 +249,9 @@ function endUnstarted(
   deps: ChatDeps,
   requestId: string,
   outcome: "skipped" | "aborted",
-  metadata: Readonly<Record<string, unknown>> | undefined
+  metadata: Readonly<Record<string, unknown>> | undefined,
+  /** A tab that asked for this end (it stopped the request), told too. */
+  asker?: Connection
 ): void {
   const origin = originOf(metadata);
   const messageIds = messageIdsOf(metadata);
@@ -265,7 +267,11 @@ function endUnstarted(
   const text = frameText(frame as { type: string });
   if (text === undefined || !deps.webSockets) return;
   for (const connection of deps.webSockets.getConnections()) {
-    if (origin === undefined || connection.id === origin) {
+    if (
+      origin === undefined ||
+      connection.id === origin ||
+      connection.id === asker?.id
+    ) {
       sendIfOpen(connection, text);
     }
   }
@@ -275,7 +281,9 @@ function endUnstarted(
 export async function cancelTurn(
   deps: ChatDeps,
   requestId: string,
-  reason = "chat turn cancelled"
+  reason = "chat turn cancelled",
+  /** The tab that asked for the stop: it is told the request ended. */
+  asker?: Connection
 ): Promise<boolean> {
   // A turn stopped before it started keeps its place in the lane: when its
   // turn comes it stores its question, unanswered, and ends (the mark is on
@@ -287,7 +295,7 @@ export async function cancelTurn(
       [STOPPED_METADATA.field]: true
     });
     if (marked) {
-      endUnstarted(deps, requestId, "aborted", record.metadata);
+      endUnstarted(deps, requestId, "aborted", record.metadata, asker);
     }
     return marked;
   }
@@ -1001,7 +1009,7 @@ export async function chatDispatch(
           });
         }
       }
-      await cancelTurn(deps, event.id);
+      await cancelTurn(deps, event.id, undefined, connection);
       return true;
     }
     case "cancel-continuation": {
