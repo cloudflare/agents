@@ -872,6 +872,24 @@ describe("ThinkHarness: a tool that calls other tools (invoke)", () => {
     expect(await stub.dangerousRuns()).toBe(1);
   });
 
+  it("runs again a sibling the park cut short, rather than keep its abort", async () => {
+    const stub = fresh();
+    await stub.prompt("compose abortable");
+    const [call] = await stub.lastToolCalls();
+    expect(await stub.abortableRuns()).toBe(1);
+    await stub.release();
+    const receipt = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "done",
+      text: "tool said: did the dangerous thing"
+    });
+    expect(await stub.abortableRuns()).toBe(2);
+  });
+
   it("keeps what each of two tools parked in one step", async () => {
     const stub = fresh();
     await stub.prompt("compose approve twice");

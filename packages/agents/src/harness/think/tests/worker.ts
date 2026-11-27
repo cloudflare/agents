@@ -53,6 +53,7 @@ const CODE_COUNT_KEY = "test:code-count";
 const SANDBOXED_KEY = "test:sandboxed";
 const TRIPLED_KEY = "test:tripled";
 const RELAY_ABORTED_KEY = "relay-aborted";
+const ABORTABLE_RUNS_KEY = "abortable-runs";
 const DANGEROUS_FLAVOR_KEY = "dangerous-flavor";
 const COMPOSE_ABORTED_KEY = "test:compose-aborted";
 const NOTE_IN_BEFORE_TURN_KEY = "test:note-in-before-turn";
@@ -266,10 +267,27 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
               gate: z.boolean().optional(),
               approve: z.boolean().optional(),
               parallel: z.boolean().optional(),
-              relay: z.boolean().optional()
+              relay: z.boolean().optional(),
+              abortable: z.boolean().optional()
             }),
-            execute: async ({ gate, approve, parallel, relay }, options) => {
+            execute: async (
+              { gate, approve, parallel, relay, abortable },
+              options
+            ) => {
               const { invoke } = options as unknown as { invoke: ToolInvoke };
+              // A sibling that stops when the park aborts it.
+              if (abortable) {
+                const slow = invoke("abortable_slow", {});
+                while (!this.ctx.storage.kv.get<number>(ABORTABLE_RUNS_KEY)) {
+                  await new Promise((resolve) => setTimeout(resolve, 5));
+                }
+                const [slowed, done] = await Promise.all([
+                  slow,
+                  invoke("dangerous", {})
+                ]);
+                if (!slowed.ok) return slowed.errorText;
+                return done.ok ? done.output : done.errorText;
+              }
               // A write still running when its sibling asks for approval.
               if (parallel) {
                 const writing = invoke("gate_safe", {});
@@ -315,6 +333,27 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
             }
           }),
           recovery: "rerun" as const
+        },
+        // Code-only: waits for the release, or stops when aborted.
+        abortable_slow: {
+          ...tool({
+            description: "Wait, unless aborted",
+            inputSchema: z.object({}),
+            execute: async (_input, options) => {
+              const kv = this.ctx.storage.kv;
+              kv.put(
+                ABORTABLE_RUNS_KEY,
+                (kv.get<number>(ABORTABLE_RUNS_KEY) ?? 0) + 1
+              );
+              while (!kv.get(RELEASE_KEY)) {
+                if (options.abortSignal?.aborted)
+                  throw new Error("slow aborted");
+                await new Promise((resolve) => setTimeout(resolve, 5));
+              }
+              return "slow done";
+            }
+          }),
+          callers: ["code"] as const
         },
         // Code-only: calls dangerous, and notes when it's aborted.
         relay: {
@@ -664,7 +703,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
               gate: text === "compose gate",
               approve: text === "compose approve",
               parallel: text === "compose parallel",
-              relay: text === "compose relay"
+              relay: text === "compose relay",
+              abortable: text === "compose abortable"
             }
           }
         ]);
@@ -964,6 +1004,10 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   composeAborted(): boolean {
     return this.ctx.storage.kv.get<boolean>(COMPOSE_ABORTED_KEY) ?? false;
+  }
+
+  abortableRuns(): number {
+    return this.ctx.storage.kv.get<number>(ABORTABLE_RUNS_KEY) ?? 0;
   }
 
   relayAborted(): boolean {

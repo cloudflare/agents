@@ -2834,7 +2834,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       scope.running.add(step);
       try {
         const outcome = (await step) as unknown as ToolOutcome;
-        scope.made[toolCallId] = outcome;
+        // Kept only if it finished on its own: a call the park cut short
+        // runs again after the approval.
+        if (outcome.ok || !scope.parking.signal.aborted) {
+          scope.made[toolCallId] = outcome;
+        }
         return outcome;
       } finally {
         scope.running.delete(step);
