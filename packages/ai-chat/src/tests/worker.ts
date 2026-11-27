@@ -49,7 +49,9 @@ import {
   recentChatTerminal,
   REPLAY_CHUNK_BYTES,
   CHAT_RECOVERY_PROGRESS_KEY,
-  turnSignal
+  turnSignal,
+  type ReplyFlushState,
+  type ReplyStreams
 } from "agents/chat";
 
 /** The agent's parent side of agent tools (an internal module). */
@@ -541,7 +543,29 @@ export type Env = {
  * Store a chunk the way a reply does (`ReplyStreams.store`), with one flush
  * state per stream, for tests that write a stream by hand.
  */
+const testFlushStates = new Map<string, ReplyFlushState>();
 function storeStreamChunk(
+  agent: AIChatAgent<Env>,
+  streamId: string,
+  body: string
+): number | undefined {
+  const streams = (agent as unknown as { _replyStreams: ReplyStreams })
+    ._replyStreams;
+  let state = testFlushStates.get(streamId);
+  if (!state) {
+    state = { chunksSinceFlush: 0, hasFlushedContent: false };
+    testFlushStates.set(streamId, state);
+  }
+  let chunk: { type: string };
+  try {
+    chunk = JSON.parse(body) as { type: string };
+  } catch {
+    chunk = { type: "" };
+  }
+  return streams.store(streamId, chunk, body, state);
+}
+
+function storeTurnStreamChunk(
   agent: AIChatAgent<Env>,
   streamId: string,
   body: string
@@ -7581,7 +7605,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       // the attach window. With the #1589 fix the forwarder is already attached,
       // so the chunk is buffered and replayed in order instead of being dropped.
       const live = await this._waitForLiveTurnForTest(runId);
-      await storeStreamChunk(this, live.streamId, race.body);
+      await storeTurnStreamChunk(this, live.streamId, race.body);
       this["_frames"].broadcast({
         body: race.body,
         done: false,
@@ -7646,7 +7670,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       JSON.stringify({ type: "text-delta", delta: "b" })
     ];
     for (const body of backlog) {
-      await storeStreamChunk(this, streamId, body);
+      await storeTurnStreamChunk(this, streamId, body);
     }
     this.streams.__DO_NOT_USE_WILL_BREAK__sync().flush();
     this.sql`
@@ -7761,11 +7785,11 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       JSON.stringify({ type: "text-delta", id: "t", delta: "b" })
     ];
     for (const body of stored.slice(0, 2)) {
-      await storeStreamChunk(this, streamId, body);
+      await storeTurnStreamChunk(this, streamId, body);
       broadcast(body);
     }
     broadcast(progress("before-attach"));
-    await storeStreamChunk(this, streamId, stored[2]);
+    await storeTurnStreamChunk(this, streamId, stored[2]);
     this.streams.__DO_NOT_USE_WILL_BREAK__sync().flush();
 
     const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
@@ -7825,7 +7849,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
         type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
       });
     const send = async (body: string) => {
-      await storeStreamChunk(this, streamId, body);
+      await storeTurnStreamChunk(this, streamId, body);
       broadcast(body);
     };
     const delta = (value: string) =>
@@ -7835,7 +7859,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     await send(JSON.stringify({ type: "text-start", id: "t" }));
     await send(delta("a"));
     await send(oversized);
-    await storeStreamChunk(this, streamId, delta("c"));
+    await storeTurnStreamChunk(this, streamId, delta("c"));
     this.streams.__DO_NOT_USE_WILL_BREAK__sync().flush();
 
     const tail = this.tailAgentToolRun(runId, { afterSequence: -1 });
@@ -7897,7 +7921,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       JSON.stringify({ type: "text-delta", id: "t", delta })
     );
     for (const body of backlog) {
-      await storeStreamChunk(this, streamId, body);
+      await storeTurnStreamChunk(this, streamId, body);
     }
     this.streams.__DO_NOT_USE_WILL_BREAK__sync().flush();
     this.sql`
@@ -7967,7 +7991,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
         id: "t",
         delta: "post-restart"
       });
-      await storeStreamChunk(this, streamId, postBody);
+      await storeTurnStreamChunk(this, streamId, postBody);
       this["_frames"].broadcast({
         body: postBody,
         done: false,
@@ -8115,7 +8139,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     const runId = "starve-run";
     const requestId = "starve-req";
     const streamId = startTurnStreamForTest(this, requestId);
-    await storeStreamChunk(
+    await storeTurnStreamChunk(
       this,
       streamId,
       JSON.stringify({ type: "text-start" })
