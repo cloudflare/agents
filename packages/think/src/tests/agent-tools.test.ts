@@ -41,6 +41,8 @@ type ThinkAgentToolTestStub = {
     error: string | undefined;
     userTexts: string[];
     steps: number;
+    activeDone: boolean;
+    replies: number;
   }>;
   cancelQueuedAgentToolRunForTest(): Promise<{
     status: string | null;
@@ -543,6 +545,9 @@ describe("Think agent tools", () => {
       // Only the running turn reached the model.
       expect(result.userTexts).toEqual(["active turn"]);
       expect(result.steps).toBe(1);
+      // The turn ahead still answered.
+      expect(result.activeDone).toBe(true);
+      expect(result.replies).toBe(1);
     }
   );
 

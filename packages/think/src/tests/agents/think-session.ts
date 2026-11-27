@@ -4088,6 +4088,8 @@ export class ThinkTestAgent extends Think {
     error: string | undefined;
     userTexts: string[];
     steps: number;
+    activeDone: boolean;
+    replies: number;
   }> {
     const active = await this._holdActiveRpcTurnForTest();
     const runId = crypto.randomUUID();
@@ -4124,7 +4126,18 @@ export class ThinkTestAgent extends Think {
       status: inspection?.status,
       error: inspection?.error,
       userTexts: this._userTextsForTest(),
-      steps: this._beforeStepLog.length
+      steps: this._beforeStepLog.length,
+      // The turn ahead ran to its end: the cancel did not stop it too.
+      activeDone:
+        active.callback.doneCalled &&
+        active.callback.errorMessage === undefined,
+      replies: this.messages.filter(
+        (message) =>
+          message.role === "assistant" &&
+          message.parts.some(
+            (part) => part.type === "text" && part.text.length > 0
+          )
+      ).length
     };
   }
 
