@@ -90,4 +90,26 @@ describe("Telegram messenger replies (recorded webhooks)", () => {
       { method: "sendRichMessage", body: { chat_id: "42", text: "Got it" } }
     ]);
   }, 30_000);
+
+  it("posts a notice before any webhook, once and without an error", async () => {
+    const name = `tg-notice-${crypto.randomUUID()}`;
+    const agent = await getAgentByName(
+      env.ThinkMessengerDeliveryTestAgent,
+      name
+    );
+    const transcript = await agent.deliverNoticeForTest("17. done", {
+      channel: "telegram",
+      thread: "telegram:42",
+      informModel: true
+    });
+    expect(transcript).toEqual([
+      "[Delivered to the user out of band] 17. done"
+    ]);
+    const calls = (await (
+      await fetch(`https://fake-telegram.test/__calls?bot=${name}`)
+    ).json()) as Array<{ method: string }>;
+    expect(calls.filter(({ method }) => method.startsWith("send")).length).toBe(
+      1
+    );
+  }, 30_000);
 });

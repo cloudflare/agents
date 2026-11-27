@@ -769,6 +769,17 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     `;
   }
 
+  /** Deliver a notice out of a turn; returns the transcript's texts. */
+  async deliverNoticeForTest(
+    text: string,
+    options: { channel: string; thread: string; informModel?: boolean }
+  ): Promise<string[]> {
+    await this.deliverNotice(text, options);
+    return (await this.getMessages()).flatMap((message) =>
+      message.parts.flatMap((part) => (part.type === "text" ? [part.text] : []))
+    );
+  }
+
   private _ensureTable(): void {
     this.sql`CREATE TABLE IF NOT EXISTS messenger_delivery_log (
       seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, content TEXT

@@ -521,7 +521,10 @@ export class ThinkMessengerRuntime {
     if (!definition || !threadId) {
       return undefined;
     }
-    const chat = this.chat ?? this.createChat();
+    const chat = (this.chat ??= this.createChat());
+    // Out of a turn (no webhook yet) the Chat may not have connected its
+    // state, which a post records to.
+    await chat.initialize();
     return chat.thread(threadId) satisfies MessengerDeliverySurface;
   }
 
