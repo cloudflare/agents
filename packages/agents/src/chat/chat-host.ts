@@ -449,6 +449,9 @@ export function storableRequestContext(json: string | null): string | null {
   return null;
 }
 
+/** How long the model is silent before its buffered chunks are written. */
+const QUIET_FLUSH_MS = 100;
+
 /** The run's checkpoint key: its request context was stored. */
 const CONTEXT_CHECKPOINT = "chat:context";
 
@@ -1764,20 +1767,21 @@ export function chatTurnDefinition(
       // streams do; a reader flushes first.
       const sync = deps.streams.__DO_NOT_USE_WILL_BREAK__sync();
       const deltaParts = new Set<string>();
-      // The batch is also written when the model pauses (at the end of a
-      // burst of chunks), so a reset while it is quiet keeps what it sent.
-      let flushQueued = false;
+      // The batch is also written once the model has been quiet for
+      // `QUIET_FLUSH_MS`, so a reset while it is quiet keeps what it sent. A
+      // model that streams a chunk every few milliseconds is not quiet: its
+      // chunks wait for the batch (a pause of a few milliseconds would
+      // otherwise write every chunk as its own row).
+      let quietTimer: ReturnType<typeof setTimeout> | undefined;
       const flushWhenQuiet = () => {
-        if (flushQueued) return;
-        flushQueued = true;
-        setTimeout(() => {
-          flushQueued = false;
+        clearTimeout(quietTimer);
+        quietTimer = setTimeout(() => {
           try {
             sync.flush(streamId);
           } catch {
             // The stream settled meanwhile: nothing is left to write.
           }
-        }, 0);
+        }, QUIET_FLUSH_MS);
       };
       /** Store `chunk`; its seq goes on the frame the tabs get (#1951). */
       const record = (chunk: UIMessageChunk): number => {

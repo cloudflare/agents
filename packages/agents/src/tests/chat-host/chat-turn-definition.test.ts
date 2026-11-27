@@ -1637,11 +1637,22 @@ describe("chatTurnDefinition", () => {
         { type: "text-delta", id: "t1", delta: "b" },
         { type: "text-delta", id: "t1", delta: "c" }
       ]);
-      // The model is quiet now: after it, everything it sent is stored.
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      // A few milliseconds after the burst the batch still holds the later
+      // deltas: a model that streams every few ms is not quiet (a pause that
+      // short would otherwise write each chunk as its own row)...
+      await new Promise((resolve) => setTimeout(resolve, 20));
       expect(
-        (await turn.stored()).filter((t) => t === "text-delta")
-      ).toHaveLength(3);
+        (await turn.stored()).filter((t) => t === "text-delta").length
+      ).toBeLessThan(3);
+      // ...and once the model has been quiet a while, everything it sent is
+      // stored.
+      await vi.waitFor(
+        async () =>
+          expect(
+            (await turn.stored()).filter((t) => t === "text-delta")
+          ).toHaveLength(3),
+        { timeout: 2000 }
+      );
       await turn.finish();
     });
   });
