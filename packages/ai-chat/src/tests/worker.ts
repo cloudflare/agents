@@ -8035,15 +8035,14 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       release = resolve;
     });
     // Hold the run's lifecycle at the point its turn hands back.
+    // The run's turn is a chat-module server turn (`_serverTurn`).
     const self = this as unknown as {
-      _runProgrammaticMessagesTurn: (
-        ...args: unknown[]
-      ) => Promise<SaveMessagesResult>;
+      _serverTurn: (...args: unknown[]) => Promise<SaveMessagesResult>;
     };
-    const runTurn = self._runProgrammaticMessagesTurn.bind(this);
-    self._runProgrammaticMessagesTurn = async (...args) => {
+    const runTurn = self._serverTurn.bind(this);
+    self._serverTurn = async (...args) => {
       const result = await runTurn(...args);
-      self._runProgrammaticMessagesTurn = runTurn;
+      self._serverTurn = runTurn;
       reached();
       await released;
       return result;

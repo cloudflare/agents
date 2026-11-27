@@ -716,6 +716,12 @@ export class AIChatAgent<
       )
   });
 
+  /**
+   * SEAM: an agent-tool run's turn, told when it reaches the front of the
+   * lane (its record notes the start; `false` means it was cancelled).
+   */
+  private readonly _agentToolTurnStarts = new Map<string, () => boolean>();
+
   /** SEAM: chat clears so far, the generation agent tools compare. */
   private _chatClears = 0;
 
@@ -1167,6 +1173,12 @@ export class AIChatAgent<
           call.trigger === "regenerate-message"
         ) {
           this._emit("message:request");
+        }
+        // SEAM: an agent-tool run's turn has started.
+        const started = this._agentToolTurnStarts.get(call.requestId);
+        if (started) {
+          this._agentToolTurnStarts.delete(call.requestId);
+          if (!started()) return undefined;
         }
         // `getCurrentAgent()` in `onChatMessage` and its tools names the tab
         // that sent the request (or answered the call), when it is here.
@@ -3535,8 +3547,9 @@ export class AIChatAgent<
       // SEAM: the run's turn is a server turn on the chat's lane, under the
       // run's request id. It carries the run's input as its body and no
       // client tools (`[]`, not the stored ones: the release's `null`).
-      ({ requestId, signal }) =>
-        this._serverTurn(
+      ({ requestId, signal, shouldStart }) => {
+        this._agentToolTurnStarts.set(requestId, shouldStart);
+        return this._serverTurn(
           {
             trigger: "server",
             messages: [
@@ -3551,7 +3564,8 @@ export class AIChatAgent<
             ...(signal && { signal }),
             metadata: { chat: { keepStream: true } }
           }
-        )
+        ).finally(() => this._agentToolTurnStarts.delete(requestId));
+      }
     );
   }
 
