@@ -772,7 +772,19 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         definition,
         // SAFETY: every run of these definitions was accepted by `enqueue`
         // or carried forward by `onStart`, both with an OperationRunInput.
-        (input, run) => this.#operate(operationInputOf(input), run),
+        async (input, run) => {
+          // A tab's request through the shared chat dispatch declares its
+          // client tools in the request, as `enqueue`'s option does.
+          const clientTools = (input as { readonly clientTools?: unknown })
+            .clientTools;
+          if (!isOperationRunInput(input) && Array.isArray(clientTools)) {
+            await this.#handle(this.#operationOf(run.id)[0]).internal_setConfig(
+              CLIENT_TOOLS_KEY,
+              JSON.stringify(clientTools)
+            );
+          }
+          return this.#operate(operationInputOf(input), run);
+        },
         {
           onStatus: (record) => this.#onStatus(record),
           // The terminal report of a run that ended outside its handler (an
