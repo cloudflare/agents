@@ -1635,6 +1635,9 @@ function ensureReleasedAgentToolTable(sql: SqlStorage): void {
   `);
 }
 
+/** Where a test keeps the answer onChatRecovery gives after a reset. */
+const RECOVERY_ANSWER_KEY = "test:recovery-answer";
+
 export class ThinkTestAgent extends Think {
   private _response = "Hello from the assistant!";
   private _nextSubAgentConnectionSendDelayMs = 0;
@@ -1707,7 +1710,13 @@ export class ThinkTestAgent extends Think {
     if (this._recoveryHookForTest === "throw") {
       throw new Error("recovery hook boom");
     }
-    return this._recoveryHookForTest ?? {};
+    // A test that resets the isolate leaves its answer in storage, where the
+    // next isolate's recovery finds it.
+    return (
+      this._recoveryHookForTest ??
+      this.ctx.storage.kv.get<ChatRecoveryOptions>(RECOVERY_ANSWER_KEY) ??
+      {}
+    );
   }
 
   override onChatError(error: unknown): unknown {
@@ -3939,6 +3948,11 @@ export class ThinkTestAgent extends Think {
         .map((p) => (p.type === "text" ? p.text : ""))
         .join("")
     };
+  }
+
+  /** What onChatRecovery answers from now on, across resets. */
+  async answerRecoveryForTest(answer: ChatRecoveryOptions): Promise<void> {
+    this.ctx.storage.kv.put(RECOVERY_ANSWER_KEY, answer);
   }
 
   /** What onChatRecovery was told in this isolate, in order. */

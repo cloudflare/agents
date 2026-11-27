@@ -382,5 +382,14 @@
       "file": "agent-tools.test.ts",
       "test": "Think agent tools > a run cancelled by its caller's signal while it waits behind a running turn ends aborted before that turn ends, and never runs"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > { continue: false } persists but does not schedule continuation",
+    "reason": "an interrupted turn built from seeded private stream and fiber rows (`insertInterruptedStream`), recovered by hand",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > onChatRecovery's answer after a reset > keeps the partial but runs no continuation when onChatRecovery says continue: false"
+    }
   }
 ]
