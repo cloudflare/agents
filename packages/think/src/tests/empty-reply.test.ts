@@ -269,6 +269,28 @@ describe("Think: a reply that holds nothing", () => {
     expect(stored.every((message) => message.parts.length > 0)).toBe(true);
   });
 
+  // F21 (nightly soak): a reply a model completed with reasoning only
+  // (finish "stop") is the user's answer; the next question must not delete
+  // it from the transcript. Fails on main: the before-turn repair strips the
+  // trailing reasoning in storage and removes the then-empty reply.
+  it("keeps a completed reply that holds only reasoning when a new question comes", async () => {
+    const agent = await recoveryAgent();
+    await agent.persistTestMessage(question);
+    await agent.persistTestMessage(reasoningOnly);
+
+    expect((await agent.testSaveMessages("Something else")).status).toBe(
+      "completed"
+    );
+
+    const stored = (await agent.getStoredMessages()) as UIMessage[];
+    expect(ids(stored)).toContain("assistant-reasoning");
+    expect(
+      stored
+        .find((message) => message.id === "assistant-reasoning")
+        ?.parts.some((part) => part.type === "reasoning")
+    ).toBe(true);
+  });
+
   it("a recovery that would continue it removes it and answers the question again", async () => {
     const agent = await recoveryAgent();
     await agent.persistTestMessage(question);
