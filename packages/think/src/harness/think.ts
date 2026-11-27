@@ -845,6 +845,15 @@ export class Think<
   }
 
   async continueLastTurn(): Promise<SaveMessagesResult> {
+    // As on Think: with no assistant message to continue, nothing runs.
+    await this.#sync();
+    if (this.#messages.at(-1)?.role !== "assistant") {
+      return {
+        requestId: "",
+        status: "skipped",
+        reason: "nothing-to-continue"
+      };
+    }
     const session = this.harness.session();
     const receipt = await session.continue();
     const result = await session.wait(receipt.operationId);

@@ -2977,6 +2977,7 @@ describe("Think — continueLastTurn", () => {
     const result = (await agent.testContinueLastTurn()) as SaveMessagesResult;
     expect(result.status).toBe("skipped");
     expect(result.requestId).toBe("");
+    expect(result.reason).toBe("nothing-to-continue");
   });
 
   it("routes runTurn continuations through an overridden continueLastTurn", async () => {
