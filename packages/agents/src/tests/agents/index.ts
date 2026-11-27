@@ -64,6 +64,7 @@ export {
   CustomBoundSubAgentParent,
   CounterSubAgent,
   OuterSubAgent,
+  UnemptiableSubAgent,
   InnerSubAgent,
   LeafSubAgent,
   CallbackSubAgent,

@@ -164,6 +164,7 @@ export {
   FacetWakeLeaf,
   CustomBoundSubAgentParent,
   CounterSubAgent,
+  UnemptiableSubAgent,
   OuterSubAgent,
   InnerSubAgent,
   DenyingSubAgent,

@@ -371,6 +371,10 @@
         "name": "OuterSubAgent"
       },
       {
+        "class_name": "UnemptiableSubAgent",
+        "name": "UnemptiableSubAgent"
+      },
+      {
         "class_name": "DenyingSubAgent",
         "name": "DenyingSubAgent"
       },

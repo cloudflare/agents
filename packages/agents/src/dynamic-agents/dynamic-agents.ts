@@ -654,7 +654,10 @@ export class DynamicAgentsInternal extends LifecycleCapability {
         `Sub-agent bootstrap requires the root agent class "${rootClassName}" to be available as a Durable Object namespace, but ctx.exports["${rootClassName}"] is missing or doesn't expose idFromName.${minificationHint} Make sure the root agent class is exported under that class name and registered in your wrangler.jsonc durable_objects.bindings.`
       );
     }
+    this.#refuseWhileEmptying();
     const identity = await this.registry.identity(className, name, childPath);
+    // A delete may have started while the identity was worked out.
+    this.#refuseWhileEmptying();
     const facetId = rootNs.idFromName(identity.name);
     const stub = ctx.facets.get(facetKey, () => ({
       class: Cls as DurableObjectClass,
@@ -797,11 +800,19 @@ export class DynamicAgentsInternal extends LifecycleCapability {
       class: Cls as DurableObjectClass,
       id: rootNs.idFromName(identityName)
     }));
-    await (
-      stub as unknown as {
-        _cf_emptyFacetStorage(rootClassName: string): Promise<void>;
-      }
-    )._cf_emptyFacetStorage(rootClassName);
+    try {
+      await (
+        stub as unknown as {
+          _cf_emptyFacetStorage(rootClassName: string): Promise<void>;
+        }
+      )._cf_emptyFacetStorage(rootClassName);
+    } catch (error) {
+      // The delete goes ahead, as it did before the child emptied itself.
+      console.error(
+        `[Agent] Could not empty sub-agent ${className} "${name}" before deleting it:`,
+        error
+      );
+    }
   }
 
   /**
@@ -811,13 +822,32 @@ export class DynamicAgentsInternal extends LifecycleCapability {
    */
   async emptyStorage(rootClassName: string): Promise<void> {
     this.#rootClassNameOverride = rootClassName;
-    for (const child of this.registry.list()) {
-      await this.#emptyChild(child.className, child.name);
+    this.#emptying = true;
+    // No sub-agent is made from here on, so this ends; a child recorded
+    // before the refusal took hold is read on the next pass.
+    for (
+      let children = this.registry.list();
+      children.length > 0;
+      children = this.registry.list()
+    ) {
+      for (const child of children) {
+        await this.#emptyChild(child.className, child.name);
+        this.registry.forget(child.className, child.name);
+      }
     }
     await this.#host.ctx.storage.deleteAll();
   }
 
   #rootClassNameOverride: string | undefined;
+  #emptying = false;
+
+  #refuseWhileEmptying(): void {
+    if (this.#emptying) {
+      throw new Error(
+        "This sub-agent is being deleted, so it cannot make sub-agents."
+      );
+    }
+  }
 
   #rootClassName(): string {
     return (

@@ -1655,6 +1655,13 @@ class DelayedForwardingSubAgentBridge extends RpcTarget {
   }
 }
 
+/** A sub-agent that fails to empty itself when it is deleted. */
+export class UnemptiableSubAgent extends CounterSubAgent {
+  override async _cf_emptyFacetStorage(): Promise<void> {
+    throw new Error("cannot empty");
+  }
+}
+
 export class TestSubAgentParent extends Agent {
   /**
    * Hold the `nth` facet init call from now on for `ms`, as a slow facet
@@ -2849,6 +2856,44 @@ export class TestSubAgentParent extends Agent {
   ): Promise<string> {
     const outer = await this.subAgent(OuterSubAgent, outerName);
     return outer.scheduleInnerSet(innerName, delaySeconds, key, value);
+  }
+
+  /**
+   * Start emptying an outer sub-agent, as a delete does just before it,
+   * then ask it to make a new sub-agent. Returns that request's error.
+   */
+  async newSubAgentWhileEmptyingForTest(outerName: string): Promise<string> {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    await (
+      outer as unknown as {
+        _cf_emptyFacetStorage(rootClassName: string): Promise<void>;
+      }
+    )._cf_emptyFacetStorage(this.constructor.name);
+    try {
+      await outer.setInnerValue("made-while-emptying", "key", "value");
+      return "";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  /** Make an UnemptiableSubAgent, delete it, and report what remains. */
+  async deleteUnemptiableForTest(
+    childName: string
+  ): Promise<{ deleted: boolean; listed: boolean }> {
+    await (
+      await this.subAgent(UnemptiableSubAgent, childName)
+    ).increment("count");
+    let deleted = true;
+    try {
+      await this.deleteSubAgent(UnemptiableSubAgent, childName);
+    } catch {
+      deleted = false;
+    }
+    return {
+      deleted,
+      listed: this.hasSubAgent(UnemptiableSubAgent, childName)
+    };
   }
 
   async nestedDeleteOuter(outerName: string): Promise<void> {

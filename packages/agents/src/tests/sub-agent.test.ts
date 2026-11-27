@@ -420,6 +420,26 @@ describe("SubAgent", () => {
       );
     });
 
+    it("still deletes a sub-agent that fails to empty itself", async () => {
+      const name = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+      expect(await agent.deleteUnemptiableForTest("stubborn")).toEqual({
+        deleted: true,
+        listed: false
+      });
+    });
+
+    it("refuses a new sub-agent in a sub-agent that is being deleted", async () => {
+      const name = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, name);
+      await agent.nestedSetValue("outer-busy", "inner", "key", "value");
+
+      expect(await agent.newSubAgentWhileEmptyingForTest("outer-busy")).toMatch(
+        /being deleted/
+      );
+    });
+
     it("should isolate nested sub-agents that share the same logical name", async () => {
       const name = uniqueName();
       const agent = await getAgentByName(env.TestSubAgentParent, name);
