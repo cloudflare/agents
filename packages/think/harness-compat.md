@@ -13,7 +13,7 @@ tools) is left out of it. A failing test that reaches a Think feature the
 harness-backed class does not have yet fails with "Think.<name> is not
 supported by the harness-backed Think yet".
 
-**720 of 1357 (87 class-only, 10 of them mechanics-only, 6 ruled out, the rest each with a successor) tests that construct Think pass (52%).** Across the whole suite, 1037 of 1764.
+**720 of 1357 (87 class-only, 10 of them mechanics-only, 6 ruled out, the rest each with a successor) tests that construct Think pass (52%).** Across the whole suite, 1040 of 1764.
 
 A class-only test reaches its behaviour through something private to the
 Think class. It is left out of the headline, it has a successor that

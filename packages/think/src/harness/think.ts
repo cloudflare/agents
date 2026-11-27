@@ -986,14 +986,23 @@ export class Think<
           // As on Think: the turn's reply attachments go with its result,
           // and each one this agent can render is posted to the turn's
           // channel as an interim notice first.
-          const attachments = this.replyAttachments(end.operationId);
+          // Taken from the turn's own record: a turn queued behind it may
+          // have begun already.
+          const attachments =
+            this.#endedAttachments.get(end.operationId) ??
+            this.replyAttachments(end.operationId);
+          this.#endedAttachments.delete(end.operationId);
           const turnChannel =
             this.#turnChannel?.operationId === end.operationId
               ? this.#turnChannel.channelId
               : undefined;
           this.#respondingContext = responding;
+          // A notice on `web` is a message after the reply: while the reply
+          // waits on a client (an approval, a client tool), it would bury
+          // that call, so the attachments go only with the result then.
+          const toWeb = (turnChannel ?? responding?.messengerId) === undefined;
           await deliverReplyAttachments(
-            attachments,
+            toWeb && this.hasPendingInteraction() ? [] : attachments,
             (attachment) => this.renderAttachment(attachment),
             (rendered) =>
               this.deliverNotice(rendered, {
@@ -1493,6 +1502,12 @@ export class Think<
     context: () => Promise<TurnContext>
   ): Promise<void> {
     if (this.#actionTurn?.operationId === operationId) return;
+    // The turn before keeps its attachments for its end hook, which may
+    // run after this one began (Tasks wakes the next turn first).
+    const ending = this.#actionTurn?.operationId;
+    if (ending !== undefined) {
+      this.#endedAttachments.set(ending, this.replyAttachments(ending));
+    }
     this.#replyAttachments.begin(operationId);
     this.#actionTurn = {
       operationId,
@@ -1771,19 +1786,17 @@ export class Think<
     text: string | { markdown: string },
     options?: DeliverNoticeOptions
   ): Promise<void> {
-    // As on Think: the active turn's channel and thread, unless given.
-    const channelId =
-      options?.channel ?? this.activeChannel?.channelId ?? "web";
-    // A messenger turn's thread, while it runs or its response hook does;
-    // outside a turn, a messenger notice names its thread, as on Think.
-    const running = this.#running?.requestId;
-    const active =
-      (running !== undefined
-        ? this.#messengerContexts.get(running)
-        : undefined) ?? this.#respondingContext;
+    // While a messenger turn's response hook runs, its channel and thread,
+    // as on Think. Nothing else is inferred: the harness cannot tell a
+    // running turn from work an earlier one left behind, so a notice from
+    // anywhere else goes to `web` unless it names its channel.
+    const responding = this.#respondingContext;
+    const channelId = options?.channel ?? responding?.messengerId ?? "web";
     const thread =
       options?.thread ??
-      (active?.messengerId === channelId ? active.thread.id : undefined);
+      (responding?.messengerId === channelId
+        ? responding.thread.id
+        : undefined);
     const given = thread !== undefined ? { ...options, thread } : options;
     await deliverChannelNotice(text, given, {
       channelId,
@@ -2237,6 +2250,9 @@ export class Think<
     return context && channel === context.messengerId ? context : undefined;
   }
 
+  /** A turn's attachments, kept when the next turn began before its end hook. */
+  #endedAttachments = new Map<string, ReplyAttachment[]>();
+
   /** Each turn's messenger context, kept for its response hook. */
   #responseContexts = new Map<string, MessengerContext>();
   /** Operations whose turn ran in this isolate, until their end hook. */
@@ -2246,18 +2262,18 @@ export class Think<
   async #storedMessengerContext(
     replyId: string | undefined
   ): Promise<MessengerContext | undefined> {
-    await this.#sync();
-    const messages = this.#transcript.messages;
-    // The turn's own user message: the last one before its reply, or the
-    // latest when the reply is not stored.
-    const reply =
+    // The turn's own user message, from the stored path that ends at its
+    // reply (the hydrated window, or the active branch, may not hold it).
+    // With no reply stored, the latest user message.
+    const path =
       replyId !== undefined
-        ? messages.findIndex((message) => message.id === replyId)
-        : -1;
-    const before = reply >= 0 ? messages.slice(0, reply) : messages;
-    const user = [...before]
-      .reverse()
-      .find((message) => message.role === "user");
+        ? ((await (
+            await this.#rootHandle()
+          ).getHistory({
+            leafId: replyId
+          })) as unknown as UIMessage[])
+        : (await this.#sync(), this.#transcript.messages);
+    const user = [...path].reverse().find((message) => message.role === "user");
     return this.#trustedMessengerOf(user);
   }
 

@@ -1645,6 +1645,20 @@ describe("think messengers core", () => {
       });
     });
 
+    it("posts a response hook's notice to the turn's thread", async () => {
+      const agent = await sendBurst(`notice-hook-${crypto.randomUUID()}`, [
+        { id: "n1", text: "hello", threadId: "fake:dm-notice" }
+      ]);
+      let calls: Array<{ kind: string; content: string }> = [];
+      for (let i = 0; i < 50; i++) {
+        calls = await agent.getAdapterCalls();
+        if (calls.some((call) => call.content === "hook notice")) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      expect(calls).toContainEqual({ kind: "post", content: "hook notice" });
+      expect(await agent.getPostThreadsForTest()).not.toContain(undefined);
+    });
+
     it("runs a messenger's turn on its channel", async () => {
       const agent = await sendBurst(`channel-${crypto.randomUUID()}`, [
         { id: "m1", text: "hello", threadId: "fake:dm" }

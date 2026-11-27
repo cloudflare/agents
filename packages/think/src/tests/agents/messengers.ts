@@ -880,12 +880,18 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     ]);
   }
 
-  /** The messenger thread each response hook saw. */
-  override onChatResponse(): void {
+  /**
+   * The messenger thread each response hook saw. A `notice-hook-…` agent
+   * also posts a notice from it, naming no channel.
+   */
+  override async onChatResponse(): Promise<void> {
     this.ctx.storage.kv.put("response-threads", [
       ...(this.ctx.storage.kv.get<string[]>("response-threads") ?? []),
       this.getMessengerContext()?.thread.id ?? ""
     ]);
+    if (this.name.startsWith("notice-hook-")) {
+      await this.deliverNotice("hook notice");
+    }
   }
 
   /** The thread each turn's channel context, and its response hook, had. */
