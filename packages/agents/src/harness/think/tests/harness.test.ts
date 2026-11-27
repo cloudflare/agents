@@ -824,6 +824,84 @@ describe("ThinkHarness: a tool that calls other tools (invoke)", () => {
     expect(await stub.parkedAnnotations()).toBe(0);
   });
 
+  it("asks again when a rerun tool makes a different call where the approved one was", async () => {
+    const stub = fresh();
+    await stub.prompt("compose approve");
+    const [call] = await stub.lastToolCalls();
+    // The rerun calls dangerous with other input at the approved position.
+    await stub.setDangerousFlavor("other");
+    const receipt = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    await stub.wait(receipt.operationId);
+    expect(await stub.dangerousRuns()).toBe(0);
+    expect((await stub.messages()).at(-1)).toBe(
+      "assistant: [compose approval-requested]"
+    );
+  });
+
+  it("aborts a nested tool whose call parks, as it aborts the tool that called it", async () => {
+    const stub = fresh();
+    await stub.prompt("compose relay");
+    expect((await stub.messages()).at(-1)).toBe(
+      "assistant: [compose approval-requested]"
+    );
+    expect(await stub.relayAborted()).toBe(true);
+  });
+
+  it("keeps a call still running when its sibling parks, so the rerun doesn't make it again", async () => {
+    const stub = fresh();
+    const receipt = await stub.submit("compose parallel");
+    await stub.gateStarted(1);
+    await stub.release();
+    await stub.wait(receipt.operationId);
+    const [call] = await stub.lastToolCalls();
+    expect(call?.approvalId).toBeDefined();
+    const approved = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    expect(await stub.wait(approved.operationId)).toMatchObject({
+      status: "done"
+    });
+    // The write ran once, before the park; its result was kept.
+    expect(await stub.gateRuns()).toBe(1);
+    expect(await stub.dangerousRuns()).toBe(1);
+  });
+
+  it("keeps what each of two tools parked in one step", async () => {
+    const stub = fresh();
+    await stub.prompt("compose approve twice");
+    expect(await stub.parkedCalls()).toBe(2);
+    expect(await stub.pendingApprovals()).toHaveLength(2);
+  });
+
+  it("gives a fork the calls a parked tool kept", async () => {
+    const stub = fresh();
+    const source = await stub.createSession();
+    await stub.prompt("compose approve", source);
+    expect(await stub.tripledRuns()).toBe(1);
+    const fork = await stub.fork(source);
+    const [call] = await stub.lastToolCalls(fork);
+    const receipt = await stub.answer(
+      {
+        type: "approval",
+        approvalId: call?.approvalId ?? "",
+        approved: true
+      },
+      fork
+    );
+    expect(await stub.wait(receipt.operationId, fork)).toMatchObject({
+      status: "done",
+      text: "tool said: did the dangerous thing"
+    });
+    // tripled was answered from what the fork kept, not run again.
+    expect(await stub.tripledRuns()).toBe(1);
+  });
+
   it("answers the calls a rerun tool made before an eviction from their steps", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);

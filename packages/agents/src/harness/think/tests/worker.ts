@@ -52,6 +52,8 @@ const SYSTEM_KEY = "test:system";
 const CODE_COUNT_KEY = "test:code-count";
 const SANDBOXED_KEY = "test:sandboxed";
 const TRIPLED_KEY = "test:tripled";
+const RELAY_ABORTED_KEY = "relay-aborted";
+const DANGEROUS_FLAVOR_KEY = "dangerous-flavor";
 const COMPOSE_ABORTED_KEY = "test:compose-aborted";
 const NOTE_IN_BEFORE_TURN_KEY = "test:note-in-before-turn";
 const ACTIVE_TOOLS_KEY = "test:active-tools";
@@ -262,10 +264,31 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
             description: "Multiply by three, then triple",
             inputSchema: z.object({
               gate: z.boolean().optional(),
-              approve: z.boolean().optional()
+              approve: z.boolean().optional(),
+              parallel: z.boolean().optional(),
+              relay: z.boolean().optional()
             }),
-            execute: async ({ gate, approve }, options) => {
+            execute: async ({ gate, approve, parallel, relay }, options) => {
               const { invoke } = options as unknown as { invoke: ToolInvoke };
+              // A write still running when its sibling asks for approval.
+              if (parallel) {
+                const writing = invoke("gate_safe", {});
+                // The write has started before its sibling asks.
+                while (!this.ctx.storage.kv.get<number>(GATE_RUNS_KEY)) {
+                  await new Promise((resolve) => setTimeout(resolve, 5));
+                }
+                const [written, done] = await Promise.all([
+                  writing,
+                  invoke("dangerous", {})
+                ]);
+                if (!written.ok) return written.errorText;
+                return done.ok ? done.output : done.errorText;
+              }
+              // The call that asks for approval is made by a nested tool.
+              if (relay) {
+                const relayed = await invoke("relay", {});
+                return relayed.ok ? relayed.output : relayed.errorText;
+              }
               const multiplied = await invoke("multiply", { value: 1 });
               if (!multiplied.ok) return multiplied.errorText;
               const tripled = await invoke("tripled", {
@@ -280,13 +303,34 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
                 options.abortSignal?.addEventListener("abort", () =>
                   this.ctx.storage.kv.put(COMPOSE_ABORTED_KEY, true)
                 );
-                const done = await invoke("dangerous", {});
+                const flavor =
+                  this.ctx.storage.kv.get<string>(DANGEROUS_FLAVOR_KEY);
+                const done = await invoke(
+                  "dangerous",
+                  flavor === undefined ? {} : { flavor }
+                );
                 return done.ok ? done.output : done.errorText;
               }
               return tripled.output;
             }
           }),
           recovery: "rerun" as const
+        },
+        // Code-only: calls dangerous, and notes when it's aborted.
+        relay: {
+          ...tool({
+            description: "Call dangerous",
+            inputSchema: z.object({}),
+            execute: async (_input, options) => {
+              const { invoke } = options as unknown as { invoke: ToolInvoke };
+              options.abortSignal?.addEventListener("abort", () =>
+                this.ctx.storage.kv.put(RELAY_ABORTED_KEY, true)
+              );
+              const done = await invoke("dangerous", {});
+              return done.ok ? done.output : done.errorText;
+            }
+          }),
+          callers: ["code"] as const
         },
         // Gone from the tools once a test removes it.
         ...(!this.ctx.storage.kv.get<boolean>(NO_GATE_SAFE_KEY) && {
@@ -303,7 +347,7 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         ...(!this.ctx.storage.kv.get<boolean>(NO_DANGEROUS_KEY) && {
           dangerous: tool({
             description: "Needs approval",
-            inputSchema: z.object({}),
+            inputSchema: z.object({ flavor: z.string().optional() }),
             needsApproval: true,
             execute: async () => {
               const runs =
@@ -607,13 +651,20 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         parts = callReply([
           { name: "multiply", input: { value: 5 }, id: "constructor" }
         ]);
+      } else if (text === "compose approve twice") {
+        parts = callReply([
+          { name: "compose", input: { approve: true }, id: "compose-1" },
+          { name: "compose", input: { approve: true }, id: "compose-2" }
+        ]);
       } else if (text.startsWith("compose")) {
         parts = callReply([
           {
             name: "compose",
             input: {
               gate: text === "compose gate",
-              approve: text === "compose approve"
+              approve: text === "compose approve",
+              parallel: text === "compose parallel",
+              relay: text === "compose relay"
             }
           }
         ]);
@@ -913,6 +964,25 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   composeAborted(): boolean {
     return this.ctx.storage.kv.get<boolean>(COMPOSE_ABORTED_KEY) ?? false;
+  }
+
+  relayAborted(): boolean {
+    return this.ctx.storage.kv.get<boolean>(RELAY_ABORTED_KEY) ?? false;
+  }
+
+  setDangerousFlavor(flavor: string): void {
+    this.ctx.storage.kv.put(DANGEROUS_FLAVOR_KEY, flavor);
+  }
+
+  /** The parked calls kept, across every message and session. */
+  parkedCalls(): number {
+    let n = 0;
+    for (const row of this.ctx.storage.sql.exec<{ value: string }>(
+      "SELECT value FROM cf_agents_session_annotations WHERE kind = 'think:parked-calls'"
+    )) {
+      n += Object.keys(JSON.parse(row.value) as object).length;
+    }
+    return n;
   }
 
   /** Messages with what a parked tool kept. */

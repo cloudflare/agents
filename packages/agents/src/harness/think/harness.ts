@@ -260,14 +260,16 @@ type InvokeScope = {
   readonly signal: AbortSignal;
   /** Results kept from before a park, by call id. */
   readonly seed: Readonly<Record<string, ToolOutcome>>;
-  /** The call an approval was given for. */
-  readonly approved?: string;
+  /** The call an approval was given for: its position, tool and input. */
+  readonly approved?: ParkedCall["pending"];
   /** Results this run, by call id. */
   readonly made: Record<string, ToolOutcome>;
   parked?: ParkedCall["pending"];
   /** Aborts the calling tool once it parks. */
   readonly parking: AbortController;
   readonly park: () => void;
+  /** Calls still running, which a park waits for before it keeps them. */
+  readonly running: Set<Promise<unknown>>;
 };
 
 /** What a call made after its tool parked gets. */
@@ -1611,16 +1613,16 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     }
     // The copied turns keep the context they were sent with, so the fork's
     // next request opens with the same prompt as the session it came from.
-    const records = await source.internal_annotations(
-      CONTEXT_RECORD_KIND,
-      rows.map((row) => row.id)
-    );
-    for (const [messageId, value] of records) {
-      await target.internal_setAnnotation(
-        CONTEXT_RECORD_KIND,
-        messageId,
-        value
+    // And a tool parked for an approval keeps what it called, so the
+    // fork's answer to it doesn't make those calls again.
+    for (const kind of [CONTEXT_RECORD_KIND, PARKED_KIND]) {
+      const records = await source.internal_annotations(
+        kind,
+        rows.map((row) => row.id)
       );
+      for (const [messageId, value] of records) {
+        await target.internal_setAnnotation(kind, messageId, value);
+      }
     }
     return fork;
   }
@@ -2730,7 +2732,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           errorText: `Tool "${toolName}" can't be called from another tool.`
         };
       }
-      if (toolCallId !== scope.approved) {
+      // The approval is for this exact call: the same position, tool and
+      // input. A rerun that calls something else there asks again.
+      const approved = scope.approved;
+      if (
+        approved?.toolCallId !== toolCallId ||
+        approved.toolName !== toolName ||
+        JSON.stringify(asJson(approved.input)) !== JSON.stringify(asJson(input))
+      ) {
         const needsApproval =
           (await this.#options.toolApproval?.({
             session,
@@ -2746,7 +2755,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           throw new Error(PARKED_ERROR);
         }
       }
-      const outcome = (await run.do(
+      const step = run.do(
         `tool:${stepIndex}:${toolCallId}`,
         TOOL_STEP,
         // SAFETY: an outcome is the tool's JSON result or its error text,
@@ -2779,7 +2788,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             outcome = await executeTool(tool, runInput, {
               toolCallId,
               messages,
-              abortSignal: AbortSignal.any([signal, scope.signal]),
+              // A park aborts every tool under the calling one, nested too.
+              abortSignal: AbortSignal.any([
+                signal,
+                scope.signal,
+                scope.parking.signal
+              ]),
               onPreliminary: () => {},
               invoke: this.#invoker(
                 turn,
@@ -2804,9 +2818,15 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           });
           return outcome;
         }) as unknown as (attempt: TaskStepAttempt) => Promise<TaskValue>
-      )) as unknown as ToolOutcome;
-      scope.made[toolCallId] = outcome;
-      return outcome;
+      );
+      scope.running.add(step);
+      try {
+        const outcome = (await step) as unknown as ToolOutcome;
+        scope.made[toolCallId] = outcome;
+        return outcome;
+      } finally {
+        scope.running.delete(step);
+      }
     };
   }
 
@@ -2817,13 +2837,42 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     toolCallId: string,
     call: ParkedCall
   ): Promise<void> {
-    const stored = await this.#parkedCalls(session, messageId);
-    stored[toolCallId] = call;
-    await this.#handle(session).internal_setAnnotation(
-      PARKED_KIND,
-      messageId,
-      JSON.stringify(stored)
-    );
+    await this.#parkedEdit(session, messageId, async () => {
+      const stored = await this.#parkedCalls(session, messageId);
+      stored[toolCallId] = call;
+      await this.#handle(session).internal_setAnnotation(
+        PARKED_KIND,
+        messageId,
+        JSON.stringify(stored)
+      );
+    });
+  }
+
+  /** One message's parked-call edits, one after another, by message. */
+  readonly #parkedEdits = new Map<string, Promise<void>>();
+
+  /**
+   * Run `edit` after the message's earlier parked-call edits: tools of one
+   * step park at once, and each read-modify-write must see the last.
+   */
+  async #parkedEdit(
+    session: ThinkSessionId,
+    messageId: string,
+    edit: () => Promise<void>
+  ): Promise<void> {
+    const key = JSON.stringify([session, messageId]);
+    const before = this.#parkedEdits.get(key) ?? Promise.resolve();
+    const done = before.then(edit, edit);
+    const settled = done.catch(() => {});
+    this.#parkedEdits.set(key, settled);
+    try {
+      await done;
+    } finally {
+      // The last edit in line clears the entry, so the map stays bounded.
+      if (this.#parkedEdits.get(key) === settled) {
+        this.#parkedEdits.delete(key);
+      }
+    }
   }
 
   /** Forget what a parked tool kept, once its approval is used. */
@@ -2832,19 +2881,21 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     messageId: string,
     toolCallId: string
   ): Promise<void> {
-    const stored = await this.#parkedCalls(session, messageId);
-    if (!Object.hasOwn(stored, toolCallId)) return;
-    delete stored[toolCallId];
-    const handle = this.#handle(session);
-    if (Object.keys(stored).length === 0) {
-      await handle.internal_deleteAnnotation(PARKED_KIND, messageId);
-    } else {
-      await handle.internal_setAnnotation(
-        PARKED_KIND,
-        messageId,
-        JSON.stringify(stored)
-      );
-    }
+    await this.#parkedEdit(session, messageId, async () => {
+      const stored = await this.#parkedCalls(session, messageId);
+      if (!Object.hasOwn(stored, toolCallId)) return;
+      delete stored[toolCallId];
+      const handle = this.#handle(session);
+      if (Object.keys(stored).length === 0) {
+        await handle.internal_deleteAnnotation(PARKED_KIND, messageId);
+      } else {
+        await handle.internal_setAnnotation(
+          PARKED_KIND,
+          messageId,
+          JSON.stringify(stored)
+        );
+      }
+    });
   }
 
   /** What a tool parked for an approval kept, by its call id, if any. */
@@ -3016,10 +3067,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
               const scope: InvokeScope = {
                 signal,
                 seed: kept?.calls ?? {},
-                ...(kept && { approved: kept.pending.toolCallId }),
+                ...(kept && { approved: kept.pending }),
                 made: {},
                 parking,
-                park: markParked
+                park: markParked,
+                running: new Set()
               };
               const running = executeTool(tool, input, {
                 toolCallId,
@@ -3051,6 +3103,11 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
               if (!outcome || scope.parked) {
                 const pending = scope.parked;
                 if (!pending) throw new Error("A tool parked without a call");
+                // Calls its siblings still run end first (the park aborted
+                // them), so what they did is kept and never made again.
+                while (scope.running.size > 0) {
+                  await Promise.allSettled([...scope.running]);
+                }
                 await this.#park(session, current.id, toolCallId, {
                   calls: { ...scope.seed, ...scope.made },
                   pending
