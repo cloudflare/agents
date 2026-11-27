@@ -981,6 +981,11 @@ export class Think<
           )
       });
       await this.#context.load();
+      // TEMPORARY: remove in the next minor. The recovered replies
+      // think@0.24.0 kept, delivered as deliveries.
+      if (this.parentPath.length === 0) {
+        await this.#messengers?.importReleasedReplies();
+      }
       if (this.extensionLoader) {
         this.extensionManager = createThinkExtensionManager({
           loader: this.extensionLoader,

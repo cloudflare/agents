@@ -66,8 +66,8 @@ export class ThinkMessengerStateAgent extends ChatSdkStateAgent {}
  */
 const FALLBACK_STREAMING_PLACEHOLDER_TEXT = null;
 
-/** The posts that deliver a recovered messenger reply, in order. */
-function recoveredReplyPosts(
+/** The posts that deliver a recovered messenger reply, in order. @internal */
+export function recoveredReplyPosts(
   definition: { delivery?: MessengerDeliveryPolicy },
   input: {
     outcome: "completed" | "interrupted";

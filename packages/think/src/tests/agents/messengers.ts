@@ -554,6 +554,26 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     };
   }
 
+  /**
+   * Keep a recovered reply as think@0.24.0 kept it, for the next start.
+   * `failPost` rejects that post once, across a restart.
+   */
+  async seedReleasedRecoveryForTest(
+    reply: Record<string, unknown>,
+    failPost?: string
+  ): Promise<void> {
+    await this._seedLegacyRecoveredReply(
+      `${crypto.randomUUID()}:user-1`,
+      reply
+    );
+    if (failPost !== undefined) this.ctx.storage.kv.put("fail-post", failPost);
+  }
+
+  /** Reset the object, as the platform does: the next call starts it. */
+  restartForTest(): void {
+    this.ctx.abort("restart for test");
+  }
+
   private _slowPostsForTest = false;
 
   /**
@@ -919,6 +939,11 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         }
         if (this._failPostForTest === text(message)) {
           this._failPostForTest = null;
+          throw new Error("simulated post failure");
+        }
+        // Kept across a restart: rejected once.
+        if (this.ctx.storage.kv.get("fail-post") === text(message)) {
+          this.ctx.storage.kv.delete("fail-post");
           throw new Error("simulated post failure");
         }
         if (this._slowPostsForTest) {

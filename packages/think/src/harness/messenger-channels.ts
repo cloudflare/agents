@@ -15,7 +15,17 @@
 import type { UIMessage } from "ai";
 import type { Adapter, Chat } from "chat";
 import type { ThinkHarness } from "agents/harness/think";
-import { chatSdkChannel, deliverToSurfaces } from "agents/internal";
+import {
+  chatSdkChannel,
+  deliverToSurfaces,
+  registerDeliverySink,
+  sendDelivery
+} from "agents/internal";
+import {
+  migrateLegacyRecoveredReplies,
+  RECOVERED_REPLY_SINK,
+  recoveredReplySink
+} from "../messengers/recovered-reply";
 import {
   Channels,
   type ChannelMessageSurface,
@@ -28,6 +38,7 @@ import {
   createMessengerChat,
   idempotencyKeyForEvent,
   normalizeMessengers,
+  recoveredReplyPosts,
   withMessengerQueueTtl,
   type MessengerConcurrency,
   type NormalizedMessengerDefinition,
@@ -54,6 +65,11 @@ export type ThinkMessengerChannels = {
   receive(request: Request): Promise<Response | undefined>;
   /** The messengers' ids. */
   readonly ids: readonly string[];
+  /**
+   * TEMPORARY: remove in the next minor. Deliver the recovered replies
+   * think@0.24.0 kept under `cf_think_messenger_recovery:`. Called at start.
+   */
+  importReleasedReplies(): Promise<void>;
   /** Where a notice to messenger `id`'s `thread` is posted, if anywhere. */
   noticeSurface(
     id: string,
@@ -277,6 +293,26 @@ export function messengerChannels(options: {
     await options.storage.delete(key);
   });
 
+  // TEMPORARY: remove in the next minor. A recovered reply think@0.24.0
+  // kept is posted as Think posts it: the rest of a settled one, from its
+  // cursor, and the apology for one left unsettled, since the previous
+  // engine's recovery that would settle it does not run after the move.
+  registerDeliverySink(
+    options.tasks,
+    RECOVERED_REPLY_SINK,
+    recoveredReplySink(async () => async (input) => {
+      const definition = definitions.find((d) => d.id === input.messengerId);
+      if (!definition) return { chunks: 0 };
+      const posts = recoveredReplyPosts(definition, input);
+      const post = posts[input.chunk];
+      if (post !== undefined) {
+        await chat().initialize();
+        await definition.adapter.postMessage(input.threadId, post);
+      }
+      return { chunks: posts.length };
+    })
+  );
+
   let made: Chat<Record<string, Adapter>> | undefined;
   const chat = () =>
     (made ??= createMessengerChat({
@@ -289,6 +325,18 @@ export function messengerChannels(options: {
   return {
     channels,
     ids: definitions.map((definition) => definition.id),
+    async importReleasedReplies() {
+      await migrateLegacyRecoveredReplies(
+        options.storage,
+        async () => true,
+        (id, claim, progress) =>
+          sendDelivery(options.tasks, RECOVERED_REPLY_SINK, id, claim, {
+            sentAt: Date.now(),
+            attempts: 0,
+            progress
+          })
+      );
+    },
     noticeSurface(id, thread) {
       const definition = definitions.find((d) => d.id === id);
       if (!definition || thread === undefined) return undefined;

@@ -1476,6 +1476,61 @@ describe("think messengers core", () => {
       ).toEqual(["one", "three"]);
     });
 
+    /** Seed a reply think@0.24.0 kept, restart, and wait for `expected`. */
+    async function afterRestart(
+      name: string,
+      reply: Record<string, unknown>,
+      expected: string[],
+      failPost?: string
+    ): Promise<string[]> {
+      const agent = () =>
+        getAgentByName(env.ThinkMessengerDeliveryTestAgent, name);
+      await (await agent()).seedReleasedRecoveryForTest(reply, failPost);
+      await (await agent()).restartForTest().catch(() => undefined);
+      // A reset stub stays broken: each call takes a new one.
+      const deadline = Date.now() + 20_000;
+      let posted: string[] = [];
+      while (Date.now() < deadline) {
+        posted = ((await (await agent()).getAdapterCalls()) ?? []).map(
+          (call) => call.content
+        );
+        if (posted.length >= expected.length) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      return posted;
+    }
+
+    it("apologizes after a restart for a reply think@0.24.0 left unsettled", async () => {
+      expect(
+        await afterRestart(
+          `orphan-restart-${crypto.randomUUID()}`,
+          { threadId: "fake:dm-orphan" },
+          [INTERRUPTED_MESSENGER_RESPONSE]
+        )
+      ).toEqual([INTERRUPTED_MESSENGER_RESPONSE]);
+    });
+
+    it("posts the rest of a reply think@0.24.0 settled, from its cursor, after a restart", async () => {
+      expect(
+        await afterRestart(
+          `split-restart-${crypto.randomUUID()}`,
+          { outcome: "completed", text: "one|two|three", posted: 1 },
+          ["two", "three"]
+        )
+      ).toEqual(["two", "three"]);
+    });
+
+    it("never posts again a part of a reply think@0.24.0 settled that was rejected", async () => {
+      expect(
+        await afterRestart(
+          `split-reject-${crypto.randomUUID()}`,
+          { outcome: "completed", text: "one|two|three" },
+          ["one", "three"],
+          "two"
+        )
+      ).toEqual(["one", "three"]);
+    }, 30_000);
+
     it("posts each chunk once when overlapping deliveries share a recovered reply", async () => {
       const agent = await getAgentByName(
         env.ThinkMessengerDeliveryTestAgent,
