@@ -551,7 +551,7 @@ describe("Think — error handling", () => {
     });
 
     try {
-      await agent.testChatWithError("Custom event error");
+      await agent.testChatWithModelError("Custom event error");
     } finally {
       unsubscribe();
     }
@@ -596,6 +596,55 @@ describe("Think — error handling", () => {
         })
       })
     );
+  });
+
+  it("bridges an in-band stream error to chat:request:failed on a WebSocket turn", async () => {
+    const room = `ws-inband-failed-${crypto.randomUUID()}`;
+    const agent = await freshAgent(room);
+    await agent.setInBandErrorResponse("WS in-band error");
+    const events: Array<{ payload: { stage?: string; error?: string } }> = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:request:failed" && event.name === room) {
+        events.push(event);
+      }
+    });
+    const ws = await connectThinkTestAgentWS(room);
+    try {
+      const done = waitForProtocolMessage(
+        ws,
+        (m) => m.type === "cf_agent_use_chat_response" && m.done === true
+      );
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: crypto.randomUUID(),
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: crypto.randomUUID(),
+                  role: "user",
+                  parts: [{ type: "text", text: "hello" }]
+                }
+              ]
+            })
+          }
+        })
+      );
+      await done;
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            stage: "stream",
+            error: expect.stringContaining("WS in-band error")
+          })
+        })
+      );
+    } finally {
+      unsubscribe();
+      await closeWS(ws);
+    }
   });
 
   it("bridges an in-band stream error to chat:request:failed on the RPC path", async () => {
