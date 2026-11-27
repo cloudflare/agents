@@ -4076,6 +4076,54 @@ export class ThinkTestAgent extends Think {
   }
 
   /**
+   * An agent-tool run is cancelled (by `cancelAgentToolRun` or by its
+   * caller's signal) while its turn waits behind a running turn, read
+   * through the public API only.
+   */
+  async cancelQueuedRunThroughPublicApiForTest(
+    by: "cancel" | "signal"
+  ): Promise<{
+    atCancel: string | undefined;
+    status: string | undefined;
+    error: string | undefined;
+    userTexts: string[];
+    steps: number;
+  }> {
+    const active = await this._holdActiveRpcTurnForTest();
+    const runId = crypto.randomUUID();
+    const parent = new AbortController();
+    await this.startAgentToolRun("queued run", {
+      runId,
+      signal: parent.signal
+    });
+    if (by === "cancel") await this.cancelAgentToolRun(runId, "stop");
+    else parent.abort(new Error("parent stopped"));
+    // Settled while the turn ahead is still held: the cancel does not wait
+    // for the queue.
+    let atCancel = (await this.inspectAgentToolRun(runId))?.status;
+    const settleBy = Date.now() + 2000;
+    while (atCancel === "running" && Date.now() < settleBy) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      atCancel = (await this.inspectAgentToolRun(runId))?.status;
+    }
+    await this.releaseBeforeStepForTest();
+    await active.turn;
+    let inspection = await this.inspectAgentToolRun(runId);
+    const deadline = Date.now() + 5000;
+    while (inspection?.status === "running" && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      inspection = await this.inspectAgentToolRun(runId);
+    }
+    return {
+      atCancel,
+      status: inspection?.status,
+      error: inspection?.error,
+      userTexts: this._userTextsForTest(),
+      steps: this._beforeStepLog.length
+    };
+  }
+
+  /**
    * A cancel of a run being recovered stops what runs under the request ids
    * on its row (the recovered turn, a recovery attempt registered under the
    * first id) and nothing else on the agent.

@@ -35,6 +35,13 @@ type ThinkAgentToolTestStub = {
     reported: string | null;
     stored: string | null;
   }>;
+  cancelQueuedRunThroughPublicApiForTest(by: "cancel" | "signal"): Promise<{
+    atCancel: string | undefined;
+    status: string | undefined;
+    error: string | undefined;
+    userTexts: string[];
+    steps: number;
+  }>;
   cancelQueuedAgentToolRunForTest(): Promise<{
     status: string | null;
     userTexts: string[];
@@ -519,6 +526,25 @@ describe("Think agent tools", () => {
       error: "stop"
     });
   });
+
+  it.each([
+    ["cancelAgentToolRun", "cancel", "stop"],
+    ["its caller's signal", "signal", "parent stopped"]
+  ] as const)(
+    "a run cancelled by %s while it waits behind a running turn ends aborted before that turn ends, and never runs",
+    async (_name, by, error) => {
+      const agent = await freshAgent();
+      const result = await agent.cancelQueuedRunThroughPublicApiForTest(by);
+      expect(result).toMatchObject({
+        atCancel: "aborted",
+        status: "aborted",
+        error
+      });
+      // Only the running turn reached the model.
+      expect(result.userTexts).toEqual(["active turn"]);
+      expect(result.steps).toBe(1);
+    }
+  );
 
   it("never starts a run cancelled while its turn waited in the queue", async () => {
     const agent = await freshAgent();
