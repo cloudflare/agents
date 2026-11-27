@@ -249,6 +249,9 @@ function taskStatusesFor(
 /** What a `chat()` caller is told when a reset cuts its turn off. As on Think. */
 const CHAT_CLEARED_ERROR = "The chat was cleared before the turn finished.";
 
+/** The reasons ThinkHarness ends an operation with when it never ran. */
+const NEVER_RAN = new Set(["withdrawn", "not_waiting", "not_found", "empty"]);
+
 /** A programmatic turn stopped, or cleared by a reset, before it began. */
 function cutOffBeforeStart(cut: "stopped" | "cleared"): SaveMessagesResult {
   return cut === "cleared"
@@ -602,10 +605,20 @@ export class Think<
         onTurnEnd: async (end) => {
           // The extensions' chunk hooks finish inside the turn, as in Think.
           await this.#chunkHooks;
+          const continued = this.#continued.get(end.operationId);
+          this.#continued.delete(end.operationId);
           if (end.message) await this.#endStep(end.operationId, end.message);
           else this.#openSteps.delete(end.operationId);
-          // A turn stopped while it waited never ran: there is no response.
-          if (end.status === "unanswered" && end.reason === "withdrawn") return;
+          // A turn that never ran has no response: one stopped while it
+          // waited, or input the harness turned away before a model call (a
+          // tool result no call waits for, an empty or unknown operation).
+          if (
+            end.status === "unanswered" &&
+            end.reason !== undefined &&
+            NEVER_RAN.has(end.reason)
+          ) {
+            return;
+          }
           await this.onChatResponse({
             // As on Think, a turn that ended before it wrote anything still
             // reports, with an empty assistant message.
@@ -615,7 +628,8 @@ export class Think<
               parts: []
             },
             requestId: end.operationId,
-            continuation: false,
+            // As `beforeTurn` saw it, if the turn got that far.
+            continuation: continued ?? false,
             status:
               end.status === "done"
                 ? "completed"
@@ -1044,6 +1058,8 @@ export class Think<
     return this.#running;
   }
 
+  /** Whether each running operation continues a reply; dropped at its end. */
+  #continued = new Map<string, boolean>();
   #running:
     | { requestId: string; trigger: string; continuation: boolean }
     | undefined;
@@ -1862,6 +1878,10 @@ export class Think<
       trigger: identity.trigger,
       continuation: turn.continuation
     };
+    // The first call of an operation says whether it continues a reply.
+    if (!this.#continued.has(turn.operationId)) {
+      this.#continued.set(turn.operationId, turn.continuation);
+    }
     // As in Think: the capability block for the turn's tools follows the
     // prompt, unless a `beforeTurn` gives its own.
     const base = turn.system ?? this.getSystemPrompt();

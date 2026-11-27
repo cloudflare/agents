@@ -1353,23 +1353,24 @@ function createMidStreamErrorMockModel(
       throw new Error("doGenerate not implemented in mock");
     },
     async doStream() {
-      const stream = new ReadableStream({
-        start(controller) {
-          controller.enqueue({ type: "stream-start", warnings: [] });
-          controller.enqueue({ type: "text-start", id: "t-1" });
-          controller.enqueue({
-            type: "text-delta",
-            id: "t-1",
-            delta: text.slice(0, half)
-          });
-          controller.enqueue({
-            type: "text-delta",
-            id: "t-1",
-            delta: text.slice(half)
-          });
-          controller.error(new Error(message));
-        }
-      });
+      // One part per read, and the failure only on the read after the two
+      // chunks, so the reader has taken them before the stream fails.
+      const parts: unknown[] = [
+        { type: "stream-start", warnings: [] },
+        { type: "text-start", id: "t-1" },
+        { type: "text-delta", id: "t-1", delta: text.slice(0, half) },
+        { type: "text-delta", id: "t-1", delta: text.slice(half) }
+      ];
+      const stream = new ReadableStream(
+        {
+          pull(controller) {
+            const part = parts.shift();
+            if (part === undefined) controller.error(new Error(message));
+            else controller.enqueue(part);
+          }
+        },
+        { highWaterMark: 0 }
+      );
       return { stream };
     }
   } as LanguageModel;
