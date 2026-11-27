@@ -39,6 +39,7 @@ function finish(controller: ReadableStreamDefaultController, reason: string) {
 /** Calls the action the prompt names; after a tool result, says what it got. */
 /** Model calls to fail with a lost connection, and the calls made. */
 let lostConnections = 0;
+let providerUnavailable = 0;
 let modelCalls = 0;
 
 function actionModel(): LanguageModel {
@@ -55,6 +56,15 @@ function actionModel(): LanguageModel {
       if (lostConnections > 0) {
         lostConnections--;
         return Promise.reject(new Error("Network connection lost."));
+      }
+      if (providerUnavailable > 0) {
+        providerUnavailable--;
+        return Promise.reject(
+          Object.assign(new Error("Service Unavailable"), {
+            name: "AI_APICallError",
+            statusCode: 503
+          })
+        );
       }
       const last = options.prompt[options.prompt.length - 1];
       const prompt = JSON.stringify(options.prompt);
@@ -251,6 +261,11 @@ export class ThinkHarnessActionsAgent extends Think {
   /** The next `count` model calls lose their connection. */
   loseConnectionsForTest(count: number): void {
     lostConnections = count;
+  }
+
+  /** The next `count` model calls get the provider's 503. */
+  failWithProvider503ForTest(count: number): void {
+    providerUnavailable = count;
   }
 
   modelCallsForTest(): number {

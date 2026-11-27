@@ -2522,6 +2522,15 @@ describe("Think — beforeTurn config overrides", () => {
     expect(JSON.parse(result.outputJson ?? "null")).toEqual({ answer: "42" });
   });
 
+  it("returns structured output a schema transform made a bigint", async () => {
+    const agent = await freshAgent(`bt-output-bigint-${crypto.randomUUID()}`);
+    await agent.setResponse(JSON.stringify({ answer: "42" }));
+    await agent.setTurnConfigOutputBigInt();
+    expect(await agent.runTurnOutputAnswerForTest("What is the answer?")).toBe(
+      "bigint 42"
+    );
+  });
+
   it("errors a wait-mode turn whose structured output does not parse (#2263)", async () => {
     const agent = await freshAgent(`bt-output-bad-${crypto.randomUUID()}`);
     await agent.setResponse("not json");

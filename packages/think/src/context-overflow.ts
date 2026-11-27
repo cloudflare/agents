@@ -107,8 +107,8 @@ export class ThinkContextOverflow {
     const baseline = messages.length;
     this.#baseline = baseline;
     this.#runBaseline = baseline;
-    const last = messages.at(-1);
-    this.#lastInput = last === undefined ? undefined : JSON.stringify(last);
+    // Kept by reference: read only when the guard compacts.
+    this.#runPrompt = messages;
     this.#compactedHead = undefined;
     this.#proactiveCompactions = 0;
   }
@@ -116,8 +116,8 @@ export class ThinkContextOverflow {
   /** Where the run's own steps begin in the messages it started with. */
   #runBaseline = 0;
 
-  /** The last message the run started with, as JSON: its steps follow it. */
-  #lastInput: string | undefined;
+  /** The messages the run started with: its steps follow them. */
+  #runPrompt: readonly ModelMessage[] = [];
 
   /** The head the last proactive compaction of this run built, if any. */
   #compactedHead: ModelMessage[] | undefined;
@@ -129,30 +129,28 @@ export class ThinkContextOverflow {
    */
   #carried(messages: readonly ModelMessage[]): boolean {
     const head = this.#compactedHead;
-    if (!head) return true;
-    return (
-      messages.length >= head.length &&
-      JSON.stringify(messages.slice(0, head.length)) === JSON.stringify(head)
-    );
+    return !head || startsWith(messages, head);
   }
 
   /**
-   * This run's in-flight steps: what follows the last message the run
-   * started with, wherever a compaction or a `beforeStep` rewrite put it.
-   * Without it, by the frame the step's messages are in.
+   * This run's in-flight steps. Where the step's messages still start with
+   * the compacted head or the run's own prompt, what follows it. Where a
+   * `beforeStep` rewrote that start, what follows the first copy of the
+   * prompt's last message: a step's own messages come after it, so one
+   * that repeats it is never taken for the boundary.
    */
   #inFlight(messages: readonly ModelMessage[]): ModelMessage[] {
-    const last = this.#lastInput;
+    const head = this.#compactedHead;
+    if (head && startsWith(messages, head)) return messages.slice(head.length);
+    const prompt = this.#runPrompt;
+    if (startsWith(messages, prompt)) return messages.slice(prompt.length);
+    const last = prompt.at(-1);
     if (last !== undefined) {
-      for (let at = messages.length - 1; at >= 0; at--) {
-        if (JSON.stringify(messages[at]) === last) {
-          return messages.slice(at + 1);
-        }
-      }
+      const key = JSON.stringify(last);
+      const at = messages.findIndex((m) => JSON.stringify(m) === key);
+      if (at >= 0) return messages.slice(at + 1);
     }
-    return messages.slice(
-      this.#carried(messages) ? this.#baseline : this.#runBaseline
-    );
+    return messages.slice(head ? this.#baseline : this.#runBaseline);
   }
 
   /**
@@ -330,4 +328,25 @@ export class ThinkContextOverflow {
       return undefined;
     }
   }
+}
+
+/** Whether `messages` starts with `prefix`: the same objects, or equal JSON. */
+function startsWith(
+  messages: readonly ModelMessage[],
+  prefix: readonly ModelMessage[]
+): boolean {
+  if (messages.length < prefix.length) return false;
+  if (prefix.every((message, at) => messages[at] === message)) return true;
+  // Cheap checks before the JSON: the first and last of the prefix.
+  const end = prefix.length - 1;
+  if (
+    end >= 0 &&
+    (JSON.stringify(messages[0]) !== JSON.stringify(prefix[0]) ||
+      JSON.stringify(messages[end]) !== JSON.stringify(prefix[end]))
+  ) {
+    return false;
+  }
+  return (
+    JSON.stringify(messages.slice(0, prefix.length)) === JSON.stringify(prefix)
+  );
 }

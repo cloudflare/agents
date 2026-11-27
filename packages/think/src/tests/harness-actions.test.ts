@@ -6,6 +6,7 @@ import type { PendingApproval } from "../think";
 type ActionsStub = {
   say(text: string): Promise<void>;
   loseConnectionsForTest(count: number): Promise<void>;
+  failWithProvider503ForTest(count: number): Promise<void>;
   modelCallsForTest(): Promise<number>;
   classifyErrorsAsForTest(
     as: "fatal" | "transient" | "rate_limit"
@@ -376,6 +377,15 @@ describe("harness-backed Think: a lost connection to the model", () => {
       expect((await stub.modelCallsForTest()) - before).toBe(3);
     });
   }
+
+  it("tries the turn again after the provider's 503 when classifyChatError says nothing", async () => {
+    const stub = await agent();
+    await stub.failWithProvider503ForTest(1);
+    const before = await stub.modelCallsForTest();
+    await stub.say("send a receipt");
+    expect(await stub.lastText()).toMatch(/^got /);
+    expect((await stub.modelCallsForTest()) - before).toBe(3);
+  });
 
   it("ends the turn when classifyChatError says fatal", async () => {
     const stub = await agent();

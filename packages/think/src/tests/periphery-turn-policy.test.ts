@@ -155,6 +155,45 @@ describe("ThinkContextOverflow", () => {
     expect(emitted[0][0]).toBe("chat:request:failed");
   });
 
+  it("keeps a step's tool result that repeats the one its continuation started from", async () => {
+    const { guard } = overflow({ proactive: { maxInputTokens: 100 } });
+    const call: ModelMessage = {
+      role: "assistant",
+      content: [
+        {
+          type: "tool-call",
+          toolCallId: "call-1",
+          toolName: "check_status",
+          input: {}
+        }
+      ]
+    };
+    const result: ModelMessage = {
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId: "call-1",
+          toolName: "check_status",
+          output: { type: "text", value: "pending" }
+        }
+      ]
+    };
+    const prompt: ModelMessage[] = [
+      { role: "user", content: "check it" },
+      call,
+      result
+    ];
+    guard.beginRun(prompt);
+    // The step's own call and result, the same as the prompt's last two.
+    const step = [...prompt, structuredClone(call), structuredClone(result)];
+    expect(await guard.compactBeforeStep(stepEvent(95, step))).toEqual([
+      { role: "user", content: "summary" },
+      call,
+      result
+    ]);
+  });
+
   it("compacts before a step over budget and keeps the in-flight tail", async () => {
     const { guard, emitted } = overflow({ proactive: { maxInputTokens: 100 } });
     const head: ModelMessage = { role: "user", content: "old" };
