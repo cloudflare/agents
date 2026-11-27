@@ -2398,8 +2398,12 @@ export class Think<
         ? await session.wait(returned.requestId)
         : undefined;
       await this.#sync();
+      // As in Think: the reply only for a turn the override says completed;
+      // the structured output whatever it says.
       const message =
-        settled?.status === "done" && settled.messageId !== undefined
+        returned.status === "completed" &&
+        settled?.status === "done" &&
+        settled.messageId !== undefined
           ? this.#transcript.messages.find((m) => m.id === settled.messageId)
           : undefined;
       const output =
@@ -3525,10 +3529,11 @@ export class Think<
     operationId: string,
     signal: AbortSignal
   ): Promise<boolean> {
-    // If the turn ends on it, its caller hears an overflow.
-    this.#overflowed.add(operationId);
-    // A stopped turn is not compacted, nor run again.
-    if (!this.contextOverflow?.reactive || signal.aborted) return false;
+    // A stopped turn is not compacted, nor run again; nor one whose retry
+    // budget is zero, as Think counts it.
+    const config = this.contextOverflow;
+    if (!config?.reactive || signal.aborted) return false;
+    if ((config.maxRetries ?? 1) <= 0) return false;
     let shortened = false;
     try {
       shortened = Boolean(await this.session.compact());
@@ -3675,7 +3680,14 @@ export class Think<
       }
     }
     classification ??= classifyProviderError(error);
-    return classification === "context_overflow" ? "context-overflow" : "fail";
+    const overflow = classification === "context_overflow";
+    // The operation's latest failure decides how its caller hears it: an
+    // overflow, or (after a retry that failed otherwise) not.
+    if (operationId !== undefined) {
+      if (overflow) this.#overflowed.add(operationId);
+      else this.#overflowed.delete(operationId);
+    }
+    return overflow ? "context-overflow" : "fail";
   }
 
   /**
