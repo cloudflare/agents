@@ -519,6 +519,52 @@ describe("chat recovery, through public behaviour", () => {
       expect(await (await agent()).modelCallsForTest()).toBe(0);
     }, 30_000);
 
+    it("tells a tab that reconnects after onChatRecovery says continue: false that the turn ended in an error", async () => {
+      const { agent, room } = await resetDuringTurn(
+        "answer-no-continue-tab",
+        2,
+        {
+          continue: false
+        }
+      );
+      await settle(agent);
+
+      // A tab coming back finds the turn ended, not frozen half-streamed.
+      const res = await exports.default.fetch(
+        `http://example.com/agents/think-test-agent/${room}`,
+        { headers: { Upgrade: "websocket" } }
+      );
+      const ws = res.webSocket;
+      if (!ws) throw new Error("no socket");
+      const errors: string[] = [];
+      ws.addEventListener("message", (event) => {
+        const frame = JSON.parse(String(event.data)) as {
+          type?: string;
+          error?: boolean;
+          body?: string;
+          id?: string;
+        };
+        // The tab takes up the stream it is offered, as useChat does.
+        if (frame.type === "cf_agent_stream_resuming") {
+          ws.send(
+            JSON.stringify({ type: "cf_agent_stream_resume_ack", id: frame.id })
+          );
+        }
+        if (frame.type === "cf_agent_use_chat_response" && frame.error) {
+          errors.push(frame.body ?? "");
+        }
+      });
+      ws.accept();
+      ws.send(JSON.stringify({ type: "cf_agent_stream_resume_request" }));
+      await vi.waitFor(() => expect(errors).toHaveLength(1), {
+        timeout: 10_000,
+        interval: 20
+      });
+      ws.close();
+
+      expect(errors[0]).toContain("automatic continuation was declined");
+    }, 30_000);
+
     // Successors of the pre-stream retry tests (think-session, "Think —
     // onChatRecovery"): a turn cut off before its first chunk is asked again.
     it("answers a turn a reset cut off after its stream opened but before any text", async () => {
