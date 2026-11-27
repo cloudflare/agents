@@ -1693,13 +1693,26 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       // The stored partial is named by its stream (the loop may never have
       // run in this attempt). A call left for a rerun nobody will make is
       // failed as interrupted, as any given-up reply's open calls are.
-      const replyId =
-        result.messageId ??
-        replyIdOf(this.#streamChunks(streamId)) ??
-        live.reply?.id;
-      const stored = replyId
-        ? await this.#handle(session).getMessage(replyId)
-        : null;
+      // Every attempt starts its reply in the same stream, and an empty
+      // one stores nothing: the newest start whose reply is stored names it.
+      const handle = this.#handle(session);
+      const candidates = [
+        result.messageId,
+        ...this.#streamChunks(streamId)
+          .flatMap((chunk) =>
+            chunk.type === "start" && chunk.messageId !== undefined
+              ? [chunk.messageId]
+              : []
+          )
+          .reverse(),
+        live.reply?.id
+      ];
+      let stored: Awaited<ReturnType<typeof handle.getMessage>> = null;
+      for (const id of new Set(candidates)) {
+        if (id === undefined) continue;
+        stored = await handle.getMessage(id);
+        if (stored) break;
+      }
       if (stored) {
         const message = asUIMessage(stored);
         const settled = settleOpenCalls(message, "interrupted");

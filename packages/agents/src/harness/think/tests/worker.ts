@@ -306,9 +306,12 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
           : classifyContextOverflow(error),
       onRecovery: ({ partial }) => {
         this.ctx.storage.kv.put(RECOVERY_PARTIAL_KEY, partial?.id ?? null);
-        return this.ctx.storage.kv.get<boolean>(ABANDON_KEY)
-          ? "abandon"
-          : "continue";
+        if (this.ctx.storage.kv.get<boolean>(ABANDON_KEY)) return "abandon";
+        // Given up at the n-th interruption, when asked.
+        const left = this.ctx.storage.kv.get<number>(ABANDON_AT_KEY);
+        if (left === undefined) return "continue";
+        this.ctx.storage.kv.put(ABANDON_AT_KEY, left - 1);
+        return left <= 1 ? "abandon" : "continue";
       },
       beforeTurn: async ({ toolSet, session, system: built, signal }) => {
         // A platform blip while the call is prepared, once.
@@ -452,6 +455,7 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     .use(this.chat);
 
   #transientThrown = false;
+  #stalledEmpty = false;
 
   #reply(prompt: PromptMessage[]): ReadableStream<StreamPart> {
     const last = prompt.filter((m) => m.role !== "system").at(-1);
@@ -556,7 +560,21 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         parts = callReply([
           { name: "ask", input: { question: "again?" }, id: "reused-call" }
         ]);
-      } else if (text === "stall in safe input") {
+      } else if (text === "stall empty, then in input" && !this.#stalledEmpty) {
+        // The first attempt stalls before it streams anything.
+        this.#stalledEmpty = true;
+        const held = this.#slowHeld;
+        return new ReadableStream({
+          async start(controller) {
+            controller.enqueue({ type: "stream-start", warnings: [] });
+            await held;
+            controller.close();
+          }
+        });
+      } else if (
+        text === "stall in safe input" ||
+        text === "stall empty, then in input"
+      ) {
         const held = this.#slowHeld;
         return new ReadableStream({
           async start(controller) {
@@ -1229,6 +1247,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   /** The next model call's preparation hits a platform transient once. */
   blipNextPreparation(): void {
     this.ctx.storage.kv.put(PREPARE_BLIP_KEY, true);
+  }
+
+  /** `onRecovery` gives the turn up at its `n`-th interruption. */
+  abandonRecoveryAt(n: number): void {
+    this.ctx.storage.kv.put(ABANDON_AT_KEY, n);
   }
 
   /** From now on, `onRecovery` gives every interrupted turn up. */
@@ -2076,6 +2099,7 @@ function downgradeToStore(
 }
 /** The table suffix of the instances the harness composes. */
 const ABANDON_KEY = "test:abandon-recovery";
+const ABANDON_AT_KEY = "test:abandon-at";
 const PREPARE_BLIP_KEY = "test:prepare-blip";
 const FATAL_CLASSIFIER_KEY = "test:fatal-classifier";
 const HARNESS_SUFFIX = "__c_think_2dharness";

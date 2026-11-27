@@ -257,9 +257,9 @@ export class ThinkHarnessActionsAgent extends Think {
     return modelCalls;
   }
 
-  /** From now on, the app's classifyChatError names every error `fatal`. */
-  classifyErrorsAsFatalForTest(): void {
-    this.classifyChatError = () => "fatal";
+  /** From now on, the app's classifyChatError names every error `as`. */
+  classifyErrorsAsForTest(as: "fatal" | "transient" | "rate_limit"): void {
+    this.classifyChatError = () => as;
   }
 
   /** Ends this object, so the next call meets a fresh isolate. */

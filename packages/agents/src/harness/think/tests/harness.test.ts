@@ -1293,6 +1293,25 @@ describe("ThinkHarness durability", () => {
     expect(reply).toBe("assistant: [gate_safe output-error]");
   });
 
+  it("names the reply a later attempt kept when recovery gives up after an empty attempt", async () => {
+    const stub = fresh();
+    await stub.setStallTimeout(50);
+    await stub.abandonRecoveryAt(2);
+    const receipt = await stub.submit("stall empty, then in input");
+    const result = await stub.wait(receipt.operationId);
+    expect(result).toMatchObject({
+      status: "unanswered",
+      reason: "interrupted"
+    });
+    // The second attempt's reply is the one kept, its call failed.
+    expect((await stub.messages()).at(-1)).toBe(
+      "assistant: [gate_safe output-error]"
+    );
+    expect((result as { messageId?: string }).messageId).toBe(
+      (await stub.messageIds()).at(-1)
+    );
+  });
+
   it("tells the model a call whose input a stall cut off did not run, even for a tool safe to rerun", async () => {
     const stub = fresh();
     await stub.setStallTimeout(50);

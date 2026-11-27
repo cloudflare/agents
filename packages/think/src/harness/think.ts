@@ -3535,8 +3535,12 @@ export class Think<
   #classify(error: unknown): ThinkErrorClass {
     const classification = this.classifyChatError(error);
     if (classification === "context_overflow") return "context-overflow";
-    // An app's own classification wins; without one, a platform transient
-    // (a lost connection) is tried again within chatRecovery's budget.
+    // As on Think: a transient or rate-limited error is tried again within
+    // chatRecovery's budget. An app's own classification wins; without one,
+    // a platform transient (a lost connection) is tried again too.
+    if (classification === "transient" || classification === "rate_limit") {
+      return "retry";
+    }
     if (classification === undefined && isPlatformTransientError(error)) {
       return "retry";
     }
