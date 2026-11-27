@@ -8421,7 +8421,19 @@ export class ThinkToolsTestAgent extends Think {
     this._responseLog.push(result);
   }
 
+  /** `onStepEnd` and `beforeStep` calls, in the order they came. */
+  private _stepHookOrder: string[] = [];
+
+  override onStepEnd(ctx: StepContext): void {
+    this._stepHookOrder.push(`end:${ctx.toolCalls.length}`);
+  }
+
+  async getStepHookOrderForTest(): Promise<string[]> {
+    return this._stepHookOrder;
+  }
+
   override beforeStep(ctx: PrepareStepContext): StepConfig | void {
+    this._stepHookOrder.push(`before:${ctx.stepNumber}`);
     this._beforeStepLog.push({
       stepNumber: ctx.stepNumber,
       previousStepCount: ctx.steps.length,

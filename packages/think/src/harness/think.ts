@@ -302,7 +302,12 @@ export class Think<
   #configCache: unknown = null;
   /** What `beforeTurn` returned for the running operation's turn. */
   #ownTurn:
-    | { readonly operationId: string; readonly own: TurnConfig | void }
+    | {
+        readonly operationId: string;
+        readonly own: TurnConfig | void;
+        /** The default model, once a call of the turn resolved it. */
+        defaultModel?: LanguageModel;
+      }
     | undefined;
   /**
    * What started each operation (Think's `TurnTrigger`) and its turn's
@@ -1563,9 +1568,28 @@ export class Think<
     const tools = turn.toolSet;
     // Resolved only when read, as in Think: a `beforeTurn` that sets its
     // own model never needs the default's binding.
+    // The step before this call ran its tools: it ends now, before this
+    // call's hooks, as an AI SDK step ends before the next `prepareStep`.
+    const reply = turn.messages.at(-1);
+    if (turn.step > 0 && reply?.role === "assistant") {
+      await this.#endStep(turn.operationId, reply);
+    }
     const chosen = await this.getModel();
-    let resolved: LanguageModel | undefined;
-    const resolveDefault = () => (resolved ??= this.resolveModel(chosen));
+    // Resolved once per turn (and only when read), as in Think: a
+    // `getGateway` that reads the turn's state picks one gateway for all
+    // of the turn's model calls.
+    const kept =
+      this.#ownTurn?.operationId === turn.operationId
+        ? this.#ownTurn
+        : undefined;
+    let resolved: LanguageModel | undefined = kept?.defaultModel;
+    const resolveDefault = () => {
+      resolved ??= this.resolveModel(chosen);
+      if (this.#ownTurn?.operationId === turn.operationId) {
+        this.#ownTurn.defaultModel = resolved;
+      }
+      return resolved;
+    };
     const identity = this.#turnOf(turn.operationId);
     this.#running = {
       requestId: turn.operationId,
@@ -1596,7 +1620,13 @@ export class Think<
     const own = first
       ? await this.beforeTurn(context)
       : (this.#ownTurn?.own ?? undefined);
-    if (first) this.#ownTurn = { operationId: turn.operationId, own };
+    if (first) {
+      this.#ownTurn = {
+        operationId: turn.operationId,
+        own,
+        ...(resolved && { defaultModel: resolved })
+      };
+    }
     // The sandboxed extensions see the subclass's config, as in Think,
     // once per operation: Think prepares a turn once for its whole tool
     // loop, and the harness asks before every model call.
@@ -1645,13 +1675,14 @@ export class Think<
         config.tools ? { ...tools, ...config.tools } : tools
       );
     const model = step.model ?? config.model;
+    // Without an override, the turn's one resolution of the default.
+    const sent =
+      model !== undefined ? this.resolveModel(model) : resolveDefault();
     const messages = step.messages ?? (first ? config.messages : undefined);
     const activeTools = step.activeTools ?? config.activeTools;
     const toolChoice = step.toolChoice ?? config.toolChoice;
     return {
-      ...(model !== undefined && {
-        model: this.resolveModel(model)
-      }),
+      model: sent,
       ...(typeof system === "string" && { system }),
       ...(messages && { messages }),
       ...(activeTools && { activeTools: [...activeTools] }),
