@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { getAgentByName } from "agents";
 import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
@@ -82,6 +82,22 @@ interface SlowStreamStub {
   getActiveFibers(): Promise<Array<{ id: string; name: string }>>;
   getAbortControllerCount(): Promise<number>;
   waitForIdleForTest(): Promise<boolean>;
+  holdStreamForTest(requestId: string): Promise<void>;
+  isStreamHeldForTest(requestId: string): Promise<boolean>;
+  releaseStreamForTest(requestId: string): Promise<void>;
+  handledMessageCountForTest(type: string): Promise<number>;
+}
+
+/** Bounds for waits on the agent, inside the 10 s test timeout. */
+const BOUNDS = { timeout: 3_000, interval: 20 };
+
+/** Wait until a finished turn left no fiber and no abort controller. */
+async function cleanedUp(stub: SlowStreamStub | ThrowingStub): Promise<void> {
+  await stub.waitForIdleForTest();
+  await vi.waitFor(async () => {
+    expect(await stub.getActiveFibers()).toHaveLength(0);
+    expect(await stub.getAbortControllerCount()).toBe(0);
+  }, BOUNDS);
 }
 
 interface ThrowingStub {
@@ -388,7 +404,10 @@ describe("chatRecovery", () => {
 
       sendChatRequest(ws, "req-err", [userMessage]);
 
-      await new Promise((r) => setTimeout(r, 200));
+      // The turn ran (and threw) before the idle wait.
+      await vi.waitFor(async () => {
+        expect(await stub.getOnChatMessageCallCount()).toBe(1);
+      }, BOUNDS);
       await stub.waitForIdleForTest();
 
       expect(await stub.getOnChatMessageCallCount()).toBe(1);
@@ -444,7 +463,9 @@ describe("chatRecovery", () => {
       // First request: throw
       await stub.setShouldThrow(true);
       sendChatRequest(ws, "req-fail", [userMessage]);
-      await new Promise((r) => setTimeout(r, 200));
+      await vi.waitFor(async () => {
+        expect(await stub.getOnChatMessageCallCount()).toBe(1);
+      }, BOUNDS);
       await stub.waitForIdleForTest();
 
       expect(await stub.getAbortControllerCount()).toBe(0);
@@ -1046,16 +1067,33 @@ describe("chatRecovery", () => {
       );
 
       const collecting = collectMessages(ws);
+      const stub = (await getAgentByName(
+        env.RecoverySlowStreamAgent,
+        room
+      )) as unknown as SlowStreamStub;
 
+      // Cancel mid-stream: the stream is held after its first chunk until
+      // the cancel is handled.
+      await stub.holdStreamForTest("req-cancel");
+      onTestFinished(() => stub.releaseStreamForTest("req-cancel"));
       sendChatRequest(ws, "req-cancel", [userMessage], {
         format: "sse",
         chunkCount: 100,
         chunkDelayMs: 50,
         useAbortSignal: true
       });
-
-      await new Promise((r) => setTimeout(r, 300));
+      await vi.waitFor(async () => {
+        expect(await stub.isStreamHeldForTest("req-cancel")).toBe(true);
+      }, BOUNDS);
       sendCancel(ws, "req-cancel");
+      await vi.waitFor(async () => {
+        expect(
+          await stub.handledMessageCountForTest(
+            MessageType.CF_AGENT_CHAT_REQUEST_CANCEL
+          )
+        ).toBe(1);
+      }, BOUNDS);
+      await stub.releaseStreamForTest("req-cancel");
 
       const { messages, timedOut } = await collecting;
       expect(timedOut).toBe(false);
@@ -1069,18 +1107,7 @@ describe("chatRecovery", () => {
       );
       expect(dataChunks.length).toBeLessThan(100);
 
-      await new Promise((r) => setTimeout(r, 200));
-
-      const stub = (await getAgentByName(
-        env.RecoverySlowStreamAgent,
-        room
-      )) as unknown as SlowStreamStub;
-
-      const fibers = await stub.getActiveFibers();
-      expect(fibers).toHaveLength(0);
-
-      const abortCount = await stub.getAbortControllerCount();
-      expect(abortCount).toBe(0);
+      await cleanedUp(stub);
 
       ws.close(1000);
     });
@@ -1105,18 +1132,11 @@ describe("chatRecovery", () => {
       const chatResponses = messages.filter(isUseChatResponseMessage);
       expect(chatResponses.find((m) => m.done === true)).toBeDefined();
 
-      await new Promise((r) => setTimeout(r, 100));
-
       const stub = (await getAgentByName(
         env.RecoverySlowStreamAgent,
         room
       )) as unknown as SlowStreamStub;
-
-      const fibers = await stub.getActiveFibers();
-      expect(fibers).toHaveLength(0);
-
-      const abortCount = await stub.getAbortControllerCount();
-      expect(abortCount).toBe(0);
+      await cleanedUp(stub);
 
       ws.close(1000);
     });

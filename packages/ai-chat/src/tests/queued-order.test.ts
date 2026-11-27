@@ -67,6 +67,9 @@ type Stub = {
   holdStreamForTest(requestId: string): Promise<void>;
   isStreamHeldForTest(requestId: string): Promise<boolean>;
   releaseStreamForTest(requestId: string): Promise<void>;
+  queuedTurnCountForTest(): Promise<number>;
+  handledMessageCountForTest(type: string): Promise<number>;
+  getQueuedMessageIdsForTest(): Promise<string[]>;
 };
 
 const SLOW = { chunkCount: 20, chunkDelayMs: 50 };
@@ -172,6 +175,12 @@ describe("a message queued behind a running turn", () => {
       const { ws: tabA } = await connectChatWS(path);
       const { ws: tabB } = await connectChatWS(path);
       const seenB = record(tabB);
+      const stub = (await getAgentByName(
+        end === "stopped"
+          ? env.SlowStreamAgent
+          : env.LatestMessageConcurrencyAgent,
+        room
+      )) as unknown as Stub;
       sendChatRequest(tabB, "r1", [user("u1", "one")], SLOW);
       await waitFor(() =>
         seenB.some((f) => isUseChatResponseMessage(f) && f.id === "r1")
@@ -182,7 +191,8 @@ describe("a message queued behind a running turn", () => {
         [user("u1", "one"), user("u2", "two")],
         QUICK
       );
-      await delay(100);
+      // r2 waits behind r1 (the count includes the running turn).
+      await waitFor(async () => (await stub.queuedTurnCountForTest()) === 2);
       if (end === "stopped") {
         tabA.send(
           JSON.stringify({
@@ -198,7 +208,15 @@ describe("a message queued behind a running turn", () => {
           QUICK
         );
       }
-      await delay(50);
+      // The stop or the superseding request is handled before the tab goes.
+      await waitFor(
+        async () =>
+          (await stub.handledMessageCountForTest(
+            end === "stopped"
+              ? MessageType.CF_AGENT_CHAT_REQUEST_CANCEL
+              : MessageType.CF_AGENT_USE_CHAT_REQUEST
+          )) === (end === "stopped" ? 1 : 3)
+      );
       // The tab that sent r2 goes away before r2 ends.
       tabA.close();
       await waitFor(() =>
@@ -329,9 +347,14 @@ describe("a message queued behind a running turn", () => {
       seenA.some((f) => isUseChatResponseMessage(f) && f.id === "r1")
     );
     sendChatRequest(tabA, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
-    await delay(100);
+    await waitFor(async () => (await stub.queuedTurnCountForTest()) === 2);
     tabA.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
-    await delay(300);
+    await waitFor(
+      async () =>
+        (await stub.handledMessageCountForTest(
+          MessageType.CF_AGENT_CHAT_CLEAR
+        )) === 1
+    );
     await stub.waitForIdleForTest();
     expect(await stub.getPersistedMessages()).toEqual([]);
     tabA.close();

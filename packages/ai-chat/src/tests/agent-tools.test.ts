@@ -16,7 +16,7 @@ import {
 } from "agents";
 import { describe, expect, it, vi, onTestFinished } from "vitest";
 import type { Env } from "./worker";
-import { connectChatWS } from "./test-utils";
+import { connectChatWS, socketBarrier } from "./test-utils";
 
 type ParentStub = DurableObjectStub & {
   resetChildForTest(childName: string): Promise<void>;
@@ -1773,8 +1773,10 @@ describe("AIChatAgent as an agent-tool child", () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
       let chunks = 0;
+      const seen: unknown[] = [];
       ws.addEventListener("message", (e: MessageEvent) => {
         const frame = JSON.parse(e.data as string) as { id?: string };
+        seen.push(frame);
         if (frame.id === "recovered-request") chunks++;
       });
       const child = (await getAgentByName(
@@ -1786,7 +1788,8 @@ describe("AIChatAgent as an agent-tool child", () => {
         ): Promise<void>;
       };
       await child.broadcastRecoveredAgentToolChunkForTest(eventDelivery);
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      // The broadcast's frames are in by the barrier's echo.
+      await socketBarrier(ws, seen);
       ws.close(1000);
       return chunks;
     }
