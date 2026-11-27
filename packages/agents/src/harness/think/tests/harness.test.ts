@@ -573,7 +573,13 @@ describe("ThinkHarness durability", () => {
       status: "done",
       text: "tool said: released after 2 runs"
     });
-    expect(await stub.gateRuns()).toBe(2);
+    expect(await stub.gateRuns()).toBe(2); // The run after the reset is the tool step's second attempt, for both
+    // of its hooks.
+    expect(await stub.toolAttempts()).toEqual([
+      "before gate_safe:1",
+      "before gate_safe:2",
+      "after gate_safe:2"
+    ]);
   });
 
   it("answers a call to a tool the next attempt no longer has, instead of waiting for it", async () => {
@@ -610,6 +616,8 @@ describe("ThinkHarness durability", () => {
     // The partial text survived, and the continuation wrote into the same
     // message.
     expect(messages[1]).toMatch(/^assistant: x+ continued$/);
+    // `onRecovery` was shown the partial reply.
+    expect(await stub.recoveryPartial()).toEqual(expect.any(String));
     expect(await stub.streamRows()).toBe(0);
   });
 
@@ -971,14 +979,147 @@ describe("ThinkHarness durability", () => {
     await stub.release();
   });
 
+  it("reports an approved tool call a reset cut off, instead of running it again", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    await stub.prompt("approve gate");
+    const [call] = await stub.lastToolCalls();
+    const receipt = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    await stub.gateStarted(1);
+
+    stub = await crash(name);
+    await stub.release();
+    await runDurableObjectAlarm(stub);
+    expect(text(await stub.wait(receipt.operationId))).toMatch(
+      /^tool said: error: The tool call was interrupted/
+    );
+    expect(await stub.gateRuns()).toBe(1);
+  });
+
+  it("keeps a finished tool's result when a reset cuts off the other call of its step", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const receipt = await stub.submit("multiply and gate");
+    await stub.gateStarted(1);
+    await stub.streamed("tool-output-available");
+
+    stub = await crash(name);
+    await stub.release();
+    await runDurableObjectAlarm(stub);
+    expect((await stub.wait(receipt.operationId)).status).toBe("done");
+    expect(await stub.multiplyRuns()).toBe(1);
+    expect(await stub.gateRuns()).toBe(1);
+    expect((await stub.messages())[1]).toMatch(
+      /^assistant: \[multiply output-available\] \[gate output-error\]/
+    );
+  });
+
+  it("does not hold a slow tool to the model's stall timeout", async () => {
+    const stub = fresh();
+    await stub.setStallTimeout(50);
+    const receipt = await stub.submit("gate");
+    await stub.gateStarted(1);
+    // Silent for several stall timeouts while the tool runs.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await stub.release();
+    expect(text(await stub.wait(receipt.operationId))).toBe(
+      "tool said: released after 1 runs"
+    );
+    expect(await stub.gateRuns()).toBe(1);
+  });
+
+  it("does not run a tool again when the call after it overflows the context", async () => {
+    const stub = fresh();
+    const receipt = await stub.submit("multiply then overflow");
+    await runDurableObjectAlarm(stub);
+    const result = await stub.wait(receipt.operationId);
+    expect(result.status).toBe("done");
+    expect(await stub.multiplyRuns()).toBe(1);
+  });
+
+  it("keeps the text a failed call after a tool streamed", async () => {
+    const stub = fresh();
+    const receipt = await stub.submit("multiply then fail");
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "unanswered",
+      reason: "model exploded"
+    });
+    expect((await stub.messages())[1]).toMatch(
+      /^assistant: \[multiply output-available\] partial$/
+    );
+  });
+
+  it("keeps a failed regeneration's partial as a branch under its question", async () => {
+    const stub = fresh();
+    await stub.prompt("flaky");
+    const [question] = await stub.messageIds();
+    const receipt = await stub.regenerate();
+    expect((await stub.wait(receipt.operationId)).status).toBe("unanswered");
+    expect(await stub.branches(question ?? "")).toBe(2);
+  });
+
+  it("recovers a model call that stalls, instead of ending the turn", async () => {
+    const stub = fresh();
+    await stub.setStallTimeout(50);
+    const receipt = await stub.submit("slow");
+    // The stall is an interruption: the next attempt, after a backoff,
+    // continues the reply.
+    const result = await stub.wait(receipt.operationId);
+    expect(result.status).toBe("done");
+    expect((await stub.messages())[1]).toMatch(/^assistant: x+ continued$/);
+  });
+
+  it("tells the model a call whose input a stall cut off did not run, even for a tool safe to rerun", async () => {
+    const stub = fresh();
+    await stub.setStallTimeout(50);
+    const receipt = await stub.submit("stall in safe input");
+    expect((await stub.wait(receipt.operationId)).status).toBe("done");
+    expect(await stub.gateRuns()).toBe(0);
+    expect((await stub.messages())[1]).toMatch(
+      /^assistant: \[gate_safe output-error\] tool said: error: The tool call's input was cut off/
+    );
+  });
+
+  it("keeps a finished tool's result when the other call of its step fails the turn", async () => {
+    const stub = fresh();
+    await stub.throwAfterToolCall("gate");
+    const receipt = await stub.submit("multiply and gate");
+    await stub.gateStarted(1);
+    await stub.streamed("tool-output-available");
+    await stub.release();
+    expect((await stub.wait(receipt.operationId)).status).toBe("unanswered");
+    expect((await stub.messages())[1]).toMatch(
+      /^assistant: \[multiply output-available\]/
+    );
+  });
+
+  it("gives a tool's hooks the same attempt, also on a later attempt of its turn", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const receipt = await stub.submit("slow then multiply");
+    await stub.streamed("text-delta");
+
+    stub = await crash(name);
+    await runDurableObjectAlarm(stub);
+    expect((await stub.wait(receipt.operationId)).status).toBe("done");
+    expect(await stub.toolAttempts()).toEqual([
+      "before multiply:1",
+      "after multiply:1"
+    ]);
+  });
+
   it("does not run a finished tool again after a reset in the model call that follows it", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);
     const receipt = await stub.submit("gate then slow");
     await stub.gateStarted(1);
     await stub.release();
-    // The tool's result is in the transcript and the next call streams.
-    await stub.streamed();
+    // The tool's result is in the turn's stream and the next call streams.
+    await stub.streamed("text-delta");
 
     stub = await crash(name);
     await runDurableObjectAlarm(stub);
@@ -1086,6 +1227,35 @@ describe("ThinkHarness's own Tasks", () => {
     expect(await root.childGateRuns()).toBe(1);
     // The Agent's own Tasks holds none of the harness's runs.
     expect(await root.childAgentRuns()).toBe(0);
+  });
+
+  it("carries a released version's running turn forward in a sub-agent, reporting its started tool call", async () => {
+    const name = crypto.randomUUID();
+    let root = await getAgentByName(env.THINK_HARNESS_FACET_ROOT, name);
+    const operationId = await root.childSubmit("gate");
+    await root.childGateStarted();
+    // While the tool runs, the open run becomes the released store's
+    // operation, as that version left it; then the object is reset.
+    await root.childDowngradeToStore();
+    expect(await root.childStoreTables()).toMatchObject({
+      cf_think_harness_store_operations: 1
+    });
+    await abortAllDurableObjects();
+    root = await getAgentByName(env.THINK_HARNESS_FACET_ROOT, name);
+    const result = root.childWait(operationId);
+    await runDurableObjectAlarm(root);
+    const settled = await result;
+    expect(settled.status).toBe("done");
+    expect(text(settled)).toMatch(
+      /^tool said: error: The tool call was interrupted/
+    );
+    expect(await root.childGateRuns()).toBe(1);
+    // A sub-agent empties the store's tables rather than dropping them.
+    expect(await root.childStoreTables()).toEqual({
+      cf_think_harness_store_log: 0,
+      cf_think_harness_store_operations: 0,
+      cf_think_harness_store_sessions: 0
+    });
   });
 });
 

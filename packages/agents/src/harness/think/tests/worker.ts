@@ -33,6 +33,10 @@ import type {
 const GATE_RUNS_KEY = "test:gate:runs";
 const RELEASE_KEY = "test:gate:release";
 const DANGEROUS_RUNS_KEY = "test:dangerous:runs";
+const MULTIPLY_RUNS_KEY = "test:multiply:runs";
+const TOOL_ATTEMPTS_KEY = "test:tool-attempts";
+const THROW_AFTER_KEY = "test:throw-after";
+const RECOVERY_PARTIAL_KEY = "test:recovery:partial";
 const SYSTEM_KEY = "test:system";
 const NOTE_IN_BEFORE_TURN_KEY = "test:note-in-before-turn";
 const ACTIVE_TOOLS_KEY = "test:active-tools";
@@ -70,6 +74,8 @@ type StreamPart =
   | { type: "text-delta"; id: string; delta: string }
   | { type: "text-end"; id: string }
   | { type: "tool-call"; toolCallId: string; toolName: string; input: string }
+  | { type: "tool-input-start"; id: string; toolName: string }
+  | { type: "tool-input-delta"; id: string; delta: string }
   | {
       type: "finish";
       finishReason: { raw: string; unified: "stop" | "tool-calls" };
@@ -165,6 +171,10 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     this.#releaseSlow = resolve;
   });
   #overflowed = false;
+  #toolOverflowed = false;
+  #flakyCalls = 0;
+  /** The recovery options, which a test may change while the object runs. */
+  readonly #recovery: { stallTimeoutMs?: number } = {};
   /** Sessions that have context: the context session and its forks. */
   readonly #contextSessions = new Set<string>([CONTEXT_SESSION]);
   /** Sessions handles, as configureSession hands them over. */
@@ -175,6 +185,7 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   readonly harness = new ThinkHarness({
     tasks: this.tasks,
     system: "You are a test.",
+    recovery: this.#recovery,
     model: new MockLanguageModelV4({
       doStream: async ({ prompt, tools }) => {
         // SAFETY: the mock's prompt is the provider's message list.
@@ -190,7 +201,20 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         multiply: tool({
           description: "Multiply by three",
           inputSchema: z.object({ value: z.number() }),
-          execute: async ({ value }) => value * 3
+          execute: async ({ value }) => {
+            const kv = this.ctx.storage.kv;
+            kv.put(
+              MULTIPLY_RUNS_KEY,
+              (kv.get<number>(MULTIPLY_RUNS_KEY) ?? 0) + 1
+            );
+            return value * 3;
+          }
+        }),
+        approve_gate: tool({
+          description: "Needs approval, then waits until released",
+          inputSchema: z.object({}),
+          needsApproval: true,
+          execute: () => this.#gate()
         }),
         gate: tool({
           description: "Wait until released",
@@ -267,9 +291,12 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       seen.push(`${status.operationId}:${status.status}`);
       this.ctx.storage.kv.put(SUBMISSION_STATUS_KEY, seen);
     },
-    recovery: { backoffMs: 10 },
     hooks: {
       classifyError: classifyContextOverflow,
+      onRecovery: ({ partial }) => {
+        this.ctx.storage.kv.put(RECOVERY_PARTIAL_KEY, partial?.id ?? null);
+        return "continue";
+      },
       beforeTurn: async ({ toolSet, session, system: built }) => {
         // As an extension's `sendMessage` from this hook does.
         if (this.ctx.storage.kv.get<boolean>(NOTE_IN_BEFORE_TURN_KEY)) {
@@ -296,7 +323,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
           ...(activeTools && { activeTools })
         };
       },
-      beforeToolCall: ({ toolName }) => {
+      beforeToolCall: ({ toolName, attempt }) => {
+        this.#recordAttempt(`before ${toolName}:${attempt}`);
         const blocked = this.ctx.storage.kv.get<string>(BLOCK_KEY);
         if (blocked === toolName) {
           return { action: "block", reason: "blocked by policy" };
@@ -306,8 +334,12 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         }
         return undefined;
       },
-      afterToolCall: async () => {
+      afterToolCall: async ({ toolName, attempt }) => {
+        this.#recordAttempt(`after ${toolName}:${attempt}`);
         const kv = this.ctx.storage.kv;
+        if (kv.get<string>(THROW_AFTER_KEY) === toolName) {
+          throw new Error(`afterToolCall failed for ${toolName}`);
+        }
         if (!kv.get(HOLD_AFTER_KEY)) return;
         kv.put(AFTER_KEY, "entered");
         while (kv.get(HOLD_AFTER_KEY)) {
@@ -394,8 +426,31 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       // The model call after the tool's step streams, then holds.
       return this.#slow(12);
     }
-    if (last?.role === "tool") {
+    const firstText = contentText(first?.content);
+    if (
+      last?.role === "tool" &&
+      firstText === "multiply then overflow" &&
+      !this.#toolOverflowed
+    ) {
+      this.#toolOverflowed = true;
+      parts = [
+        { type: "stream-start", warnings: [] },
+        { type: "error", error: new Error("context_length_exceeded") }
+      ];
+    } else if (last?.role === "tool" && firstText === "multiply then fail") {
+      parts = [
+        { type: "stream-start", warnings: [] },
+        { type: "text-start", id: "t" },
+        { type: "text-delta", id: "t", delta: "partial" },
+        { type: "error", error: new Error("model exploded") }
+      ];
+    } else if (last?.role === "tool") {
       parts = textReply(`tool said: ${toolResultText(last.content)}`);
+    } else if (
+      last?.role === "assistant" &&
+      firstText === "slow then multiply"
+    ) {
+      parts = callReply([{ name: "multiply", input: { value: 1 } }]);
     } else if (last?.role === "assistant") {
       parts = textReply("continued");
     } else {
@@ -427,6 +482,28 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         parts = callReply([{ name: "gate" }]);
       } else if (text === "gate" || text === "gate-safe") {
         parts = callReply([{ name: text === "gate" ? "gate" : "gate_safe" }]);
+      } else if (text === "approve gate") {
+        parts = callReply([{ name: "approve_gate" }]);
+      } else if (
+        text === "multiply and gate" ||
+        text === "multiply then overflow" ||
+        text === "multiply then fail"
+      ) {
+        parts = callReply([
+          { name: "multiply", input: { value: 2 } },
+          ...(text === "multiply and gate" ? [{ name: "gate" }] : [])
+        ]);
+      } else if (text === "flaky") {
+        this.#flakyCalls++;
+        parts =
+          this.#flakyCalls === 1
+            ? textReply("echo: flaky")
+            : [
+                { type: "stream-start", warnings: [] },
+                { type: "text-start", id: "t" },
+                { type: "text-delta", id: "t", delta: "partial" },
+                { type: "error", error: new Error("model exploded") }
+              ];
       } else if (text === "approve") {
         parts = callReply([{ name: "dangerous" }]);
       } else if (text === "client") {
@@ -441,6 +518,27 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         parts = callReply([
           { name: "ask", input: { question: "again?" }, id: "reused-call" }
         ]);
+      } else if (text === "stall in safe input") {
+        const held = this.#slowHeld;
+        return new ReadableStream({
+          async start(controller) {
+            controller.enqueue({ type: "stream-start", warnings: [] });
+            controller.enqueue({
+              type: "tool-input-start",
+              id: "safe-1",
+              toolName: "gate_safe"
+            });
+            controller.enqueue({
+              type: "tool-input-delta",
+              id: "safe-1",
+              delta: "{"
+            });
+            await held;
+            controller.close();
+          }
+        });
+      } else if (text === "slow then multiply") {
+        return this.#slow(3);
       } else if (text === "slow") {
         return this.#slow(12);
       } else if (text === "slow-short") {
@@ -485,6 +583,14 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         controller.close();
       }
     });
+  }
+
+  #recordAttempt(entry: string): void {
+    const kv = this.ctx.storage.kv;
+    kv.put(TOOL_ATTEMPTS_KEY, [
+      ...(kv.get<string[]>(TOOL_ATTEMPTS_KEY) ?? []),
+      entry
+    ]);
   }
 
   async #gate(): Promise<string> {
@@ -881,66 +987,7 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
    * untouched: their format did not change.
    */
   downgradeToStore(abandonReason: string | null = null): void {
-    // The released version kept no schema version for the harness.
-    forgetSchemaVersion(this.lifecycle, this.harness.capabilityId);
-    const sql = this.ctx.storage.sql;
-    const store = openHarnessStore(this.ctx.storage, {
-      prefix: SHARED_STORE_PREFIX
-    });
-    const runs = sql
-      .exec<{
-        run_id: string;
-        input: string;
-        status: string;
-        checkpoint: string | null;
-      }>(
-        `SELECT run_id, input, status, checkpoint FROM cf_agents_task_runs
-         WHERE definition = '__cf_think_harness_operation'
-           AND status IN ('pending', 'running')
-         ORDER BY seq`
-      )
-      .toArray();
-    for (const run of runs) {
-      // SAFETY: the harness names its runs [session, operation id] and
-      // stores { input, source } with a `turn` checkpoint.
-      const [session, id] = JSON.parse(run.run_id) as [string, string];
-      const { input, source } = JSON.parse(run.input) as {
-        input: JsonValue;
-        source: string;
-      };
-      const turn = (
-        run.checkpoint
-          ? (JSON.parse(run.checkpoint) as { turn?: Record<string, JsonValue> })
-          : {}
-      ).turn;
-      store.createSession({ id: session });
-      store.enqueue({
-        session,
-        id,
-        input,
-        meta: { source, ...turn, abandonReason }
-      });
-      if (run.status === "running") store.start(session, id);
-      const started = sql
-        .exec<{ step_name: string }>(
-          `SELECT step_name FROM cf_agents_task_steps
-           WHERE run_id = ? AND state = 'running'`,
-          run.run_id
-        )
-        .toArray()
-        .map((step) => step.step_name.split(":").slice(2).join(":"));
-      store.setSessionState(session, {
-        clientTools: [],
-        toolCalls: Object.fromEntries(
-          started.map((toolCallId) => [
-            toolCallId,
-            { operationId: id, attempts: 1 }
-          ])
-        )
-      });
-      sql.exec("DELETE FROM cf_agents_task_steps WHERE run_id = ?", run.run_id);
-      sql.exec("DELETE FROM cf_agents_task_runs WHERE run_id = ?", run.run_id);
-    }
+    downgradeToStore(this.ctx, this.lifecycle, this.harness, abandonReason);
   }
 
   /** The harness's tables that are left, by name. */
@@ -1037,6 +1084,30 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   gateRuns(): number {
     return this.ctx.storage.kv.get<number>(GATE_RUNS_KEY) ?? 0;
+  }
+
+  /** Each tool hook call, as `before|after <tool>:<attempt>`. */
+  toolAttempts(): string[] {
+    return this.ctx.storage.kv.get<string[]>(TOOL_ATTEMPTS_KEY) ?? [];
+  }
+
+  /** Make `afterToolCall` throw for `toolName`. */
+  throwAfterToolCall(toolName: string): void {
+    this.ctx.storage.kv.put(THROW_AFTER_KEY, toolName);
+  }
+
+  multiplyRuns(): number {
+    return this.ctx.storage.kv.get<number>(MULTIPLY_RUNS_KEY) ?? 0;
+  }
+
+  /** The partial reply's id `onRecovery` last saw, or null for none. */
+  recoveryPartial(): string | null | undefined {
+    return this.ctx.storage.kv.get<string | null>(RECOVERY_PARTIAL_KEY);
+  }
+
+  /** Treat a model stream silent this long as stalled. */
+  setStallTimeout(ms: number): void {
+    this.#recovery.stallTimeoutMs = ms;
   }
 
   dangerousRuns(): number {
@@ -1228,11 +1299,14 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   /** Resolve once a model call's chunks are durable in its stream. */
-  async streamed(): Promise<void> {
+  /** Wait until a stream holds a chunk, or one whose JSON has `text`. */
+  async streamed(text?: string): Promise<void> {
     for (let i = 0; i < 300; i++) {
       const rows = this.ctx.storage.sql
         .exec<{ n: number }>(
-          `SELECT COUNT(*) AS n FROM cf_agents_stream_blocks${HARNESS_SUFFIX}`
+          `SELECT COUNT(*) AS n FROM cf_agents_stream_blocks${HARNESS_SUFFIX}
+           WHERE instr(body, ?) > 0`,
+          text ?? ""
         )
         .one();
       if (rows.n > 0) return;
@@ -1658,6 +1732,37 @@ export class ThinkHarnessFacetChild extends Agent<Cloudflare.Env> {
     });
   }
 
+  /** Rewrite the open runs as the released version's store had them. */
+  downgradeToStore(): void {
+    // The sub-agent's harness keeps its runs on a Tasks of its own: the
+    // runs table that holds them names it.
+    const sql = this.ctx.storage.sql;
+    const table = sql
+      .exec<{ name: string }>(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name LIKE 'cf_agents_task_runs%'`
+      )
+      .toArray()
+      .map((row) => row.name)
+      .find(
+        (name) =>
+          sql
+            .exec<{ n: number }>(
+              `SELECT COUNT(*) AS n FROM ${name}
+               WHERE definition = '__cf_think_harness_operation'`
+            )
+            .one().n > 0
+      );
+    if (!table) throw new Error("The harness has no open run");
+    downgradeToStore(
+      this.ctx,
+      this.lifecycle,
+      this.harness,
+      null,
+      table.slice("cf_agents_task_runs".length)
+    );
+  }
+
   /** The harness store's tables left here, with their row counts. */
   storeTables(): Record<string, number> {
     const sql = this.ctx.storage.sql;
@@ -1713,6 +1818,10 @@ export class ThinkHarnessFacetRoot extends Agent<Cloudflare.Env> {
     await (await this.#child()).seedReleasedStore();
   }
 
+  async childDowngradeToStore(): Promise<void> {
+    await (await this.#child()).downgradeToStore();
+  }
+
   async childStoreTables(): Promise<Record<string, number>> {
     return (await this.#child()).storeTables();
   }
@@ -1722,6 +1831,99 @@ export class ThinkHarnessFacetRoot extends Agent<Cloudflare.Env> {
   }
 }
 
+/**
+ * Rewrite a harness's open runs as the released version's store recorded
+ * them, as `ThinkHarnessTestObject.downgradeToStore` describes.
+ */
+function downgradeToStore(
+  ctx: DurableObjectState,
+  lifecycle: Parameters<typeof forgetSchemaVersion>[0],
+  harness: ThinkHarness,
+  abandonReason: string | null,
+  /** The suffix of the Tasks tables the harness's runs are in. */
+  tasks = ""
+): void {
+  // The released version kept no schema version for the harness.
+  forgetSchemaVersion(lifecycle, harness.capabilityId);
+  const sql = ctx.storage.sql;
+  const store = openHarnessStore(ctx.storage, {
+    prefix: SHARED_STORE_PREFIX
+  });
+  const runs = sql
+    .exec<{
+      run_id: string;
+      input: string;
+      status: string;
+      checkpoint: string | null;
+    }>(
+      `SELECT run_id, input, status, checkpoint FROM cf_agents_task_runs${tasks}
+       WHERE definition = '__cf_think_harness_operation'
+         AND status IN ('pending', 'running')
+       ORDER BY seq`
+    )
+    .toArray();
+  for (const run of runs) {
+    // SAFETY: the harness names its runs [session, operation id] and
+    // stores { input, source } with a `turn` checkpoint.
+    const [session, id] = JSON.parse(run.run_id) as [string, string];
+    const { input, source } = JSON.parse(run.input) as {
+      input: JsonValue;
+      source: string;
+    };
+    const checkpoint = run.checkpoint
+      ? (JSON.parse(run.checkpoint) as Record<string, JsonValue>)
+      : {};
+    // A placed run's progress as the released version recorded it: the
+    // question, and the stream its model call was writing.
+    const placed = checkpoint["think:placed"] as
+      | { questionId?: string }
+      | undefined;
+    const turn =
+      (checkpoint.turn as Record<string, JsonValue> | undefined) ??
+      (placed && {
+        parentId: placed.questionId ?? null,
+        messageId: null,
+        streamId: `chat-turn:${run.run_id}`,
+        pendingModel: true,
+        steps: 0,
+        interruptions: 0,
+        overflowRetries: 0
+      });
+    store.createSession({ id: session });
+    store.enqueue({
+      session,
+      id,
+      input,
+      meta: { source, ...turn, abandonReason }
+    });
+    if (run.status === "running") store.start(session, id);
+    const started = sql
+      .exec<{ step_name: string }>(
+        `SELECT step_name FROM cf_agents_task_steps${tasks}
+         WHERE run_id = ? AND state = 'running'`,
+        run.run_id
+      )
+      .toArray()
+      .map((step) => step.step_name.split(":").slice(2).join(":"));
+    store.setSessionState(session, {
+      clientTools: [],
+      toolCalls: Object.fromEntries(
+        started.map((toolCallId) => [
+          toolCallId,
+          { operationId: id, attempts: 1 }
+        ])
+      )
+    });
+    sql.exec(
+      `DELETE FROM cf_agents_task_steps${tasks} WHERE run_id = ?`,
+      run.run_id
+    );
+    sql.exec(
+      `DELETE FROM cf_agents_task_runs${tasks} WHERE run_id = ?`,
+      run.run_id
+    );
+  }
+}
 /** The table suffix of the instances the harness composes. */
 const HARNESS_SUFFIX = "__c_think_2dharness";
 

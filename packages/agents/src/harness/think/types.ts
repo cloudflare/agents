@@ -226,17 +226,10 @@ export type RecoverableTool = { readonly recovery?: ToolRecovery };
 /** Recovery policy. @experimental */
 export type ThinkRecoveryOptions = {
   /**
-   * Interruptions one operation survives without progress before it is
-   * settled as `unanswered` with reason `"interrupted"`. A finished model
-   * call or tool call is progress and resets the count. Default 10.
+   * Interruptions one operation survives before it is settled as
+   * `unanswered` with reason `"interrupted"`. Default 10.
    */
   readonly maxAttempts?: number;
-  /**
-   * Delay before the second recovery attempt, doubled for each after it,
-   * up to a minute, and spread over its upper half so recoveries do not
-   * line up. The first is immediate. Default 1000.
-   */
-  readonly backoffMs?: number;
   /**
    * A model stream that sends nothing for this long is treated as
    * interrupted and recovered. `0` turns the watchdog off. Default 120000.

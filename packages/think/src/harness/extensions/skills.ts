@@ -12,7 +12,10 @@ import {
   SKILLS_CONTEXT_LABEL,
   type ThinkSkills
 } from "../../skills-runtime";
-import type { ThinkExtension } from "./workspace";
+import { setTool, type ThinkExtension } from "./workspace";
+
+/** The skills tools that only read. */
+const SKILL_READS = new Set(["activate_skill", "read_skill_resource"]);
 
 /**
  * List the catalog again on each build and offer its tools and section;
@@ -30,7 +33,7 @@ export function skillsExtension(
     ctx.tools.transform(async (tools) => {
       await skills.refresh();
       for (const [name, tool] of Object.entries(skills.tools(scriptRunner))) {
-        tools.set(name, tool);
+        setTool(tools, name, tool, SKILL_READS);
       }
     });
     ctx.prompt.transform((prompt) => {
