@@ -85,11 +85,14 @@ export function readClassOnly(file: string): {
  *
  * @param inventory - Ids of every test the suite has.
  * @param passed - Ids of the tests that passed on the harness-backed Think.
+ * @param withoutThink - Ids of the tests that pass when Think cannot be
+ *   constructed: they do not exercise it, so none can be a successor.
  */
 export function checkClassOnly(
   entries: readonly ClassOnlyEntry[],
   inventory: ReadonlySet<string>,
-  passed: ReadonlySet<string>
+  passed: ReadonlySet<string>,
+  withoutThink: ReadonlySet<string>
 ): string[] {
   const problems: string[] = [];
   const listed = new Set(
@@ -113,6 +116,10 @@ export function checkClassOnly(
     } else if (!passed.has(successor)) {
       problems.push(
         `the successor of ${own} does not pass on the harness-backed Think: ${successor}`
+      );
+    } else if (withoutThink.has(successor)) {
+      problems.push(
+        `the successor of ${own} passes without Think, so it does not exercise it: ${successor}`
       );
     }
   }

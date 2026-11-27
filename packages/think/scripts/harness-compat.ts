@@ -131,7 +131,8 @@ const classOnlyProblems = [
   ...checkClassOnly(
     classOnly.entries,
     new Set(inventory.map((test) => id(test.file, test.name))),
-    passedIds
+    passedIds,
+    withoutThink
   )
 ];
 const files: Scoreboard["files"] = {};
