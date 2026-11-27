@@ -19,7 +19,9 @@
  * that installs it, so a harness without `@cloudflare/codemode` never
  * loads it.
  */
+import { DurableObject } from "cloudflare:workers";
 import {
+  DynamicWorkerExecutor,
   generateTypesFromJsonSchema,
   normalizeCode,
   sanitizeToolName,
@@ -183,6 +185,56 @@ function report(
   lines.push(`Calls: ${calls.length > 0 ? calls.join(", ") : "none"}`);
   if (ran.logs && ran.logs.length > 0) lines.push("Logs:", ...ran.logs);
   return truncateResult(lines.join("\n"));
+}
+
+/**
+ * The sandbox object: a Durable Object that runs scripts in a dynamic
+ * Worker it loads itself, so a script busy computing holds this object,
+ * not the agent. The app exports the class from its Worker entry and
+ * declares it (a binding and a migration); it keeps nothing.
+ *
+ * @internal
+ */
+export class CodemodeSandbox extends DurableObject<{ LOADER: WorkerLoader }> {
+  /** Run a script; its functions are stubs back to the caller. */
+  run(
+    code: string,
+    providers: ResolvedProvider[],
+    timeout?: number
+  ): Promise<ExecuteResult> {
+    return new DynamicWorkerExecutor({
+      loader: this.env.LOADER,
+      ...(timeout !== undefined && { timeout })
+    }).execute(code, providers);
+  }
+}
+
+/**
+ * An executor that runs each script in the agent's sandbox object, one
+ * per agent (by `name`), instead of in this isolate.
+ *
+ * @internal
+ */
+export function sandboxExecutor(
+  sandbox: DurableObjectNamespace<CodemodeSandbox>,
+  name: string,
+  options: { readonly timeout?: number } = {}
+): Executor {
+  return {
+    async execute(code, providers) {
+      if (!Array.isArray(providers)) {
+        throw new Error("The sandbox executor takes resolved providers");
+      }
+      const stub = sandbox.get(sandbox.idFromName(name));
+      // The providers' functions cross as stubs, so the sandbox's calls
+      // come back here, to the harness.
+      return (await stub.run(
+        code,
+        providers,
+        options.timeout
+      )) as ExecuteResult;
+    }
+  };
 }
 
 /** @internal */

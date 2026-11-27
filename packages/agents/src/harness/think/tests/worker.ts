@@ -19,7 +19,8 @@ import type { Session } from "../../../sessions/handle";
 import { WebSockets } from "../../../websockets/websockets";
 import { ThinkChat } from "../chat";
 import type { ToolInvoke } from "../extensions/types";
-import { codemodeExtension } from "../extensions/codemode";
+import { codemodeExtension, sandboxExecutor } from "../extensions/codemode";
+export { CodemodeSandbox } from "../extensions/codemode";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import {
   classifyContextOverflow,
@@ -49,6 +50,7 @@ const BEFORE_TURN_CALLS_KEY = "test:before-turn:calls";
 const OPERATION_CHUNKS_KEY = "test:before-turn:operation-chunks";
 const SYSTEM_KEY = "test:system";
 const CODE_COUNT_KEY = "test:code-count";
+const SANDBOXED_KEY = "test:sandboxed";
 const TRIPLED_KEY = "test:tripled";
 const COMPOSE_ABORTED_KEY = "test:compose-aborted";
 const NOTE_IN_BEFORE_TURN_KEY = "test:note-in-before-turn";
@@ -2365,9 +2367,20 @@ export class ThinkCodemodeObject extends DurableObject<Cloudflare.Env> {
       {
         name: "codemode",
         extension: codemodeExtension({
-          executor: new DynamicWorkerExecutor({
-            loader: (this.env as unknown as { LOADER: WorkerLoader }).LOADER
-          }),
+          // In this isolate, or in the sandbox object once a test says so.
+          executor: {
+            execute: (code, providers) =>
+              (this.ctx.storage.kv.get<boolean>(SANDBOXED_KEY)
+                ? sandboxExecutor(
+                    this.env.CODEMODE_SANDBOX,
+                    this.ctx.id.toString()
+                  )
+                : new DynamicWorkerExecutor({
+                    loader: (this.env as unknown as { LOADER: WorkerLoader })
+                      .LOADER
+                  })
+              ).execute(code, providers)
+          },
           direct: ["ask"]
         }),
         after: true
@@ -2421,6 +2434,10 @@ export class ThinkCodemodeObject extends DurableObject<Cloudflare.Env> {
 
   counted(): number {
     return this.ctx.storage.kv.get<number>(CODE_COUNT_KEY) ?? 0;
+  }
+
+  useSandbox(): void {
+    this.ctx.storage.kv.put(SANDBOXED_KEY, true);
   }
 
   async waitStarted(runs: number): Promise<void> {

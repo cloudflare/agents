@@ -39,6 +39,19 @@ describe("codemode as an extension", () => {
     expect(reply).toContain("Calls: tools.multiply");
   });
 
+  it("runs a script in the sandbox object the same way", async () => {
+    const stub = fresh();
+    await stub.useSandbox();
+    const reply =
+      text(
+        await stub.prompt(
+          "async () => (await tools.multiply({ value: 2 })) + 1"
+        )
+      ) ?? "";
+    expect(reply).toContain("Result: 7");
+    expect(reply).toContain("Calls: tools.multiply");
+  });
+
   it("finds and describes functions from the script", async () => {
     const stub = fresh();
     const reply =

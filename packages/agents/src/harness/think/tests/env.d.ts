@@ -17,5 +17,8 @@ declare namespace Cloudflare {
     THINK_CODEMODE: DurableObjectNamespace<
       import("./worker").ThinkCodemodeObject
     >;
+    CODEMODE_SANDBOX: DurableObjectNamespace<
+      import("./worker").CodemodeSandbox
+    >;
   }
 }
