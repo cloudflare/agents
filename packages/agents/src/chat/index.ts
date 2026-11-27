@@ -602,7 +602,6 @@ export {
   continueRequestsOf,
   type ChatDeps,
   type ChatHost,
-  type ChatHooks,
   type ChatModelCall,
   type ChatTurnInput,
   type ChatTurnResult
