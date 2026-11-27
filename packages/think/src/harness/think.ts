@@ -302,6 +302,11 @@ export class Think<
    * one per running operation, removed when it ends.
    */
   readonly #openSteps = new Map<string, OpenStep>();
+  /**
+   * The input the model gave each running tool call, by call id, from
+   * `beforeToolCall` to `afterToolCall`, which removes it.
+   */
+  readonly #modelInputs = new Map<string, unknown>();
   /** Builds string models through one cached default provider, as Think. */
   readonly #models = new ThinkModelResolver({
     binding: () => this.getAIBinding(),
@@ -429,10 +434,14 @@ export class Think<
               ? { output: result.output }
               : { error: result.errorText })
           });
+          const modelInput = this.#modelInputs.has(result.toolCallId)
+            ? this.#modelInputs.get(result.toolCallId)
+            : result.input;
+          this.#modelInputs.delete(result.toolCallId);
           return this.afterToolCall({
             toolName: result.toolName,
             toolCallId: result.toolCallId,
-            input: result.input,
+            input: modelInput,
             stepNumber: 0,
             messages: [],
             requestId: result.operationId,
@@ -1568,20 +1577,32 @@ export class Think<
     readonly toolName: string;
     readonly input: unknown;
   }): Promise<ThinkToolCallDecision | void> {
-    const decision = await this.beforeToolCall({
-      toolName: call.toolName,
-      toolCallId: call.toolCallId,
-      input: call.input,
-      stepNumber: 0,
-      messages: [],
-      requestId: call.operationId
-    } as unknown as ToolCallContext);
+    // `afterToolCall` sees the input the model gave, as in Think, even when
+    // the call runs with one `beforeToolCall` substituted.
+    this.#modelInputs.set(call.toolCallId, call.input);
+    let decision: ToolCallDecision | void;
+    try {
+      decision = await this.beforeToolCall({
+        toolName: call.toolName,
+        toolCallId: call.toolCallId,
+        input: call.input,
+        stepNumber: 0,
+        messages: [],
+        requestId: call.operationId
+      } as unknown as ToolCallContext);
+    } catch (error) {
+      // As a throwing `execute`: the call settles as a tool error.
+      return { action: "block", reason: errorText(error) };
+    }
     if (!decision) return;
     switch (decision.action) {
       case "block":
+        // As in Think, a blocked call answers the model with the reason.
         return {
-          action: "block",
-          reason: decision.reason ?? "Blocked by beforeToolCall"
+          action: "substitute",
+          output:
+            decision.reason ??
+            `Tool "${call.toolName}" was blocked by beforeToolCall.`
         };
       case "substitute":
         return { action: "substitute", output: decision.output };
