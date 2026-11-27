@@ -1,12 +1,10 @@
 import { execFileSync, execSync } from "node:child_process";
-import * as fs from "node:fs";
-import fg from "fast-glob";
 
 execSync("pnpm exec tsx ./.github/resolve-workspace-versions.ts", {
   stdio: "inherit"
 });
 
-const tag = await maintenancePublishTag(process.env.GITHUB_REF_NAME ?? "");
+const tag = maintenancePublishTag(process.env.GITHUB_REF_NAME ?? "");
 if (tag !== undefined) {
   console.log(`Publishing under the "${tag}" dist-tag, not "latest".`);
 }
@@ -25,21 +23,10 @@ execSync(`pnpm exec changeset publish${tag ? ` --tag ${tag}` : ""}`, {
  * newer than that package's `latest`; otherwise it publishes under
  * `release-<line>` (`npm install agents@release-0.34`).
  */
-async function maintenancePublishTag(
-  refName: string
-): Promise<string | undefined> {
+function maintenancePublishTag(refName: string): string | undefined {
   if (!refName.startsWith("release/")) return undefined;
   const fallback = `release-${refName.slice("release/".length).replaceAll("/", "-")}`;
-  for (const file of await fg.glob("./packages/*/package.json")) {
-    const {
-      name,
-      version,
-      private: isPrivate
-    } = JSON.parse(fs.readFileSync(file, "utf8")) as {
-      name: string;
-      version: string;
-      private?: boolean;
-    };
+  for (const { name, version, private: isPrivate } of workspacePackages()) {
     if (isPrivate) continue;
     const published = npmView(`${name}@${version}`, "version");
     // Already on npm, so Changesets skips it.
@@ -51,6 +38,23 @@ async function maintenancePublishTag(
     }
   }
   return undefined;
+}
+
+/**
+ * Every package in the pnpm workspace, the same set Changesets publishes from
+ * (`packages/*`, `voice-providers/*`, ...).
+ */
+function workspacePackages(): {
+  name: string;
+  version: string;
+  private?: boolean;
+}[] {
+  return JSON.parse(
+    execFileSync("pnpm", ["-r", "ls", "--depth", "-1", "--json"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "inherit"]
+    })
+  );
 }
 
 /**
