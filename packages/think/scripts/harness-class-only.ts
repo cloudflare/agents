@@ -6,19 +6,39 @@
  * method, a private timing seam. It is not counted in the score, it has a
  * successor that asserts the same behaviour through the public API on both
  * configs, and it is deleted with the class code.
+ *
+ * A mechanics-only test asserts nothing an app can observe (an id format, a
+ * skipped write, how a pass keeps its own books), so it has no successor:
+ * its row says what private thing it pins, and the score counts it apart.
  */
 import { existsSync, readFileSync } from "node:fs";
 
-/** One class-only test and the test that succeeds it. */
-export type ClassOnlyEntry = {
+/** A class-only test's file and full name. */
+type ClassOnlyTest = {
   /** The test's file, relative to `src/tests`. */
   file: string;
   /** The test's full name: "describe > … > name". */
   test: string;
   /** The private row, method or seam the test reaches. */
   reason: string;
-  successor: { file: string; test: string };
 };
+
+/**
+ * One class-only test, and either the test that succeeds it or, for a test
+ * that asserts nothing an app can observe, `mechanicsOnly`.
+ */
+export type ClassOnlyEntry = ClassOnlyTest &
+  (
+    | { successor: { file: string; test: string }; mechanicsOnly?: never }
+    | { mechanicsOnly: true; successor?: never }
+  );
+
+/** Whether an entry is mechanics-only: class-only with no successor. */
+export function isMechanicsOnly(
+  entry: ClassOnlyEntry
+): entry is ClassOnlyTest & { mechanicsOnly: true } {
+  return entry.mechanicsOnly === true;
+}
 
 /** A test's id in the score: its file and full name. */
 export function testId(file: string, test: string): string {
@@ -51,10 +71,14 @@ export function readClassOnly(file: string): {
   const entries: ClassOnlyEntry[] = [];
   const problems: string[] = [];
   parsed.forEach((item: unknown, index) => {
-    const entry = (item ?? {}) as Partial<ClassOnlyEntry>;
-    const successor = (entry.successor ?? {}) as Partial<
-      ClassOnlyEntry["successor"]
-    >;
+    const entry = (item ?? {}) as {
+      file?: unknown;
+      test?: unknown;
+      reason?: unknown;
+      successor?: { file?: unknown; test?: unknown };
+      mechanicsOnly?: unknown;
+    };
+    const successor = entry.successor ?? {};
     const label = isText(entry.test) ? `"${entry.test}"` : `entry ${index + 1}`;
     if (!isText(entry.file) || !isText(entry.test)) {
       problems.push(`${label}: needs a file and a test`);
@@ -66,8 +90,25 @@ export function readClassOnly(file: string): {
       );
       return;
     }
+    if (entry.mechanicsOnly !== undefined) {
+      if (entry.mechanicsOnly !== true || entry.successor !== undefined) {
+        problems.push(
+          `${label}: a mechanics-only entry has mechanicsOnly: true and no successor`
+        );
+        return;
+      }
+      entries.push({
+        file: entry.file,
+        test: entry.test,
+        reason: entry.reason,
+        mechanicsOnly: true
+      });
+      return;
+    }
     if (!isText(successor.file) || !isText(successor.test)) {
-      problems.push(`${label}: needs a successor (file and test)`);
+      problems.push(
+        `${label}: needs a successor (file and test), or mechanicsOnly: true`
+      );
       return;
     }
     entries.push({
@@ -89,6 +130,7 @@ export function successorCounts(
 ): Map<string, number> {
   const counts = new Map<string, number>();
   for (const entry of entries) {
+    if (isMechanicsOnly(entry)) continue;
     const successor = testId(entry.successor.file, entry.successor.test);
     counts.set(successor, (counts.get(successor) ?? 0) + 1);
   }
@@ -100,7 +142,8 @@ export function successorCounts(
  * must not pass on the harness-backed Think (one that passes is not
  * class-only). Its successor must exist, not be class-only itself, pass on
  * the harness-backed Think, exercise Think, and stand for at most
- * {@link MAX_ENTRIES_PER_SUCCESSOR} listed tests.
+ * {@link MAX_ENTRIES_PER_SUCCESSOR} listed tests. A mechanics-only entry has
+ * no successor to check.
  *
  * @param inventory - Ids of every test the suite has (the ordinary
  *   suite's list).
@@ -123,7 +166,6 @@ export function checkClassOnly(
   const seen = new Set<string>();
   for (const entry of entries) {
     const own = testId(entry.file, entry.test);
-    const successor = testId(entry.successor.file, entry.successor.test);
     if (seen.has(own)) problems.push(`listed twice: ${own}`);
     seen.add(own);
     if (!inventory.has(own)) {
@@ -134,6 +176,8 @@ export function checkClassOnly(
         `passes on the harness-backed Think, so it is not class-only (delete its row): ${own}`
       );
     }
+    if (isMechanicsOnly(entry)) continue;
+    const successor = testId(entry.successor.file, entry.successor.test);
     if (listed.has(successor)) {
       problems.push(
         `the successor of ${own} is class-only itself: ${successor}`
@@ -165,9 +209,10 @@ export function classOnlyTable(entries: readonly ClassOnlyEntry[]): string {
   if (entries.length === 0) return "";
   const cell = (text: string) => text.replaceAll("|", "\\|");
   const counts = successorCounts(entries);
-  const rows = entries.map(
-    (entry) =>
-      `| \`${entry.file}\`: ${cell(entry.test)} | ${cell(entry.reason)} | \`${entry.successor.file}\`: ${cell(entry.successor.test)} | ${counts.get(testId(entry.successor.file, entry.successor.test))} |`
+  const rows = entries.map((entry) =>
+    isMechanicsOnly(entry)
+      ? `| \`${entry.file}\`: ${cell(entry.test)} | ${cell(entry.reason)} | none: mechanics only | |`
+      : `| \`${entry.file}\`: ${cell(entry.test)} | ${cell(entry.reason)} | \`${entry.successor.file}\`: ${cell(entry.successor.test)} | ${counts.get(testId(entry.successor.file, entry.successor.test))} |`
   );
   return `
 ## Class-only tests
@@ -177,6 +222,9 @@ class, so it is not counted above. Its successor asserts the same behaviour
 through the public API: it passes here, and on the class in the ordinary
 suite (\`pnpm test:workers\`, which CI runs). The list is
 \`harness-class-only.json\`; a class-only test is deleted with the class.
+
+A mechanics-only test asserts nothing an app can observe, so it has no
+successor; its row says what private thing it pins.
 
 The last column is how many class-only tests the successor stands for, at
 most ${MAX_ENTRIES_PER_SUCCESSOR}.

@@ -17,6 +17,7 @@ import path from "node:path";
 import {
   checkClassOnly,
   classOnlyTable,
+  isMechanicsOnly,
   readClassOnly,
   testId
 } from "./harness-class-only";
@@ -39,6 +40,8 @@ type Scoreboard = {
   needThinkPassed: number;
   /** Tests left out of both: class-only, each with a successor. */
   classOnly: number;
+  /** Of those, the mechanics-only ones, which have no successor. */
+  mechanicsOnly: number;
   files: Record<string, { total: number; passed: number }>;
   passing: string[];
 };
@@ -123,6 +126,7 @@ const withoutThink = passedIn(absentFile);
 // 3. Score against the inventory. A class-only test is in the per-file
 // counts and in `passing` like any other, and out of the headline.
 const classOnly = readClassOnly(classOnlyJson);
+const mechanicsOnly = classOnly.entries.filter(isMechanicsOnly).length;
 const classOnlyIds = new Set(
   classOnly.entries.map((entry) => testId(entry.file, entry.test))
 );
@@ -159,6 +163,7 @@ const scoreboard: Scoreboard = {
   needThink,
   needThinkPassed,
   classOnly: classOnlyIds.size,
+  mechanicsOnly,
   files: Object.fromEntries(
     Object.entries(files).sort(([a], [b]) => a.localeCompare(b))
   ),
@@ -167,7 +172,10 @@ const scoreboard: Scoreboard = {
 
 const percent = (passed: number, total: number) =>
   total === 0 ? "0%" : `${Math.floor((passed / total) * 100)}%`;
-const headline = `${needThinkPassed} of ${needThink} (${classOnlyIds.size} class-only, each with a successor)`;
+const headline =
+  mechanicsOnly === 0
+    ? `${needThinkPassed} of ${needThink} (${classOnlyIds.size} class-only, each with a successor)`
+    : `${needThinkPassed} of ${needThink} (${classOnlyIds.size} class-only, ${mechanicsOnly} of them mechanics-only, the rest each with a successor)`;
 console.log(
   `\nThink on ThinkHarness: ${headline} tests that construct Think pass (${percent(needThinkPassed, needThink)}); ${scoreboard.passed} of all ${scoreboard.total}.`
 );
