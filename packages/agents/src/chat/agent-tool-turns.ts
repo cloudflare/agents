@@ -9,7 +9,7 @@
  * `@cloudflare/think`, not a public API.
  */
 
-import type { UIMessage } from "ai";
+import type { UIMessage, UIMessageChunk } from "ai";
 import type {
   AgentToolMilestone,
   AgentToolProgressSnapshot,
@@ -165,16 +165,106 @@ export function inspectAgentToolTurn(
 }
 
 /**
- * Run `runId`'s stored chunks after `afterSequence`, numbered by their place
- * in the run's one stream.
+ * The chunks that build `message` again: a start, each part as the chunks
+ * a model call sends for it (settled), and a finish. What a parent replays
+ * of a turn that settled, whose stream the cutover dropped: the stored
+ * reply is its record.
+ */
+export function chunksOfMessage(message: UIMessage): UIMessageChunk[] {
+  const chunks: UIMessageChunk[] = [{ type: "start", messageId: message.id }];
+  message.parts.forEach((part, index) => {
+    const id = `${message.id}-${index}`;
+    if (part.type === "step-start") {
+      chunks.push({ type: "start-step" });
+    } else if (part.type === "text") {
+      chunks.push(
+        { type: "text-start", id },
+        { type: "text-delta", id, delta: part.text },
+        { type: "text-end", id }
+      );
+    } else if (part.type === "reasoning") {
+      chunks.push(
+        { type: "reasoning-start", id },
+        { type: "reasoning-delta", id, delta: part.text },
+        { type: "reasoning-end", id }
+      );
+    } else if (part.type === "dynamic-tool" || part.type.startsWith("tool-")) {
+      const tool = part as {
+        type: string;
+        toolName?: string;
+        toolCallId: string;
+        state: string;
+        input?: unknown;
+        output?: unknown;
+        errorText?: string;
+      };
+      const toolName =
+        tool.type === "dynamic-tool"
+          ? (tool.toolName ?? "")
+          : tool.type.slice("tool-".length);
+      chunks.push({
+        type: "tool-input-available",
+        toolCallId: tool.toolCallId,
+        toolName,
+        input: tool.input,
+        ...(tool.type === "dynamic-tool" ? { dynamic: true } : {})
+      } as UIMessageChunk);
+      if (tool.state === "output-available") {
+        chunks.push({
+          type: "tool-output-available",
+          toolCallId: tool.toolCallId,
+          output: tool.output
+        } as UIMessageChunk);
+      } else if (tool.state === "output-error") {
+        chunks.push({
+          type: "tool-output-error",
+          toolCallId: tool.toolCallId,
+          errorText: tool.errorText ?? ""
+        } as UIMessageChunk);
+      }
+    } else if (part.type.startsWith("data-")) {
+      chunks.push(part as UIMessageChunk);
+    } else if (part.type === "file") {
+      chunks.push({
+        type: "file",
+        url: part.url,
+        mediaType: part.mediaType
+      });
+    }
+  });
+  chunks.push({ type: "finish" });
+  return chunks;
+}
+
+/**
+ * Run `runId`'s chunks after `afterSequence`. While the run is live they
+ * are its stream's, numbered by their place in it. Once it settled the
+ * cutover dropped the stream: a replay from the start gets the stored
+ * reply's chunks, numbered from 0, and a reader that already had a position
+ * in the stream gets none.
  */
 export async function agentToolTurnChunks(
   deps: ChatDeps,
   runId: string,
   options?: { afterSequence?: number }
 ): Promise<AgentToolStoredChunk[]> {
-  const streamId = chatTurnStreamId(agentToolTurnId(runId));
-  if ((await deps.streams.status(streamId)) === null) return [];
+  const id = agentToolTurnId(runId);
+  const streamId = chatTurnStreamId(id);
+  if ((await deps.streams.status(streamId)) === null) {
+    const result = deps.tasks.peek(id)?.result as ChatTurnResult | undefined;
+    if (!result?.messageId) return [];
+    const input = deps.tasks.inputOf<{ session?: string }>(id);
+    const message = await deps.sessions
+      .session(input?.session ?? deps.session ?? "")
+      .getMessage(result.messageId);
+    if (!message) return [];
+    // A reader with a position read the live stream, whose numbering this
+    // is not: it saw the reply already. A replay from the start gets it.
+    if ((options?.afterSequence ?? -1) >= 0) return [];
+    return chunksOfMessage(message as unknown as UIMessage).map(
+      (chunk, sequence) => ({ sequence, body: JSON.stringify(chunk) })
+    );
+  }
   // What this isolate buffered is written first.
   deps.streams.__DO_NOT_USE_WILL_BREAK__sync().flush(streamId);
   const from = (options?.afterSequence ?? -1) + 1;

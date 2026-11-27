@@ -3,10 +3,13 @@ import { describe, expect, it } from "vitest";
 import type { ChatTurnHostObject } from "../capabilities/chat-turn";
 import type { ChatHost, ChatModelCall } from "../../chat/chat-host";
 import { submitTurn } from "../../chat/chat-functions";
+import { applyChunkToParts } from "../../chat/message-builder";
+import type { UIMessage } from "ai";
 import {
   agentToolTurnChunks,
   agentToolTurnId,
   agentToolTurnOf,
+  chunksOfMessage,
   cancelAgentToolTurn,
   inspectAgentToolTurn,
   recordAgentToolProgress,
@@ -26,6 +29,38 @@ const collect = (messageId: string | undefined) => ({
 });
 
 describe("agent-tool runs as chat turns", () => {
+  it("turns a stored reply into chunks that build the same parts", () => {
+    const message = {
+      id: "m1",
+      role: "assistant",
+      parts: [
+        { type: "step-start" },
+        { type: "reasoning", text: "thinking", state: "done" },
+        { type: "text", text: "Looking.", state: "done" },
+        {
+          type: "tool-search",
+          toolCallId: "c1",
+          state: "output-available",
+          input: { q: "x" },
+          output: { hits: 2 }
+        },
+        {
+          type: "tool-fetch",
+          toolCallId: "c2",
+          state: "output-error",
+          input: { url: "u" },
+          errorText: "404"
+        },
+        { type: "text", text: "Done.", state: "done" }
+      ]
+    } as unknown as UIMessage;
+    const parts: UIMessage["parts"] = [];
+    for (const chunk of chunksOfMessage(message)) {
+      applyChunkToParts(parts, chunk as never);
+    }
+    expect(parts).toMatchObject(message.parts);
+  });
+
   it("runs under its own turn id and is read off that run when it settles", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
@@ -49,6 +84,37 @@ describe("agent-tool runs as chat turns", () => {
         output: "reply-1",
         summary: "reply reply-1"
       });
+    });
+  });
+
+  it("replays a settled turn from its stored reply", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      await startAgentToolTurn(
+        instance.deps,
+        instance.lane,
+        "run-done",
+        input,
+        {
+          startMessageId: null
+        }
+      );
+      await instance.tasks.wait(agentToolTurnId("run-done"));
+      const chunks = await agentToolTurnChunks(instance.deps, "run-done");
+      expect(chunks.map((chunk) => JSON.parse(chunk.body))).toEqual([
+        { type: "start", messageId: "reply-1" },
+        { type: "text-start", id: "reply-1-0" },
+        { type: "text-delta", id: "reply-1-0", delta: "Hello" },
+        { type: "text-end", id: "reply-1-0" },
+        { type: "finish" }
+      ]);
+      // A reader that followed the live stream already has it.
+      expect(
+        await agentToolTurnChunks(instance.deps, "run-done", {
+          afterSequence: 3
+        })
+      ).toEqual([]);
     });
   });
 
