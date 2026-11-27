@@ -264,6 +264,10 @@
         "name": "ThinkUpgradeFrozenPromptAgent"
       },
       {
+        "class_name": "ThinkUpgradeRecoveryIncidentAgent",
+        "name": "ThinkUpgradeRecoveryIncidentAgent"
+      },
+      {
         "class_name": "ThinkMediaEvictionAutoAgent",
         "name": "ThinkMediaEvictionAutoAgent"
       },
@@ -363,6 +367,7 @@
         "ThinkUpgradeCustomStoreTestAgent",
         "ThinkUpgradeResponseHookAgent",
         "ThinkUpgradeFrozenPromptAgent",
+        "ThinkUpgradeRecoveryIncidentAgent",
         "ThinkMediaEvictionAutoAgent",
         "ThinkPointerHydrationAgent",
         "ThinkLegacySessionApiAgent",

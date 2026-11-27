@@ -75,6 +75,7 @@ export {
   ThinkUpgradeCustomStoreTestAgent,
   ThinkUpgradeResponseHookAgent,
   ThinkUpgradeFrozenPromptAgent,
+  ThinkUpgradeRecoveryIncidentAgent,
   ThinkMediaEvictionAutoAgent,
   ThinkPointerHydrationAgent,
   ThinkLegacySessionApiAgent
@@ -144,6 +145,7 @@ import type {
   ThinkUpgradeCustomStoreTestAgent,
   ThinkUpgradeResponseHookAgent,
   ThinkUpgradeFrozenPromptAgent,
+  ThinkUpgradeRecoveryIncidentAgent,
   ThinkMediaEvictionAutoAgent,
   ThinkPointerHydrationAgent,
   ThinkLegacySessionApiAgent
@@ -315,6 +317,7 @@ export type Env = {
   ThinkUpgradeCustomStoreTestAgent: DurableObjectNamespace<ThinkUpgradeCustomStoreTestAgent>;
   ThinkUpgradeResponseHookAgent: DurableObjectNamespace<ThinkUpgradeResponseHookAgent>;
   ThinkUpgradeFrozenPromptAgent: DurableObjectNamespace<ThinkUpgradeFrozenPromptAgent>;
+  ThinkUpgradeRecoveryIncidentAgent: DurableObjectNamespace<ThinkUpgradeRecoveryIncidentAgent>;
   ThinkMediaEvictionAutoAgent: DurableObjectNamespace<ThinkMediaEvictionAutoAgent>;
   ThinkPointerHydrationAgent: DurableObjectNamespace<ThinkPointerHydrationAgent>;
   ThinkLegacySessionApiAgent: DurableObjectNamespace<ThinkLegacySessionApiAgent>;
