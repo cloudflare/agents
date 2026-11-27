@@ -41,6 +41,8 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
   readonly lanedLocals: unknown[] = [];
   /** `laned` runs park on their label's gate, when it has one. */
   readonly lanedGates = new Map<string, Promise<void>>();
+  /** How many more attempts of `flakyPlatform` throw a platform failure. */
+  platformFailures = 0;
 
   readonly tasks = new Tasks({
     definitions: {
@@ -63,6 +65,17 @@ export class TaskHarnessObject extends DurableObject<Cloudflare.Env> {
         if (step.local !== undefined) this.lanedLocals.push(step.local);
         await this.lanedGates.get(input.label);
         return input.label;
+      },
+
+      /** Throws a transient platform failure while `platformFailures` lasts. */
+      flakyPlatform: async () => {
+        if (this.platformFailures > 0) {
+          this.platformFailures--;
+          throw Object.assign(new Error("storage transient"), {
+            retryable: true
+          });
+        }
+        return "ok";
       },
 
       /** Checkpoint keys JSON paths would misread, read back. */

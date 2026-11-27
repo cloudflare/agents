@@ -21,7 +21,7 @@ import type {
   LifecycleJobContext,
   LifecycleJobOutcome
 } from "../lifecycle/job-queue";
-import { isPlatformFailure } from "../retries";
+import { isDurableObjectMemoryLimitReset, isPlatformFailure } from "../retries";
 import { SqlError } from "../sql-error";
 import { SqlName } from "../sql-name";
 import { RUN_LIST_COLUMNS, TaskStore } from "./store";
@@ -168,6 +168,13 @@ const WAKE_JOB_RETRY = { maxAttempts: 1 } as const;
  * inline settle for queue liveness.
  */
 const DISPATCH_BUDGET_MS = 5_000;
+
+/**
+ * How long a run whose attempt hit a transient platform failure waits before
+ * its next attempt, in a live isolate. Matches the job driver's hold after a
+ * platform failure.
+ */
+const PLATFORM_RETRY_MS = 30_000;
 
 /**
  * Farthest a running run's wake may be while its attempt executes: the
@@ -1691,10 +1698,27 @@ export class Tasks<
     if (isPlatformFailure(thrown)) {
       // Platform-class failure (superseded isolate, memory-limit reset,
       // storage transient): not an application outcome, so the run must not
-      // settle. Unwind and rethrow — the claim backstop written at claim
-      // time is the durable wake, and the next invocation reclaims and
-      // replays the run; a queue-driven dispatch defers through the
-      // driver's platform-failure path.
+      // settle. Unwind and rethrow; a queue-driven dispatch defers through
+      // the driver's platform-failure path. A memory-limit reset gets its
+      // deadline from the breaker (`onMemoryLimit`). Any other one strips
+      // the claim and replays the run (as interrupted) after a short wait:
+      // left at its claim deadline, a live isolate would only poll it until
+      // the claim ran out.
+      if (!isDurableObjectMemoryLimitReset(thrown)) {
+        try {
+          const struck = this.#store.fencedWrite(
+            runId,
+            generation,
+            `UPDATE ${this.#tables.runs}
+             SET generation = NULL, next_at = ?, updated_at = ?
+             WHERE run_id = ? AND generation = ? AND status = 'running'`,
+            [Date.now() + PLATFORM_RETRY_MS, Date.now()]
+          );
+          if (struck) await this.#syncWake(runId);
+        } catch {
+          // Storage is failing too: the claim deadline stays the wake.
+        }
+      }
       throw thrown;
     }
 
