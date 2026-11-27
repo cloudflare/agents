@@ -29,6 +29,7 @@ type ThinkSubmissionTestStub = {
   holdChunksAfterForTest(after: number): Promise<void>;
   isChunkStreamHeldForTest(): Promise<boolean>;
   setStallTimeoutForTest(timeoutMs: number): Promise<void>;
+  failInBandAfterResetForTest(errorText: string): Promise<void>;
   abandonChunkHoldForTest(): Promise<void>;
   releaseChunksForTest(): Promise<void>;
   clearDelayedChunkResponse(): Promise<void>;
@@ -994,6 +995,30 @@ describe("Think durable submissions", () => {
       expect(text(stored[0])).toBe("interrupt me");
       expect(text(stored[2])).toBe("a newer question");
     }, 40_000);
+
+    it("ends in error with the model's own error text when its recovered reply fails", async () => {
+      const name = crypto.randomUUID();
+      const agent = await freshAgent(name);
+      await agent.setDelayedChunkResponse(["alpha ", "beta "], 200);
+      await agent.holdChunksAfterForTest(1);
+      await agent.testSubmitMessages("fails once recovered", {
+        submissionId: "sub-recovered-fails"
+      });
+      await chunkStreamHeld(agent);
+      // The next model call, the recovered one, fails in its stream.
+      await agent.failInBandAfterResetForTest("recovered in-band failure");
+
+      await agent.resetIsolateForTest().catch(() => {});
+      const restarted = await freshAgent(name);
+      await tasksIdle(restarted);
+
+      await expect(
+        restarted.inspectSubmissionForTest("sub-recovered-fails")
+      ).resolves.toMatchObject({
+        status: "error",
+        error: "recovered in-band failure"
+      });
+    }, 30_000);
 
     it("stays aborted when it is cancelled while its reply is being recovered", async () => {
       const name = crypto.randomUUID();

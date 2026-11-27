@@ -838,5 +838,14 @@
       "file": "submissions.test.ts",
       "test": "Think durable submissions > while a submission runs > a limit over several statuses takes the newest of them all"
     }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > preserves stream error text from recovered continuations",
+    "reason": "a seeded `running` row and the class's recovery continue callback called directly (`continueRecoveredChatForTest`) with a model that fails in-band",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > ends in error with the model's own error text when its recovered reply fails"
+    }
   }
 ]
