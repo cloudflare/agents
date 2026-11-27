@@ -745,5 +745,11 @@
       "file": "hydration-budget.test.ts",
       "test": "hydrationByteBudget \u2014 windowed hydration (#1710) > stores a client's tool result for a call older than the hydration window"
     }
+  },
+  {
+    "file": "hydration-budget.test.ts",
+    "test": "hydrationByteBudget \u2014 windowed hydration (#1710) > charges updates and multibyte appends against the budget in bytes",
+    "reason": "the window's own byte accounting, read from the cache's coverage flag",
+    "mechanicsOnly": true
   }
 ]
