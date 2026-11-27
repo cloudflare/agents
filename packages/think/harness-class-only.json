@@ -742,5 +742,41 @@
       "scenario": "vTransientRetryableFlag",
       "verified": "#3474@52dc26ac4"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — error handling > routes a stream-stall watchdog abort into bounded recovery instead of failing terminally (#1626)",
+    "reason": "the class's detached recovery shape: the chat() consumer told `interrupted` once (`firstInterruptedCalls`) and a continuation scheduled (`scheduledContinues`), read through the class's recovery fixtures. The outcome both configs share (the turn ends answered) is held by chat-recovery-public's stall successors ('continues a stalled turn and calls onChatRecovery with its partial', 'gives up through onExhausted with max_attempts_exceeded once the attempts are spent').",
+    "ruledOut": "a stalled stream is retried inside the run, not handed to a separately scheduled recovery the caller is told about (arch ruling (harness Q7/Q9/Q10/Q11), Q10, 27 Nov; changeset at H11)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — error handling > tells the caller of saveMessages that a stalled turn was interrupted, not stopped",
+    "reason": "saveMessages returning `{ status: 'aborted', reason: 'interrupted' }` for a stalled turn, which the class hands to a scheduled recovery; the shell finishes it in the run. The outcome both configs share (the turn ends answered) is held by chat-recovery-public's stall successors ('continues a stalled turn and calls onChatRecovery with its partial', 'gives up through onExhausted with max_attempts_exceeded once the attempts are spent').",
+    "ruledOut": "a stalled stream is retried inside the run, not handed to a separately scheduled recovery the caller is told about (arch ruling (harness Q7/Q9/Q10/Q11), Q10, 27 Nov; changeset at H11)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — error handling > retries the user turn when the stream stalls before its first chunk (#1941)",
+    "reason": "the class's detached retry shape: the consumer told `interrupted` and a retry scheduled (`scheduledRetries: 1`, `scheduledContinues: 0`), read through the class's recovery fixtures. The outcome both configs share (the turn ends answered) is held by chat-recovery-public's stall successors ('continues a stalled turn and calls onChatRecovery with its partial', 'gives up through onExhausted with max_attempts_exceeded once the attempts are spent').",
+    "ruledOut": "a stalled stream is retried inside the run, not handed to a separately scheduled recovery the caller is told about (arch ruling (harness Q7/Q9/Q10/Q11), Q10, 27 Nov; changeset at H11)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — error handling > retries a WebSocket turn that stalls before its first chunk (#1941)",
+    "reason": "the class's detached retry shape (`scheduledRetries: 1`, `scheduledContinues: 0`), with the scheduled recovery run by hand (`runScheduledRecoveryForTest`). The outcome both configs share (the turn ends answered) is held by chat-recovery-public's stall successors ('continues a stalled turn and calls onChatRecovery with its partial', 'gives up through onExhausted with max_attempts_exceeded once the attempts are spent').",
+    "ruledOut": "a stalled stream is retried inside the run, not handed to a separately scheduled recovery the caller is told about (arch ruling (harness Q7/Q9/Q10/Q11), Q10, 27 Nov; changeset at H11)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — error handling > retries a regeneration that stalls before its first chunk as a new branch (#2028)",
+    "reason": "the class's detached retry shape (`scheduledRetries: 1`, `scheduledContinues: 0`), with the scheduled recovery run by hand. The new-branch outcome after a reset is held by chat-recovery-public 'retries a regeneration a reset cut off before its first chunk as a new branch, keeping the earlier answer'.",
+    "ruledOut": "a stalled stream is retried inside the run, not handed to a separately scheduled recovery the caller is told about (arch ruling (harness Q7/Q9/Q10/Q11), Q10, 27 Nov; changeset at H11)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > a superseded continuation (leaf moved to another assistant message) skips benignly without erroring the submission",
+    "reason": "a `running` submission and a recovery incident seeded in the class's shape, and a stale continuation delivered by hand naming an old target message. The promise an app sees (a second interruption during a recovery does not error the submission) is held by submissions.test.ts 'a submission whose isolate is evicted while it runs > stays running when a reset also cuts its recovery, then completes once'.",
+    "ruledOut": "a recovery is the turn's own next attempt, claimed once; no separately delivered continuation names a target message (CHAT-MODULE.md, one run per turn across attempts; arch ruling (std theme f, 6238 re-ruled), 27 Nov)"
   }
 ]
