@@ -493,7 +493,10 @@ class InBandStreamError extends Error {}
 /** A stream that sent nothing for the stall timeout. */
 class StreamStalledError extends Error {
   constructor(readonly ms: number) {
-    super(`The model stream sent nothing for ${ms} ms.`);
+    // The released text, which apps show and match on.
+    super(
+      `Chat stream stalled: no activity for ${ms}ms; the turn was aborted by the stall watchdog.`
+    );
     this.name = "StreamStalledError";
   }
 }

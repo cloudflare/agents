@@ -909,6 +909,7 @@ describe("chatTurnDefinition", () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
       await instance.lifecycle.start();
+      const kept = new Map<string, unknown>();
       const result = await definitionOf(instance, {
         respond: async () =>
           new ReadableStream({
@@ -918,8 +919,12 @@ describe("chatTurnDefinition", () => {
             }
           }),
         options: { recovery: { stallTimeoutMs: 20 } }
-      })({ trigger: "server" }, laterAttempt("run-2", 1));
+      })({ trigger: "server" }, laterAttempt("run-2", 1, undefined, kept));
       expect(result).toBeInstanceOf(TaskSettlement);
+      // A turn given up after it is reports the stall as the release did.
+      expect(kept.get("chat:failed")).toMatchObject({
+        text: "Chat stream stalled: no activity for 20ms; the turn was aborted by the stall watchdog."
+      });
       // The turn's recovery is announced as soon as the retry is planned.
       expect(
         instance.events.some(
