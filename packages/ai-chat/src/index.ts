@@ -2183,7 +2183,27 @@ export class AIChatAgent<
    * `input-available` while it runs.
    */
   protected hasPendingInteraction(): boolean {
-    return this._turns.hasPendingInteraction();
+    // A stored reply that waits on a client: an unanswered call (an
+    // `input-available` or `approval-requested` part) in the latest message.
+    const last = this.messages.at(-1);
+    return (
+      last?.role === "assistant" &&
+      last.parts.some((part) => {
+        const state = (part as { state?: unknown }).state;
+        return state === "input-available" || state === "approval-requested";
+      })
+    );
+  }
+
+  /** The chat's turns that wait or run in its lane. */
+  protected _openChatTurns(): readonly { runId: string; status: string }[] {
+    return this.tasks.peekList({
+      definition: AIChatAgent.CHAT_TURN_DEFINITION,
+      lane: "chat",
+      status: ["pending", "running"],
+      results: false,
+      order: "oldest"
+    });
   }
 
   /**
@@ -2203,11 +2223,27 @@ export class AIChatAgent<
     timeout?: number;
     pendingInteraction?: () => boolean;
   }): Promise<boolean> {
-    return this._turns.waitUntilStable({
-      timeout: options?.timeout,
-      hasPendingInteraction:
-        options?.pendingInteraction ?? (() => this.hasPendingInteraction())
-    });
+    const deadline =
+      options?.timeout != null ? Date.now() + options.timeout : null;
+    const pending =
+      options?.pendingInteraction ?? (() => this.hasPendingInteraction());
+    for (;;) {
+      const [next] = this._openChatTurns();
+      const left = deadline === null ? undefined : deadline - Date.now();
+      if (left !== undefined && left <= 0) return false;
+      if (next) {
+        // Wait for the turn at the front of the lane, then look again.
+        await this.tasks.wait(next.runId, {
+          ...(left !== undefined && { timeoutMs: left })
+        });
+        continue;
+      }
+      if (!pending()) return true;
+      // A reply waits on a client: its answer starts the next turn.
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(left ?? 50, 50))
+      );
+    }
   }
 
   /**
