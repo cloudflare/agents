@@ -1688,11 +1688,20 @@ export class Think<
     return {};
   }
 
-  #recoveryOptions(): { maxAttempts?: number } | undefined {
+  /**
+   * As on Think: how long a model stream may send nothing before the turn
+   * is treated as interrupted. `0`, the default, turns the watchdog off.
+   */
+  chatStreamStallTimeoutMs = 0;
+
+  #recoveryOptions(): { maxAttempts?: number; stallTimeoutMs: number } {
     const config = this.chatRecovery;
-    if (config === false) return { maxAttempts: 0 };
-    if (config === true || config.maxAttempts === undefined) return undefined;
-    return { maxAttempts: config.maxAttempts };
+    const stallTimeoutMs = this.chatStreamStallTimeoutMs;
+    if (config === false) return { maxAttempts: 0, stallTimeoutMs };
+    if (config === true || config.maxAttempts === undefined) {
+      return { stallTimeoutMs };
+    }
+    return { maxAttempts: config.maxAttempts, stallTimeoutMs };
   }
 
   async #onRecovery(context: {

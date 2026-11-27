@@ -530,8 +530,17 @@ function pendingRecoveryRunIds(agent: Think, callback: string): string[] {
  */
 const turnAttemptReasons = new WeakMap<Think, string[]>();
 
+/**
+ * Whether `agent` is the harness-backed Think (`pnpm test:harness`). It has
+ * no chat recovery engine: the harness retries an interrupted turn through
+ * its own Tasks run, which no fixture holds.
+ */
+function isHarnessBackedForTest(agent: Think): boolean {
+  return !("_turnQueue" in agent);
+}
+
 function trackTurnAttemptReasons(agent: Think): void {
-  if (turnAttemptReasons.has(agent)) return;
+  if (turnAttemptReasons.has(agent) || isHarnessBackedForTest(agent)) return;
   const reasons: string[] = [];
   turnAttemptReasons.set(agent, reasons);
   const engine = (
@@ -580,7 +589,7 @@ const heldAttempts = new WeakMap<
  * can look at it.
  */
 function holdTurnAttemptsForTest(agent: Think): void {
-  if (heldAttempts.has(agent)) return;
+  if (heldAttempts.has(agent) || isHarnessBackedForTest(agent)) return;
   const held: Array<{ callback: string; delaySeconds: number }> = [];
   heldAttempts.set(agent, held);
   const engine = (
