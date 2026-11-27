@@ -280,4 +280,29 @@ describe("chat recovery, through public behaviour", () => {
       expect(first?.recoveryRootRequestId).toBe(requestId);
     }, 30_000);
   });
+  it("gives every recovery hook one incident id and stream id", async () => {
+    const agent = await freshAgent("recover-one-incident");
+    await agent.armGiveUpForTest(2);
+
+    let ids = await agent.recoveryIdsForTest();
+    const deadline = Date.now() + 20_000;
+    while (
+      !ids.hooks.some((entry) => entry.hook === "onExhausted") &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      ids = await agent.recoveryIdsForTest();
+    }
+
+    const incident = ids.onChatRecovery[0];
+    expect(incident).toBeDefined();
+    const hooks = ids.hooks.map((entry) => entry.hook);
+    expect(hooks).toContain("onExhausted");
+    expect(hooks).toContain("shouldKeepRecovering");
+    // One incident across the hooks. (Stream ids are not compared: Think
+    // opens a new stream for each attempt, the harness keeps one.)
+    for (const entry of ids.hooks) {
+      expect(entry.incidentId).toBe(incident.incidentId);
+    }
+  }, 30_000);
 });

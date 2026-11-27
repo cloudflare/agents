@@ -569,6 +569,11 @@ function trackTurnAttemptReasons(agent: Think): void {
   };
 }
 
+/** The storage key of the ids recovery hooks were given. */
+const STORED_RECOVERY_IDS = "test:recovery-ids";
+/** The storage key of the ids `onChatRecovery` was given. */
+const STORED_RECOVERY_CALLS_IDS = "test:recovery-call-ids";
+
 /** How long a held recovery attempt would wait by itself: never, in a test. */
 const HELD_ATTEMPT_SECONDS = 3600;
 
@@ -1633,6 +1638,10 @@ export class ThinkTestAgent extends Think {
   override async onChatRecovery(
     ctx: ChatRecoveryContext
   ): Promise<ChatRecoveryOptions> {
+    this.ctx.storage.kv.put(STORED_RECOVERY_CALLS_IDS, [
+      ...(this.ctx.storage.kv.get<unknown[]>(STORED_RECOVERY_CALLS_IDS) ?? []),
+      { incidentId: ctx.incidentId, streamId: ctx.streamId }
+    ]);
     this._recoveryCallsForTest.push({
       recoveryKind: ctx.recoveryKind,
       attempt: ctx.attempt,
@@ -3485,6 +3494,51 @@ export class ThinkTestAgent extends Think {
       this.chatRecovery = chatRecovery;
       this._stashInBeforeTurnForTest = stash;
     }
+  }
+
+  /**
+   * Keep a stall on every model call and a `chatRecovery` whose
+   * `shouldKeepRecovering` and `onExhausted` record their ids durably, for
+   * as long as the agent lives; then ask once. Read the ids with
+   * {@link recoveryIdsForTest}.
+   */
+  async armGiveUpForTest(maxAttempts: number): Promise<void> {
+    this._modelStallForTest = { afterParts: 2, calls: 1000 };
+    this.chatStreamStallTimeoutMs = 50;
+    const kv = this.ctx.storage.kv;
+    const record = (
+      hook: string,
+      ctx: { incidentId: string; streamId?: string }
+    ) =>
+      kv.put(STORED_RECOVERY_IDS, [
+        ...(kv.get<unknown[]>(STORED_RECOVERY_IDS) ?? []),
+        { hook, incidentId: ctx.incidentId, streamId: ctx.streamId ?? null }
+      ]);
+    this.chatRecovery = {
+      maxAttempts,
+      shouldKeepRecovering: (ctx: {
+        incidentId: string;
+        streamId?: string;
+      }) => {
+        record("shouldKeepRecovering", ctx);
+        return true;
+      },
+      onExhausted: (ctx: { incidentId: string; streamId?: string }) => {
+        record("onExhausted", ctx);
+      }
+    } as unknown as ChatRecoveryConfig;
+    await this.testChat("stall, then give up");
+  }
+
+  /** The ids each recovery hook was given, in order, across resets. */
+  async recoveryIdsForTest(): Promise<{
+    hooks: Array<{ hook: string; incidentId: string; streamId: string | null }>;
+    onChatRecovery: Array<{ incidentId: string; streamId: string }>;
+  }> {
+    return {
+      hooks: this.ctx.storage.kv.get(STORED_RECOVERY_IDS) ?? [],
+      onChatRecovery: this.ctx.storage.kv.get(STORED_RECOVERY_CALLS_IDS) ?? []
+    };
   }
 
   async testChat(message: string): Promise<TestChatResult> {
