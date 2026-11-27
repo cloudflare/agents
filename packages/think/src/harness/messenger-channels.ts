@@ -36,6 +36,7 @@ import { Streams } from "agents/streams";
 import type { Tasks } from "agents/tasks";
 import {
   createMessengerChat,
+  drainStrandedQueue,
   idempotencyKeyForEvent,
   normalizeMessengers,
   recoveredReplyPosts,
@@ -172,8 +173,19 @@ export function messengerChannels(options: {
           },
           publish(_conversationId: string, update: ConversationUpdate) {
             if (update.type === "turn" && update.turn.status === "settled") {
+              const startedBy = update.turn.startedBy;
+              // A turn no webhook here waits on is one a reset cut off and
+              // the harness ran again: the Chat handler that held its thread
+              // died with the reset, so what queued behind it is drained, as
+              // Think drains it after recovering a reply.
+              const asker = options.kv.get<ChannelMessageSurface>(
+                askerKey(startedBy)
+              );
+              if (asker && !attempts.has(startedBy)) {
+                drainLater(asker);
+              }
               // Its replies have started: the asker is not read again.
-              options.kv.delete(askerKey(update.turn.startedBy));
+              options.kv.delete(askerKey(startedBy));
               for (const resolve of settled.get(update.turn.startedBy) ?? []) {
                 resolve();
               }
@@ -312,6 +324,26 @@ export function messengerChannels(options: {
       return { chunks: posts.length };
     })
   );
+
+  /** Drain the thread `asker` names, in the background. */
+  function drainLater(asker: ChannelMessageSurface): void {
+    const definition = definitions.find((d) => d.id === asker.channelKey);
+    const threadId = (asker.address as { threadId?: unknown }).threadId;
+    if (!definition || typeof threadId !== "string") return;
+    const drain = () => drainStrandedQueue(chat(), definition, threadId);
+    const keepAlive = (
+      options.parent as {
+        keepAliveWhile?: <T>(fn: () => Promise<T>) => Promise<T>;
+      }
+    ).keepAliveWhile;
+    const running = keepAlive ? keepAlive.call(options.parent, drain) : drain();
+    void running.catch((error: unknown) => {
+      console.error(
+        `[Think] Failed to drain messages queued on ${threadId} after a reset`,
+        error
+      );
+    });
+  }
 
   let made: Chat<Record<string, Adapter>> | undefined;
   const chat = () =>

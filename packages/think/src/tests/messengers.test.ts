@@ -2005,20 +2005,19 @@ describe("think messengers core", () => {
         prompts = await (await agent()).getRecorded("prompt");
       }
       expect(prompts).toEqual(["hello"]);
-      const r2 = await send("q2", "follow up");
-      console.log("DBG2", r2 ? `${r2.status} ${await r2.text()}` : "threw");
+      await send("q2", "follow up");
       // Released, the first reply's turn resets mid-reply.
       await (await agent()).releaseSlowModelForTest();
       await first;
-      const deadline = Date.now() + 20_000;
+      // Drained once the cut-off reply's thread lock expires (30 s).
+      const deadline = Date.now() + 45_000;
       while (Date.now() < deadline) {
         prompts = await (await agent()).getRecorded("prompt");
         if (prompts.includes("follow up")) break;
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
-      console.log("DBG", JSON.stringify(prompts), JSON.stringify(await (await agent()).getAdapterCalls()));
       expect(prompts).toContain("follow up");
-    }, 30_000);
+    }, 60_000);
   });
 
   it("separates text segments across tool-call boundaries (#1841)", async () => {
