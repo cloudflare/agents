@@ -169,5 +169,29 @@
       "file": "think-session.test.ts",
       "test": "Think — onChatResponse > reports an in-band stream error to the RPC caller, the response hook and observability"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > hands off recovery after the durable turn run exists and before turn completion",
+    "reason": "when the recovery handoff is accepted relative to the durable turn run (`recoveryAcceptanceForTest`: acceptedBeforeCompletion, durableAtAcceptance): the class's handoff timing",
+    "mechanicsOnly": true
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > keeps pre-handoff failure on the current Task and replaces only post-handoff failure",
+    "reason": "the transport the class uses for recovery work, counted as Tasks and schedules before and after the handoff (`testRecoveryDispatchHandoffForTest`)",
+    "mechanicsOnly": true
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > deletes the incident record once recovery completes",
+    "reason": "the class's private incident row is deleted on completion (`beginIncidentForTest`, `updateIncidentForTest`, `getChatRecoveryIncidentsForTest`)",
+    "mechanicsOnly": true
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > sweeps incidents that have been inactive past the TTL",
+    "reason": "the class's incident TTL sweep over seeded private incident rows (`seedIncidentForTest`)",
+    "mechanicsOnly": true
   }
 ]
