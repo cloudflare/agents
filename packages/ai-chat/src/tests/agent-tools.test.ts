@@ -359,10 +359,10 @@ type ParentStub = DurableObjectStub & {
     recoveries: string[];
     state: string | null;
   }>;
-  driveFacetChatRecoveryDetectionForTest(childName: string): Promise<{
-    taskRunOnChild: number;
-    facetWakeOnRoot: number;
-    schedules: number;
+  carryReleasedTurnInFacetForTest(childName: string): Promise<{
+    roles: string[];
+    lastText: string;
+    releasedRuns: number;
   }>;
 };
 
@@ -769,24 +769,18 @@ describe("AIChatAgent as an agent-tool child", () => {
     });
   });
 
-  it("routes a facet's real recovery detection through Tasks, mirrored to the root alarm", async () => {
+  it("carries a chat turn an earlier version left cut off in a sub-agent onto that sub-agent's chat lane", async () => {
     const parent = await getParent();
     const childName = crypto.randomUUID();
 
-    const transport =
-      await parent.driveFacetChatRecoveryDetectionForTest(childName);
+    const carried = await parent.carryReleasedTurnInFacetForTest(childName);
 
-    // Real fiber-interruption detection on a facet must reach
-    // the attempt's run on Tasks — not just a test
-    // that seeds a schedule row directly and never exercises the path
-    // itself. The run and step journal stay on the child; only its wake
-    // mirrors to this root's queue, and the retired Scheduler bridge stays
-    // dead.
-    expect(transport).toEqual({
-      taskRunOnChild: 1,
-      facetWakeOnRoot: 1,
-      schedules: 0
-    });
+    // The sub-agent's own lane ran the turn: the reply is continued in
+    // place, and nothing of the earlier version's is left to run.
+    expect(carried.roles).toEqual(["user", "assistant"]);
+    expect(carried.lastText).toContain("Partial");
+    expect(carried.lastText.length).toBeGreaterThan("Partial".length);
+    expect(carried.releasedRuns).toBe(0);
   });
 
   it("runs an AIChatAgent child and returns summary, output, events, and chunks", async () => {

@@ -742,15 +742,13 @@ describe("chatRecovery", () => {
   });
 
   describe("recovery preserves settled work (#1631)", () => {
-    it("persists the settled partial when the recovery budget is exhausted", async () => {
+    it("stores the settled partial of a turn an earlier version left cut off, its tool result included", async () => {
       const room = crypto.randomUUID();
       const stub = (await getAgentByName(
         env.ChatRecoveryTestAgent,
         room
       )) as unknown as ChatTestStub;
       // maxAttempts: 1 so a seeded attempt at the cap exhausts on the next wake.
-      await stub.setChatRecoveryConfigForTest({ maxAttempts: 1 });
-
       // text PLUS a settled (completed, non-idempotent) tool call — the work
       // the budget-exhaustion path used to discard and force the model to re-run.
       await stub.insertInterruptedStream("stream-exh", "req-exh", [
@@ -782,30 +780,10 @@ describe("chatRecovery", () => {
         }
       ]);
       await stub.insertInterruptedFiber("__cf_internal_chat_turn:req-exh");
-      // Seed an incident already at the cap so this recovery exhausts.
-      // `lastAttemptAt` is aged past the alarm-debounce window (#1637/#1638) so
-      // this wake counts as a genuine new attempt (1 → 2 > maxAttempts) rather
-      // than being collapsed as a debounced reconnect (which would hold the
-      // attempt at 1 and never exhaust).
-      await stub.seedIncidentForTest({
-        incidentId: "req-exh:",
-        requestId: "req-exh",
-        recoveryKind: "continue",
-        attempt: 1,
-        maxAttempts: 1,
-        status: "scheduled",
-        firstSeenAt: Date.now() - 60_000,
-        lastAttemptAt: Date.now() - 60_000,
-        // The marker is derived from the stream log, so the seeded stream's
-        // segments already count. Record them as the incident's last observed
-        // progress: this wake must see no NEW content, exactly as a real
-        // incident that opened over this stream would.
-        progress: await stub.readProgressMarkerForTest()
-      });
-
       await stub.triggerFiberRecovery();
 
-      // Exhaustion seals the turn but must NOT discard the settled partial.
+      // The turn is carried onto the chat's lane; what it had streamed is
+      // stored first.
       const messages = await stub.getPersistedMessages();
       const assistantMsgs = messages.filter((m) => m.role === "assistant");
       expect(assistantMsgs).toHaveLength(1);
@@ -820,9 +798,6 @@ describe("chatRecovery", () => {
         );
       });
       expect(settledTool).toBeDefined();
-
-      const incidents = await stub.getChatRecoveryIncidentsForTest();
-      expect(incidents[0]?.status).toBe("exhausted");
     });
 
     it("never drops settled tool results on { persist: false } — preserves them anyway", async () => {
@@ -946,63 +921,6 @@ describe("chatRecovery", () => {
       const contexts = await stub.getRecoveryContexts();
       expect(contexts.length).toBeGreaterThanOrEqual(1);
       expect(contexts[0]?.recoveryRootRequestId).toBe("req-root");
-    });
-
-    it("onExhausted context carries terminalMessage, recoveryRootRequestId, and the partial", async () => {
-      const room = crypto.randomUUID();
-      const stub = (await getAgentByName(
-        env.ChatRecoveryTestAgent,
-        room
-      )) as unknown as ChatTestStub;
-      await stub.enableExhaustedCaptureForTest(1);
-
-      await stub.insertInterruptedStream("stream-exctx", "req-exctx", [
-        {
-          body: JSON.stringify({ type: "start", messageId: "a-exctx" }),
-          index: 0
-        },
-        { body: JSON.stringify({ type: "text-start" }), index: 1 },
-        {
-          body: JSON.stringify({
-            type: "text-delta",
-            delta: "work before giving up"
-          }),
-          index: 2
-        }
-      ]);
-      await stub.insertInterruptedFiber("__cf_internal_chat_turn:req-exctx");
-      // `lastAttemptAt` aged past the alarm-debounce window (#1637/#1638) so this
-      // wake counts as a genuine new attempt (1 → 2 > maxAttempts) and exhausts,
-      // rather than being collapsed as a debounced reconnect.
-      await stub.seedIncidentForTest({
-        incidentId: "req-exctx:",
-        requestId: "req-exctx",
-        recoveryKind: "continue",
-        attempt: 1,
-        maxAttempts: 1,
-        status: "scheduled",
-        firstSeenAt: Date.now() - 60_000,
-        lastAttemptAt: Date.now() - 60_000,
-        // The marker is derived from the stream log, so the seeded stream's
-        // segments already count. Record them as the incident's last observed
-        // progress: this wake must see no NEW content, exactly as a real
-        // incident that opened over this stream would.
-        progress: await stub.readProgressMarkerForTest()
-      });
-
-      await stub.triggerFiberRecovery();
-
-      const exhausted = await stub.getExhaustedContextsForTest();
-      expect(exhausted).toHaveLength(1);
-      const ctx = exhausted[0];
-      expect(ctx.recoveryRootRequestId).toBe("req-exctx");
-      expect(ctx.terminalMessage.length).toBeGreaterThan(0);
-      expect(ctx.partialText).toContain("work before giving up");
-      expect(ctx.reason).toBe("max_attempts_exceeded");
-      // streamId + createdAt let a consumer emit correlated terminal telemetry
-      // (e.g. msSinceTurnStart) without re-deriving identity (D4).
-      expect(ctx.streamId).toBe("stream-exctx");
-      expect(typeof ctx.createdAt).toBe("number");
     });
   });
 

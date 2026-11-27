@@ -6995,6 +6995,41 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     await recoverInterruptedTurnsForTest(this);
   }
 
+  /**
+   * Once this facet's chat lane has no open run: the stored transcript and
+   * how many chat-turn runs an earlier version's definitions still hold.
+   */
+  async carriedTurnForTest(): Promise<{
+    roles: string[];
+    lastText: string;
+    releasedRuns: number;
+  }> {
+    const open = () =>
+      this.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM cf_agents_task_runs
+        WHERE lane = 'chat' AND status IN ('pending', 'running')
+      `[0]?.count ?? 0;
+    const deadline = Date.now() + 10_000;
+    while (open() > 0) {
+      if (Date.now() > deadline)
+        throw new Error("the carried turn never ended");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const last = this.messages.at(-1);
+    return {
+      roles: this.messages.map((message) => message.role),
+      lastText: (last?.parts ?? [])
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .join(""),
+      releasedRuns:
+        this.sql<{ count: number }>`
+          SELECT COUNT(*) AS count FROM cf_agents_task_runs
+          WHERE definition IN ('__cf_internal_chat_turn', '__cf_internal_chat_recovery')
+            AND status IN ('pending', 'running')
+        `[0]?.count ?? 0
+    };
+  }
+
   /** Count this facet's own non-terminal recovery Task runs for `callback`. */
   getChatRecoveryTaskRunCountForTest(callback: string): number {
     const rows = [
@@ -8576,21 +8611,17 @@ export class AIChatAgentToolParent extends Agent<Env> {
   }
 
   /**
-   * Drive real fiber-interruption recovery detection on a routed child and
-   * report where the continuation landed: the Task run stays on the child
-   * (its storage owns the run and step journal), mirrored as one routed wake
-   * job on this root's queue (`owner_path` set) — the alarm this root
-   * actually owns. `schedules` pins that the retired Scheduler bridge stays
-   * dead. Pins the attempt's run against the real detection path, not a
-   * manually seeded row.
+   * A sub-agent holds a chat turn an earlier version left cut off (its
+   * fiber row). Replay it, as a wake does, and report the turn once its
+   * lane is empty.
    */
-  async driveFacetChatRecoveryDetectionForTest(childName: string): Promise<{
-    taskRunOnChild: number;
-    facetWakeOnRoot: number;
-    schedules: number;
+  async carryReleasedTurnInFacetForTest(childName: string): Promise<{
+    roles: string[];
+    lastText: string;
+    releasedRuns: number;
   }> {
     const child = await this.subAgent(AIChatAgentToolChild, childName);
-    // A reply to continue: recovery continues the latest assistant message.
+    // A reply to continue: the carried turn continues the latest reply.
     await child.persistMessages([
       { id: "u-facet", role: "user", parts: [{ type: "text", text: "Hi" }] },
       {
@@ -8601,23 +8632,7 @@ export class AIChatAgentToolParent extends Agent<Env> {
     ]);
     await child.insertInterruptedFiber("__cf_internal_chat_turn:req-facet");
     await child.triggerFiberRecovery();
-    const taskRunOnChild = await child.getChatRecoveryTaskRunCountForTest(
-      "_chatRecoveryContinue"
-    );
-    const schedules = this.sql<{ count: number }>`
-      SELECT COUNT(*) AS count FROM cf_agents_jobs
-      WHERE capability = 'scheduler' AND fn = '_chatRecoveryContinue'
-    `;
-    const facetWakeOnRoot = this.sql<{ count: number }>`
-      SELECT COUNT(*) AS count FROM cf_agents_jobs
-      WHERE substr(id, 1, 6) = 'facet:'
-          AND substr(id, -length(${`/AIChatAgentToolChild:${encodeURIComponent(childName)}`})) = ${`/AIChatAgentToolChild:${encodeURIComponent(childName)}`}
-    `;
-    return {
-      taskRunOnChild,
-      facetWakeOnRoot: facetWakeOnRoot[0]?.count ?? 0,
-      schedules: schedules[0]?.count ?? 0
-    };
+    return child.carriedTurnForTest();
   }
 
   override broadcast(

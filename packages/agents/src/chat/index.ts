@@ -619,3 +619,4 @@ export {
   type ChatArrival,
   type ChatLane
 } from "./chat-functions";
+export { planInterruptedTurn } from "./interrupted-turn";

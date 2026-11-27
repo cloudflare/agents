@@ -455,7 +455,7 @@ describe("onChatRecovery", () => {
     expect(await agentStub.getRunFiberCountForTest()).toBe(0);
   });
 
-  it("skips an interrupted turn whose conversation moved on, and schedules nothing", async () => {
+  it("does not carry a turn an earlier version left cut off when the conversation moved on", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
 
@@ -473,112 +473,10 @@ describe("onChatRecovery", () => {
     await agentStub.insertInterruptedFiber("__cf_internal_chat_turn:req-moved");
     await agentStub.triggerFiberRecovery();
 
-    expect(
-      await agentStub.getRecoveryTransportCountsForTest("_chatRecoveryContinue")
-    ).toEqual({ tasks: 0, schedules: 0 });
-    const incidents =
-      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-        status: string;
-        reason?: string;
-      }>;
-    expect(incidents).toEqual([
-      expect.objectContaining({
-        status: "skipped",
-        reason: "conversation_changed"
-      })
-    ]);
-  });
-
-  it("passes incident metadata and exhausts after maxAttempts", async () => {
-    const room = crypto.randomUUID();
-    const agentStub = await getTestAgent(room);
-
-    await agentStub.setChatRecoveryConfigForTest({
-      maxAttempts: 1,
-      terminalMessage: "gave up"
-    });
-    await agentStub.setRecoveryOverride({ continue: false });
-
-    await agentStub.insertInterruptedFiber("__cf_internal_chat_turn:req-cap");
-    await agentStub.triggerFiberRecovery();
-
-    const contexts = (await agentStub.getRecoveryContexts()) as Array<{
-      incidentId: string;
-      attempt: number;
-      maxAttempts: number;
-      recoveryKind: string;
-    }>;
-    expect(contexts.at(-1)).toMatchObject({
-      incidentId: "req-cap:",
-      attempt: 1,
-      maxAttempts: 1,
-      recoveryKind: "continue"
-    });
-
-    // Age past the alarm-debounce window so the second recovery counts as a
-    // genuinely separate attempt (not a collapsed reconnect-storm alarm) (#1637).
-    await agentStub.ageIncidentForTest("req-cap:", 40_000);
-    await agentStub.insertInterruptedFiber("__cf_internal_chat_turn:req-cap");
-    await agentStub.triggerFiberRecovery();
-
-    const incidents =
-      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-        attempt: number;
-        maxAttempts: number;
-        status: string;
-        reason?: string;
-      }>;
-    expect(incidents).toHaveLength(1);
-    expect(incidents[0]).toMatchObject({
-      attempt: 2,
-      maxAttempts: 1,
-      status: "exhausted",
-      reason: "max_attempts_exceeded"
-    });
-  });
-
-  it("seals a turn whose replayed attempts keep dying, even when each streams output inside the debounce window (#2613)", async () => {
-    const room = crypto.randomUUID();
-    const agentStub = await getTestAgent(room);
-    // A high attempt cap so only the interruption budget can seal; the
-    // default maxInterruptedAttempts (5) applies.
-    await agentStub.enableExhaustedCaptureForTest(100);
-    await agentStub.setRecoveryOverride({ continue: false });
-
-    for (let death = 1; death <= 5; death++) {
-      // From the second death on, the recovery attempt that ran the turn
-      // died with it and left its record behind.
-      if (death > 1) {
-        await agentStub.simulateDeadAttemptForTest("req-crash-loop:");
-      }
-      // Each attempt streamed a little before its isolate died, and the
-      // replay comes inside the debounce window. Neither resets the count.
-      await agentStub.bumpRecoveryProgressForTest();
-      await agentStub.insertInterruptedFiber(
-        "__cf_internal_chat_turn:req-crash-loop"
-      );
-      await agentStub.triggerFiberRecovery();
-    }
-
-    const incidents =
-      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-        attempt: number;
-        interruptedAttempts?: number;
-        status: string;
-        reason?: string;
-      }>;
-    expect(incidents).toHaveLength(1);
-    expect(incidents[0]).toMatchObject({
-      attempt: 1,
-      interruptedAttempts: 5,
-      status: "exhausted",
-      reason: "interrupted_attempts_exceeded"
-    });
-    const exhausted = await agentStub.getExhaustedContextsForTest();
-    expect(exhausted).toHaveLength(1);
-    expect(exhausted[0].reason).toBe("interrupted_attempts_exceeded");
-    // The first four replays reached onChatRecovery; the fifth sealed first.
-    expect(await agentStub.getRecoveryContexts()).toHaveLength(4);
+    // The turn is not carried: no run is started for it and the model is
+    // not asked. The newer question's own turn answers it.
+    expect(await agentStub.openChatLaneRunsForTest()).toBe(0);
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(0);
   });
 
   it("seals a recovery callback whose attempts die before starting a turn (#2613)", async () => {
@@ -1057,109 +955,6 @@ describe("onChatRecovery", () => {
     }
   });
 
-  it("recovers when the continuation alarm fires on a superseded isolate", async () => {
-    const room = crypto.randomUUID();
-    const agentStub = await getTestAgent(room);
-
-    // Simulate a SUPERSEDED isolate before recovery schedules anything, so
-    // every run of the continuation throws the catchable "Durable Object reset
-    // because its code was updated." — no race with the real DO alarm.
-    await agentStub.setSimulateSupersededIsolateForTest(true);
-
-    // Interrupted chat turn: recovery schedules the continuation and, because
-    // recovery is "handled", deletes the orphaned fiber-ledger row. From here
-    // the only thing that can resume the turn is the scheduled continuation.
-    // A reply to continue: recovery continues the latest assistant message.
-    await agentStub.persistMessages([
-      { id: "u-cont", role: "user", parts: [{ type: "text", text: "Hi" }] },
-      {
-        id: "a-cont",
-        role: "assistant",
-        parts: [{ type: "text", text: "Partial" }]
-      }
-    ]);
-    await agentStub.insertInterruptedFiber("__cf_internal_chat_turn:req-stale");
-    await agentStub.triggerFiberRecovery();
-    expect(await agentStub.getRunFiberCountForTest()).toBe(0);
-    const transport = await agentStub.getRecoveryTransportCountsForTest(
-      "_chatRecoveryContinue"
-    );
-    expect(transport.schedules).toBe(0);
-    expect(transport.tasks).toBeGreaterThanOrEqual(1);
-
-    // Fire the continuation alarm on the superseded isolate. The first storage
-    // op throws for the whole invocation; `_executeScheduleCallback` would burn
-    // its in-process retries and (pre-fix) swallow the error, letting `alarm()`
-    // delete the one-shot row.
-    await agentStub.runAlarmForTest();
-    expect(await agentStub.getSupersededThrowsForTest()).toBeGreaterThanOrEqual(
-      1
-    );
-
-    // A deploy-class transient must not destroy recovery: the turn should still
-    // be resumable afterward — either the one-shot continuation row survives for
-    // a fresh-code re-run, or an orphaned fiber remains for the boot scan. On
-    // current main BOTH are gone, so this fails — that is the bug (the turn is
-    // permanently abandoned; #1615's progress logic never runs again).
-    const pendingContinuations = await agentStub.getScheduleCountForCallback(
-      "_chatRecoveryContinue"
-    );
-    const pendingFibers = await agentStub.getRunFiberCountForTest();
-    expect(pendingContinuations + pendingFibers).toBeGreaterThanOrEqual(1);
-
-    // Stop simulating so any platform-retried alarm can complete cleanly.
-    await agentStub.setSimulateSupersededIsolateForTest(false);
-  });
-
-  it("recovers when the continuation alarm exhausts its retries on a storage transient (#1730)", async () => {
-    const room = crypto.randomUUID();
-    const agentStub = await getTestAgent(room);
-
-    // Simulate the OTHER deploy-reset-window shape: SQL ops fail with
-    // `SqlError: SQL query failed: Network connection lost.` (wrapped, no
-    // `retryable` flag, no reset phrasing). Unlike the supersede this keeps
-    // its in-process retries — but a reset window outlasts the retry schedule
-    // by design, so every attempt fails and (pre-fix) the budget exhaustion
-    // swallowed the error, letting `alarm()` delete the one-shot row
-    // milliseconds before storage recovered.
-    await agentStub.setSimulateTransientErrorForTest(
-      "Network connection lost."
-    );
-
-    // A reply to continue: recovery continues the latest assistant message.
-    await agentStub.persistMessages([
-      { id: "u-cont", role: "user", parts: [{ type: "text", text: "Hi" }] },
-      {
-        id: "a-cont",
-        role: "assistant",
-        parts: [{ type: "text", text: "Partial" }]
-      }
-    ]);
-    await agentStub.insertInterruptedFiber(
-      "__cf_internal_chat_turn:req-transient"
-    );
-    await agentStub.triggerFiberRecovery();
-    expect(await agentStub.getRunFiberCountForTest()).toBe(0);
-
-    await agentStub.runAlarmForTest();
-    // Unlike an immediately condemned code-update isolate, a connection loss
-    // enters the Task step's durable retry budget. One alarm performs one
-    // attempt and leaves the run waiting rather than burning retries inline.
-    expect(await agentStub.getSupersededThrowsForTest()).toBeGreaterThanOrEqual(
-      1
-    );
-
-    // The durable retry must preserve the continuation: the turn stays
-    // resumable for the healthy window that follows the deploy.
-    const pendingContinuations = await agentStub.getScheduleCountForCallback(
-      "_chatRecoveryContinue"
-    );
-    const pendingFibers = await agentStub.getRunFiberCountForTest();
-    expect(pendingContinuations + pendingFibers).toBeGreaterThanOrEqual(1);
-
-    await agentStub.setSimulateTransientErrorForTest(null);
-  });
-
   it("defers a give-up whose terminal write hits a platform transient instead of half-sealing, then seals fully on the re-run (#1730)", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
@@ -1303,80 +1098,6 @@ describe("onChatRecovery", () => {
       }>;
     expect(incidents).toHaveLength(1);
     expect(incidents[0].incidentId).toBe("req-fresh:user-fresh");
-  });
-
-  it("marks the incident failed when onChatRecovery throws", async () => {
-    const room = crypto.randomUUID();
-    const agentStub = await getTestAgent(room);
-
-    await agentStub.setRecoveryShouldThrowForTest(true);
-
-    const failed: string[] = [];
-    const unsubscribe = subscribe("chat", (event) => {
-      // Only this test's agent: the channel carries every agent's events.
-      if (event.name === room && event.type === "chat:recovery:failed") {
-        failed.push(event.payload.incidentId);
-      }
-    });
-
-    try {
-      await agentStub.insertInterruptedFiber(
-        "__cf_internal_chat_turn:req-throw"
-      );
-      await agentStub.triggerFiberRecovery();
-    } finally {
-      unsubscribe();
-    }
-
-    const incidents =
-      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-        status: string;
-        reason?: string;
-      }>;
-    expect(incidents).toHaveLength(1);
-    expect(incidents[0].status).toBe("failed");
-    expect(incidents[0].reason).toContain("onChatRecovery boom");
-    expect(failed.length).toBeGreaterThanOrEqual(1);
-  });
-
-  it("still delivers terminal UX when onExhausted throws", async () => {
-    const room = crypto.randomUUID();
-    const agentStub = await getTestAgent(room);
-
-    await agentStub.enableThrowingOnExhaustedForTest(1, "gave up");
-    await agentStub.setRecoveryOverride({ continue: false });
-
-    const fiberFailures: string[] = [];
-    const unsubscribe = subscribe("fiber", (event) => {
-      if (event.type === "fiber:recovery:failed") {
-        fiberFailures.push(event.payload.fiberId);
-      }
-    });
-
-    try {
-      await agentStub.insertInterruptedFiber(
-        "__cf_internal_chat_turn:req-ex-throw"
-      );
-      await agentStub.triggerFiberRecovery();
-      // Past the alarm-debounce window → a genuinely separate attempt (#1637).
-      await agentStub.ageIncidentForTest("req-ex-throw:", 40_000);
-      await agentStub.insertInterruptedFiber(
-        "__cf_internal_chat_turn:req-ex-throw"
-      );
-      await agentStub.triggerFiberRecovery();
-    } finally {
-      unsubscribe();
-    }
-
-    expect(await agentStub.getOnExhaustedCallsForTest()).toBe(1);
-    expect(fiberFailures).toHaveLength(0);
-
-    const incidents =
-      (await agentStub.getChatRecoveryIncidentsForTest()) as Array<{
-        status: string;
-      }>;
-    expect(incidents).toHaveLength(1);
-    expect(incidents[0].status).toBe("exhausted");
   });
 
   it("should persist partial by default (persist !== false)", async () => {
@@ -2335,66 +2056,6 @@ describe("onChatRecovery", () => {
     expect(
       stored[1].parts.map((p) => (p as { text?: string }).text ?? "").join("")
     ).toContain("Continued response.");
-  });
-
-  it("retries, in its own run, a recovery run an earlier version enqueued that times out waiting for a stable chat", async () => {
-    const agentStub = await getTestAgent(`upgrade-wait-${crypto.randomUUID()}`);
-    await agentStub.persistMessages([
-      { id: "u-x", role: "user", parts: [{ type: "text", text: "Hi" }] },
-      {
-        id: "a-x",
-        role: "assistant",
-        parts: [{ type: "text", text: "Partial" }]
-      }
-    ]);
-    await agentStub.setForceStableTimeoutForTest(true);
-    await agentStub.seedIncidentForTest({
-      incidentId: "inc-wait",
-      requestId: "root-wait",
-      recoveryKind: "continue",
-      attempt: 1,
-      maxAttempts: 6,
-      status: "scheduled",
-      firstSeenAt: Date.now(),
-      lastAttemptAt: Date.now()
-    });
-    await agentStub.seedReleasedRecoveryRunForTest(
-      "_chatRecoveryContinue",
-      {
-        incidentId: "inc-wait",
-        originalRequestId: "root-wait",
-        targetAssistantId: "a-x"
-      },
-      60
-    );
-    await agentStub.runScheduledRecoveryContinueForTest();
-
-    // The attempt timed out waiting and planned the next one into its own
-    // run: still one run, now waiting out the retry's delay.
-    expect(
-      await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
-    ).toBe(1);
-    expect(await agentStub.openReleasedRecoveryRunsForTest()).toBe(1);
-    const steps = await agentStub.recoveryRunStepsForTest();
-    expect(steps).toEqual(
-      expect.arrayContaining(["backoff-2:waiting", "continuation:completed"])
-    );
-    expect(steps.some((step) => step.startsWith("continuation-2"))).toBe(false);
-    const incident = await agentStub.getIncidentForTest("inc-wait");
-    expect(incident?.attempt).toBe(2);
-    expect(incident?.status).toBe("scheduled");
-    expect(await agentStub.getOnChatMessageCallCount()).toBe(0);
-
-    // The retry fires in that run once the chat is stable: the reply is
-    // continued and the run ends.
-    await agentStub.setForceStableTimeoutForTest(false);
-    await agentStub.runScheduledRecoveryContinueForTest();
-    await agentStub.waitForIdleForTest();
-    expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
-    expect(await agentStub.getIncidentForTest("inc-wait")).toBeNull();
-    expect(
-      await agentStub.getScheduleCountForCallback("_chatRecoveryContinue")
-    ).toBe(0);
   });
 
   it("reschedules a continuation that times out waiting for stable state, within the attempt budget", async () => {

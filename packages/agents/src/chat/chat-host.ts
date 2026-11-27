@@ -1529,26 +1529,44 @@ export function chatTurnDefinition(
       const attempt = evaluated?.incident.attempt ?? step.attempt;
       let decision: ChatRecoveryOptions | void = undefined;
       if (!exhausted) {
-        decision = await host.hooks?.onRecovery?.({
-          incidentId: requestId,
-          recoveryRootRequestId: requestId,
-          attempt,
-          maxAttempts,
-          recoveryKind: partial ? "continue" : "retry",
-          streamId,
-          requestId,
-          partialText,
-          partialParts,
-          // What the turn stashed, and the request it was sent with.
-          recoveryData: step.checkpoint.get(CHAT_STASH_CHECKPOINT) ?? null,
-          ...(run.body !== undefined && { lastBody: { ...run.body } }),
-          ...(run.clientTools !== undefined &&
-            run.clientTools.length > 0 && {
-              lastClientTools: [...run.clientTools]
-            }),
-          messages: (await session.getHistory()) as unknown as UIMessage[],
-          createdAt: step.createdAt
-        });
+        try {
+          decision = await host.hooks?.onRecovery?.({
+            incidentId: requestId,
+            recoveryRootRequestId: requestId,
+            attempt,
+            maxAttempts,
+            recoveryKind: partial ? "continue" : "retry",
+            streamId,
+            requestId,
+            partialText,
+            partialParts,
+            // What the turn stashed, and the request it was sent with.
+            recoveryData: step.checkpoint.get(CHAT_STASH_CHECKPOINT) ?? null,
+            ...(run.body !== undefined && { lastBody: { ...run.body } }),
+            ...(run.clientTools !== undefined &&
+              run.clientTools.length > 0 && {
+                lastClientTools: [...run.clientTools]
+              }),
+            messages: (await session.getHistory()) as unknown as UIMessage[],
+            createdAt: step.createdAt
+          });
+        } catch (error) {
+          // The app's hook failed: the turn ends as an error with what it
+          // threw. What was streamed stays stored.
+          const text = error instanceof Error ? error.message : String(error);
+          console.error("[agents/chat] onRecovery hook threw", error);
+          const writer = await deps.streams.open(streamId, { tag: requestId });
+          writer.error(text);
+          deps.emit?.("chat:recovery:failed", {
+            incidentId: requestId,
+            requestId,
+            attempt,
+            maxAttempts,
+            recoveryKind: partial ? "continue" : "retry",
+            reason: text
+          });
+          return report({ requestId, status: "error", error: text });
+        }
       }
       if (exhausted || decision?.continue === false) {
         // falls through below
