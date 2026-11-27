@@ -832,5 +832,14 @@
       "file": "think-session.test.ts",
       "test": "Think — error handling > neither continues nor stores again a reply a reset cut after it was stored"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > re-reconstructing the same interrupted stream is idempotent (no duplicate, no loss)",
+    "reason": "an interrupted stream and its chat fiber row inserted in the class's shape, and recovery triggered by hand twice over the same fiber",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > keeps a reply recovered twice once, with its partial once, when onChatRecovery says continue: false"
+    }
   }
 ]

@@ -1048,6 +1048,64 @@ describe("chat recovery, through public behaviour", () => {
   // onChatRecovery", #1730/#2613): a recovery attempt the platform cuts
   // (here, a reset while onChatRecovery is running) does not end the turn:
   // the next start runs the recovery again, and no terminal is sent.
+  // Successor of think-session's "re-reconstructing the same interrupted
+  // stream is idempotent (no duplicate, no loss)": the same cut-off reply is
+  // recovered twice (a second reset cuts the first recovery), and with
+  // continue: false it is kept once, whole.
+  it("keeps a reply recovered twice once, with its partial once, when onChatRecovery says continue: false", async () => {
+    const first = await resetDuringTurn(
+      "recovered-twice",
+      2,
+      { continue: false },
+      {
+        holdRecovery: true
+      }
+    );
+    const agent = first.agent;
+    await vi.waitFor(
+      async () => {
+        expect((await (await agent()).recoveryHoldForTest()).held).toBe(true);
+      },
+      { timeout: 15_000, interval: 50 }
+    );
+    const cutOff = first.calls[0]?.partialText ?? "";
+    expect(cutOff.length).toBeGreaterThan(0);
+    await (await agent()).resetIsolateForTest().catch(() => undefined);
+
+    // A tab wakes the agent; its start recovers the same reply again.
+    const res = await exports.default.fetch(
+      `http://example.com/agents/think-test-agent/${first.room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const ws = res.webSocket;
+    if (!ws) throw new Error("no socket");
+    ws.accept();
+    await vi.waitFor(
+      async () => {
+        expect(
+          (await (await agent()).recoveryHoldForTest()).calls
+        ).toBeGreaterThanOrEqual(2);
+        expect(await (await agent()).stableWithinForTest(2_000)).toBe(true);
+      },
+      { timeout: 20_000, interval: 100 }
+    );
+    ws.close();
+
+    const messages = (await (await agent()).getMessages()) as Array<{
+      role: string;
+      parts: Array<{ type: string; text?: string }>;
+    }>;
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    const text = messages[1]?.parts
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .join("");
+    // Nothing lost, nothing written twice.
+    expect(text).toBe(cutOff);
+  }, 60_000);
+
   it("re-runs a recovery a reset cut while onChatRecovery ran, and sends no terminal", async () => {
     const exhausted: unknown[] = [];
     let room = "";
