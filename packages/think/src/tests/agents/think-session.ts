@@ -1338,6 +1338,41 @@ function createAbortAwareMockModel(
   } as LanguageModel;
 }
 
+/**
+ * A model that streams `text`, reports `message` as an in-band error, and
+ * then leaves its stream open, as a provider might: only a cancel ends it.
+ */
+function createInBandErrorLeftOpenMockModel(
+  text: string,
+  message: string,
+  onCancel: () => void
+): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-in-band-error-left-open",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    async doStream() {
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "text-start", id: "t-1" });
+          controller.enqueue({ type: "text-delta", id: "t-1", delta: text });
+          controller.enqueue({ type: "text-end", id: "t-1" });
+          controller.enqueue({ type: "error", error: new Error(message) });
+        },
+        cancel() {
+          onCancel();
+        }
+      });
+      return { stream };
+    }
+  } as LanguageModel;
+}
+
 /** A model that streams `text`, then reports `message` as an in-band error. */
 function createInBandErrorAfterTextMockModel(
   text: string,
@@ -5890,9 +5925,14 @@ export class ThinkTestAgent extends Think {
     timeoutMs: number,
     errorMessage = "Mock error under guard"
   ): Promise<TestChatResult> {
-    // The model `beforeTurn` gives reports the error in-band, after a chunk.
+    // The model `beforeTurn` gives reports the error in-band, after a chunk,
+    // and leaves its stream open: the turn must cancel it.
     this._turnConfigOverride = {
-      model: createInBandErrorAfterTextMockModel("partial", errorMessage)
+      model: createInBandErrorLeftOpenMockModel(
+        "partial",
+        errorMessage,
+        () => {}
+      )
     };
     this.chatStreamStallTimeoutMs = timeoutMs;
     try {

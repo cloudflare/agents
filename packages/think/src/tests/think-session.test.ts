@@ -709,6 +709,7 @@ describe("Think — error handling", () => {
 
     expect(result.done).toBe(false);
     expect(result.error).toContain("Mock error under guard");
+    // The provider's stream stays open after its error; the turn still ends.
   });
 
   it("routes a stream-stall watchdog abort into bounded recovery instead of failing terminally (#1626)", async () => {
