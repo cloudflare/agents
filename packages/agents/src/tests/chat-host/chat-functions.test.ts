@@ -3025,6 +3025,119 @@ describe("chat functions over a minimal host", () => {
     });
   });
 
+  for (const withIds of [false, true]) {
+    it(`a tab that reconnects, asks to resume${withIds ? " its request" : ""}, then answers gets its continuation's chunks once`, async () => {
+      const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+        await instance.lifecycle.start();
+        const session = instance.sessions.session("s1");
+        await session.appendMessage({
+          id: "u1",
+          role: "user",
+          parts: []
+        } as never);
+        await session.appendMessage({
+          id: "a1",
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-ask",
+              toolCallId: "c1",
+              state: "input-available",
+              input: {}
+            }
+          ]
+        } as never);
+        // The model sends one delta, then the rest once the tab has acked
+        // the offer of its continuation (or after a while, if none comes).
+        let acked!: () => void;
+        const ack = new Promise<void>((resolve) => (acked = resolve));
+        setTimeout(() => acked(), 1500);
+        (instance.host as { respond: typeof instance.host.respond }).respond =
+          async () =>
+            new ReadableStream<UIMessageChunk>({
+              async start(controller) {
+                controller.enqueue({ type: "text-start", id: "t2" });
+                controller.enqueue({
+                  type: "text-delta",
+                  id: "t2",
+                  delta: "A"
+                });
+                await ack;
+                controller.enqueue({
+                  type: "text-delta",
+                  id: "t2",
+                  delta: "B"
+                });
+                controller.enqueue({ type: "text-end", id: "t2" });
+                controller.enqueue({ type: "finish" });
+                controller.close();
+              }
+            });
+        const sent: Array<Record<string, unknown>> = [];
+        // A new tab (the one that asked closed after the call): it asks to
+        // resume, then answers the tool, and acks any offer it is sent.
+        const tab = recordingTab("tab-new", sent);
+        const send = tab.send.bind(tab);
+        // Its ack arrives after the first live delta (a tab's round trip is
+        // longer than the model's first chunk).
+        let offered: string | undefined;
+        (tab as { send: typeof send }).send = (text: string) => {
+          send(text);
+          const frame = JSON.parse(text) as { type?: string; id?: string };
+          if (frame.type === "cf_agent_stream_resuming") offered = frame.id;
+          if (
+            offered !== undefined &&
+            frame.type === "cf_agent_use_chat_response" &&
+            String((frame as { body?: unknown }).body).includes("text-delta")
+          ) {
+            const id = offered;
+            offered = undefined;
+            void chatDispatch(
+              instance.deps,
+              instance.lane,
+              tab,
+              JSON.stringify({ type: "cf_agent_stream_resume_ack", id })
+            ).then(acked);
+          }
+        };
+        instance.tabs.push(tab);
+        await resumeChat(
+          instance.deps,
+          instance.lane,
+          tab,
+          "p1",
+          withIds ? ["r-ask"] : []
+        );
+        const done = instance.nextResult();
+        await answerTool(
+          instance.deps,
+          instance.lane,
+          { kind: "result", toolCallId: "c1", output: {} },
+          { autoContinue: true, connection: tab }
+        );
+        await done;
+        await vi.waitFor(() =>
+          expect(sent.some((frame) => frame.done === true)).toBe(true)
+        );
+        // It was offered its continuation (rv-2's path), and every chunk
+        // reached it once: live, or replayed, never both.
+        expect(sent.map((frame) => frame.type)).toContain(
+          "cf_agent_stream_resuming"
+        );
+        for (const delta of ["A", "B"]) {
+          expect(
+            sent.filter(
+              (frame) =>
+                frame.type === "cf_agent_use_chat_response" &&
+                String(frame.body).includes(`"delta":"${delta}"`)
+            )
+          ).toHaveLength(1);
+        }
+      });
+    });
+  }
+
   it("a tab that did not answer is told there is nothing to resume while another tab's continuation waits", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
