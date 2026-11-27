@@ -472,5 +472,14 @@
       "file": "chat-recovery-public.test.ts",
       "test": "chat recovery, through public behaviour > onChatRecovery's answer after a reset > answers a turn a reset cut off after its stream opened but before any text"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > re-throws a \"This script has been upgraded\" supersede (defer + re-run) and does NOT terminalize",
+    "reason": "a superseded-isolate error injected into the class's scheduled recovery callback (private); a code update supersedes the isolate, which the successor stands for with a reset while onChatRecovery runs",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > re-runs a recovery a reset cut while onChatRecovery ran, and sends no terminal"
+    }
   }
 ]
