@@ -450,7 +450,10 @@ export class ChatBufferCleanupAgent extends AIChatAgent<Env> {
    */
   @callable()
   forceSweep(nowMs: number): number {
-    return this._replyStreams.reclaim(nowMs);
+    // SAFETY: a test reaches the agent's private reader of a release's streams.
+    return (
+      this as unknown as { _releasedStreams: { reclaim(now: number): number } }
+    )._releasedStreams.reclaim(nowMs);
   }
 }
 

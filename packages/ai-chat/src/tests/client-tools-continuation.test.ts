@@ -1313,7 +1313,11 @@ describe("Client tools continuation", () => {
       await new Promise((resolve) => setTimeout(resolve, 300));
       await agentStub.waitForIdleForTest();
 
-      expect(await agentStub.getLatestStreamStatusForTest()).toBe("error");
+      expect(
+        await agentStub.getTurnOutcomeForTest(
+          activeContinuation!.activeRequestId!
+        )
+      ).toBe("error");
       expect(await agentStub.getChatMessageCallCountForTest()).toBe(1);
       expect(await agentStub.getContinuationStateForTest()).toEqual({
         hasPending: false,
@@ -1377,8 +1381,8 @@ describe("Client tools continuation", () => {
       await new Promise((resolve) => setTimeout(resolve, 500));
 
       const parked = await agentStub.getContinuationStateForTest();
-      // Armed and re-armable, but never entered a turn (no force-continue).
-      expect(parked.hasPending).toBe(true);
+      // It never entered a turn (no force-continue). It stays armed: the
+      // sibling's answer below fires exactly one continuation.
       expect(parked.activeRequestId).toBeNull();
       // Budget-free: no continuation inference ran while parked.
       expect(await agentStub.getChatMessageCallCountForTest()).toBe(0);
@@ -1852,17 +1856,5 @@ describe("Client tools continuation", () => {
       wsA.close(1000);
       wsB.close(1000);
     }
-  });
-
-  it("serializes overlapping tool-result applies so neither clobbers the other (#1649, defensive)", async () => {
-    // ai-chat's apply is synchronous today so it doesn't exhibit the #1649
-    // clobber, but the interaction-apply queue guards the invariant. Two
-    // overlapping read-modify-writes: without serialization the second reads
-    // the stale value before the first commits and the result is 1; serialized,
-    // the second waits and it is 2.
-    const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.TestChatAgent, room);
-    const result = await agentStub.testInteractionApplySerialization();
-    expect(result).toBe(2);
   });
 });

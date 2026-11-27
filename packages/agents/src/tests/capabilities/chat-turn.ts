@@ -63,12 +63,26 @@ export class ChatTurnHostObject extends DurableObject<Cloudflare.Env> {
   }
   readonly lane = { definition: "__cf_chat_turn", lane: "chat:s1" };
   readonly tasks: Tasks = new Tasks();
+  /** The object's synchronous key-value storage. */
+  get kv() {
+    return this.ctx.storage.kv;
+  }
+  /** The tabs the registered turn definition sends its frames to. */
+  readonly tabs: Array<import("agents").Connection> = [];
+  /** The `chat:*` events the chat functions published, in order. */
+  readonly events: Array<{ type: string; payload: Record<string, unknown> }> =
+    [];
   get deps() {
     return {
       tasks: this.tasks,
       streams: this.streams,
       sessions: this.sessions,
-      session: "s1"
+      kv: this.ctx.storage.kv,
+      session: "s1",
+      webSockets: { getConnections: () => this.tabs },
+      emit: (type: string, payload: Record<string, unknown>) => {
+        this.events.push({ type, payload });
+      }
     };
   }
   readonly lifecycle = Lifecycle.install(this)

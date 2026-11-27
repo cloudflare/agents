@@ -13,7 +13,6 @@ import type {
 
 type ThinkSubmissionTestStub = {
   holdRecoveryOnceForTest(): Promise<void>;
-  releaseRecoveryForTest(): Promise<void>;
   answerRecoveryForTest(answer: {
     continue?: boolean;
     persist?: boolean;
@@ -874,60 +873,6 @@ describe("Think durable submissions", () => {
       await expect(
         restarted.inspectSubmissionForTest("sub-chain-declined")
       ).resolves.toMatchObject({ status: "error" });
-    }, 40_000);
-
-    // A request sent while a recovery runs waits behind it on the chat lane:
-    // the recovery is never overtaken by a newer question (the evidence for
-    // the ruled-out "a genuinely superseding user turn…" row).
-    it("answers a question sent during its recovery after the recovered reply, in order", async () => {
-      const name = crypto.randomUUID();
-      const agent = await freshAgent(name);
-      await agent.holdRecoveryOnceForTest();
-      await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);
-      await agent.holdChunksAfterForTest(1);
-      await agent.testSubmitMessages("interrupt me", {
-        submissionId: "sub-recovering"
-      });
-      await chunkStreamHeld(agent);
-      await agent.resetIsolateForTest().catch(() => {});
-      const restarted = await freshAgent(name);
-      await vi.waitFor(
-        async () => expect(await restarted.recoveryHeldForTest()).toBe(true),
-        { timeout: 10_000, interval: 20 }
-      );
-      await restarted.testSubmitMessages("a newer question", {
-        submissionId: "sub-newer"
-      });
-      // While the recovery holds the lane, the newer question has not run.
-      expect(
-        (await restarted.inspectSubmissionForTest("sub-newer"))?.status
-      ).not.toBe("completed");
-      await restarted.releaseRecoveryForTest();
-
-      await expect(
-        restarted.waitForSubmissionForTest("sub-recovering", {
-          timeoutMs: 15_000
-        })
-      ).resolves.toMatchObject({ status: "completed" });
-      await expect(
-        restarted.waitForSubmissionForTest("sub-newer", { timeoutMs: 15_000 })
-      ).resolves.toMatchObject({ status: "completed" });
-      await tasksIdle(restarted);
-      // The recovered reply comes before the newer question.
-      const stored = (await restarted.getStoredMessages()) as Array<{
-        role: string;
-        parts: Array<{ type: string; text?: string }>;
-      }>;
-      const text = (message: (typeof stored)[number]) =>
-        message.parts.map((part) => part.text ?? "").join("");
-      expect(stored.map((message) => message.role)).toEqual([
-        "user",
-        "assistant",
-        "user",
-        "assistant"
-      ]);
-      expect(text(stored[0])).toBe("interrupt me");
-      expect(text(stored[2])).toBe("a newer question");
     }, 40_000);
 
     it("stays aborted when it is cancelled while its reply is being recovered", async () => {

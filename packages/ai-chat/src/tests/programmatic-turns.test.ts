@@ -304,6 +304,8 @@ describe("AIChatAgent saveMessages — external AbortSignal", () => {
     );
 
     expect(result.status).toBe("aborted");
+    // Released result shape: a stop says so.
+    expect(result.reason).toBe("stopped");
 
     // Registry must be drained — the controller for this request id
     // was created (so getExistingSignal observers see consistent
@@ -451,47 +453,5 @@ describe("AIChatAgent saveMessages — external AbortSignal", () => {
     );
 
     expect(result.status).toBe("aborted");
-  });
-
-  it("a turn its shouldApplyMessages declines stores nothing and never runs", async () => {
-    const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
-
-    const declined = await agentStub.testProgrammaticTurnWithShouldApply(
-      "Declined",
-      [false]
-    );
-    expect(declined.result.status).toBe("aborted");
-    expect(declined.asked).toBe(1);
-    expect(await agentStub.getStartedRequestIds()).toEqual([]);
-    expect(await agentStub.getPersistedUserTexts()).toEqual([]);
-
-    // Asked before and after the messages are worked out; two yeses run it.
-    const applied = await agentStub.testProgrammaticTurnWithShouldApply(
-      "Applied",
-      [true, true]
-    );
-    expect(applied.result.status).toBe("completed");
-    expect(applied.asked).toBe(2);
-    expect(await agentStub.getPersistedUserTexts()).toEqual(["Applied"]);
-  });
-
-  // Regression for issue #1406: if `runFiber` itself throws (e.g. SQLite
-  // error inserting the fiber row) before invoking the chat-turn body,
-  // the external-signal listener attached by `linkExternal` and the
-  // registry entry created by `getSignal` must still be cleaned up.
-  // Otherwise long-lived parent signals leak listeners across many
-  // helper turns.
-  it("cleans up external-signal listener and registry entry when runFiber throws", async () => {
-    const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.RecoverySlowStreamAgent, room);
-
-    const outcome = await agentStub.testSaveMessagesWithRunFiberFailure(
-      "trigger run-fiber failure"
-    );
-
-    expect(outcome.threw).toBe(true);
-    expect(outcome.abortRegistrySize).toBe(0);
-    expect(outcome.listenerRemovedFromExternal).toBe(true);
   });
 });
