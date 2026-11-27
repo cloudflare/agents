@@ -25,12 +25,17 @@ async function mountChat({
     identified?: boolean;
     renders: { name: string; messageIds: string[] }[];
   } = { renders: [] };
+  let committed!: () => void;
+  const firstCommit = new Promise<void>((resolve) => {
+    committed = resolve;
+  });
 
   function TestComponent() {
     const [address, setAddress] = useState(initial);
     const { name, token } = address;
     useEffect(() => {
       controls.setAddress = setAddress;
+      committed();
     }, []);
     const agent = useAgent({
       agent: "TestStateAgent",
@@ -60,8 +65,9 @@ async function mountChat({
     </Suspense>
   );
   // The first load suspends the component; it can only change address once
-  // it has committed.
-  await vi.waitFor(() => expect(controls.setAddress).toBeDefined());
+  // it has committed. Awaited as the event, not polled under a deadline: a
+  // slow first load takes as long as it takes.
+  await firstCommit;
   return controls;
 }
 

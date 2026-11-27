@@ -14,8 +14,7 @@ export default defineConfig({
   },
   test: {
     name: "react",
-    // Retry flaky browser/Playwright runs before failing.
-    retry: 3,
+    retry: 0,
     browser: {
       enabled: true,
       instances: [
