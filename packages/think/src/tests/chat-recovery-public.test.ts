@@ -996,7 +996,9 @@ describe("chat recovery, through public behaviour", () => {
         exhausted.push(event.payload as { reason?: string });
       }
     });
+    // Terminal errors the last tab opened was sent; earlier tabs don't count.
     let terminalErrors = 0;
+    let tabs = 0;
     async function tab() {
       const res = await exports.default.fetch(
         `http://example.com/agents/think-test-agent/${room}`,
@@ -1005,7 +1007,10 @@ describe("chat recovery, through public behaviour", () => {
       const ws = res.webSocket;
       if (!ws) throw new Error("no socket");
       ws.accept();
+      const tabNumber = ++tabs;
+      terminalErrors = 0;
       ws.addEventListener("message", (event) => {
+        if (tabNumber !== tabs) return;
         const frame = JSON.parse(String(event.data)) as {
           type?: string;
           error?: boolean;
@@ -1062,10 +1067,18 @@ describe("chat recovery, through public behaviour", () => {
         ws = await tab();
       }
       // The open tab is told the turn ended in an error.
-      await vi.waitFor(() => expect(terminalErrors).toBe(1), {
+      await vi.waitFor(() => expect(terminalErrors).toBeGreaterThan(0), {
         timeout: 15_000,
         interval: 20
       });
+      await vi.waitFor(
+        async () => {
+          expect(await (await agent()).stableWithinForTest(2_000)).toBe(true);
+        },
+        { timeout: 15_000, interval: 50 }
+      );
+      // The open tab is told the turn ended in an error, once.
+      expect(terminalErrors).toBe(1);
       ws.close();
 
       expect(exhausted.map((entry) => entry.reason)).toEqual([
