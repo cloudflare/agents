@@ -217,7 +217,12 @@ async function soak(room: string): Promise<{ run: Run; sent: string[] }> {
   if (offer?.type === MT.RESUMING) {
     await late
       .waitFor(
-        (f) => f.type === MT.RESPONSE && f.id === offer.id && Boolean(f.done),
+        // A done frame handing the stream to recovery is not its end.
+        (f) =>
+          f.type === MT.RESPONSE &&
+          f.id === offer.id &&
+          Boolean(f.done) &&
+          f.outcome !== "recovering",
         60_000,
         "the replay to end"
       )
