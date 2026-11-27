@@ -18,6 +18,7 @@ import type { TaskJson, TaskStep, TaskValue } from "../tasks/types";
 import { withFiberStash } from "../fiber-runs";
 import type { StreamWriter } from "../streams/types";
 import type { WebSockets } from "../websockets/websockets";
+import type { Connection } from "agents";
 import type { ClientToolSchema } from "./client-tools";
 import type {
   ChatRecoveryConfig,
@@ -164,16 +165,89 @@ export interface ChatHost {
 /** The reason a chat clear cancels its turns with. */
 export const CHAT_CLEARED = "chat cleared";
 
+/** @internal A tab waiting for a turn's stream, and the probe it asked with. */
+export interface ParkedTab {
+  readonly connection: Connection;
+  readonly probeId?: string;
+}
+
+/** Tabs waiting for a turn's stream to start, by chat, in this isolate. */
+const parkedTabs = new WeakMap<Streams, Map<string, Map<string, ParkedTab>>>();
+
+/** @internal The tabs waiting for the next stream of chat `session`. */
+export function parkedIn(
+  streams: Streams,
+  session: string
+): Map<string, ParkedTab> {
+  let chats = parkedTabs.get(streams);
+  if (!chats) parkedTabs.set(streams, (chats = new Map()));
+  let tabs = chats.get(session);
+  if (!tabs) chats.set(session, (tabs = new Map()));
+  return tabs;
+}
+
 /**
- * When a turn's chunks are written: every 10 chunks or 512 KB, in one row
- * write, into the stream's newest block while it stays under 256 KB, as the
- * hosts' reply streams do.
+ * @internal Answer every parked tab with `frame`, each with the probe id it
+ * asked with, and forget them.
  */
-const CHUNK_BATCH = {
-  maxChunks: 10,
-  maxBytes: 512_000,
-  fillBlocks: true
-} as const;
+export function releaseParked(
+  tabs: Map<string, ParkedTab>,
+  frame: Readonly<Record<string, unknown>>
+): void {
+  for (const { connection, probeId } of tabs.values()) {
+    sendIfOpen(
+      connection,
+      JSON.stringify({ ...frame, ...(probeId && { probeId }) })
+    );
+  }
+  tabs.clear();
+}
+
+/** A turn streaming in this isolate, that a tool answer can join. */
+export interface LiveTurn {
+  readonly requestId: string;
+  /** The id of the reply that streams, once it started. */
+  replyId(): string | undefined;
+  /** The calls the reply holds with no answer yet, in the order asked. */
+  waitingCalls(): string[];
+  inject(chunk: UIMessageChunk): void;
+  /**
+   * Run `fn` once, when the reply's last waiting call is answered: by a
+   * tab's answer or by a server tool's output.
+   */
+  whenAnswered(fn: () => void): void;
+}
+
+/**
+ * The metadata a turn stopped before it started carries (`Tasks.patchMetadata`,
+ * under `chat`): it keeps its place in the lane, and when its turn comes it
+ * stores its question and ends without calling the model.
+ */
+export const STOPPED_METADATA = { key: "chat", field: "stopped" } as const;
+
+/** Replies whose batch an answer asked to continue, once it is answered. */
+const continueRequests = new WeakMap<Streams, Set<string>>();
+
+/** @internal The replies of this chat host an answer asked to continue. */
+export function continueRequestsOf(streams: Streams): Set<string> {
+  let wanted = continueRequests.get(streams);
+  if (!wanted) continueRequests.set(streams, (wanted = new Set()));
+  return wanted;
+}
+
+/**
+ * The turns streaming in this isolate, by session: at most one per lane.
+ * Kept per Streams capability (one per chat host), in memory only: a turn
+ * that a reset cut off is continued from its stream, not from here.
+ */
+const liveTurns = new WeakMap<Streams, Map<string, LiveTurn>>();
+
+/** @internal The live turns of the chat whose stream log is `streams`. */
+export function liveTurnsOf(streams: Streams): Map<string, LiveTurn> {
+  let turns = liveTurns.get(streams);
+  if (!turns) liveTurns.set(streams, (turns = new Map()));
+  return turns;
+}
 
 /**
  * Chunks after which the turn waits on work a replay must not repeat,
@@ -188,6 +262,45 @@ const TOOL_EVENTS: ReadonlySet<string> = new Set([
   "tool-output-denied",
   "finish-step"
 ]);
+
+/**
+ * When a turn's chunks are written: every 10 chunks or 512 KB, in one row
+ * write, into the stream's newest block while it stays under 256 KB. A
+ * crash loses at most the 9 chunks still buffered, as the hosts do today.
+ */
+export const CHUNK_BATCH = {
+  maxChunks: 10,
+  maxBytes: 512_000,
+  fillBlocks: true
+} as const;
+
+/** The calls asked in `chunks` with no answer after them, in order. */
+function waitingCallsOf(chunks: readonly UIMessageChunk[]): string[] {
+  const waiting: string[] = [];
+  for (const chunk of chunks) {
+    const id = (chunk as { toolCallId?: unknown }).toolCallId;
+    if (typeof id !== "string") continue;
+    if (chunk.type === "tool-input-available") waiting.push(id);
+    if (
+      chunk.type === "tool-output-available" ||
+      chunk.type === "tool-output-error" ||
+      chunk.type === "tool-output-denied"
+    ) {
+      const at = waiting.indexOf(id);
+      if (at >= 0) waiting.splice(at, 1);
+    }
+  }
+  return waiting;
+}
+
+/** The tool name of a tool part: its `toolName`, or its `tool-<name>` type. */
+function toolNameOf(part: UIMessage["parts"][number]): string | undefined {
+  const record = part as { toolName?: unknown; type?: unknown };
+  if (typeof record.toolName === "string") return record.toolName;
+  return typeof record.type === "string" && record.type.startsWith("tool-")
+    ? record.type.slice(5)
+    : undefined;
+}
 
 /** The run's checkpoint key holding the reply a continuation extends. */
 const BASE_CHECKPOINT = "chat:base";
@@ -255,7 +368,8 @@ function watchStall(
   chunks: ReadableStream<UIMessageChunk>,
   ms: number | undefined,
   /** Calls already running when the stream starts (approved, continued). */
-  alreadyRunning: Iterable<string> = []
+  alreadyRunning: Iterable<string> = [],
+  clientTools: ReadonlySet<string> = new Set()
 ): ReadableStream<UIMessageChunk> {
   if (!ms || ms <= 0) return chunks;
   const reader = chunks.getReader();
@@ -278,8 +392,16 @@ function watchStall(
         }
         const id = (next.value as { toolCallId?: unknown }).toolCallId;
         if (typeof id === "string") {
-          if (next.value.type === "tool-input-available") running.add(id);
-          else if (
+          // A client tool runs in the tab, after this stream: it holds
+          // nothing off.
+          if (
+            next.value.type === "tool-input-available" &&
+            !clientTools.has(
+              String((next.value as { toolName?: unknown }).toolName)
+            )
+          ) {
+            running.add(id);
+          } else if (
             // Waiting for an approval is not running; a preliminary output
             // (a tool's progress) is not its end.
             next.value.type === "tool-approval-request" ||
@@ -322,6 +444,14 @@ export interface ChatTurnInput {
   readonly questionId?: string;
   readonly clientTools?: readonly ClientToolSchema[];
   readonly body?: Readonly<Record<string, unknown>>;
+  /**
+   * The messages the request brings that the transcript does not hold yet.
+   * The turn stores them when it starts, so a question queued behind a
+   * reply follows that reply.
+   */
+  readonly messages?: readonly UIMessage[];
+  /** For a tool answer: the reply holding the answered call, to continue. */
+  readonly replyId?: string;
 }
 
 /** The stream id a turn's reply is written under. */
@@ -431,13 +561,9 @@ function repairCutOffTools(
       if (!isCutOffTool(part)) return part;
       // A client tool call with its whole input waits for the tab's answer;
       // one cut off mid-input can never be answered, so it is settled.
-      const name =
-        (part as { toolName?: unknown }).toolName ??
-        ((part as { type: string }).type.startsWith("tool-")
-          ? (part as { type: string }).type.slice(5)
-          : undefined);
+      const name = toolNameOf(part);
       if (
-        typeof name === "string" &&
+        name !== undefined &&
         answeredByClient.has(name) &&
         // An approved client tool waits for the tab's result too.
         ((part as { state?: unknown }).state === "input-available" ||
@@ -601,10 +727,36 @@ export function chatTurnDefinition(
       run.trigger === "regenerate-message" && run.questionId !== undefined
         ? { parentId: run.questionId }
         : {};
+    // Tabs that asked to resume before this turn streamed.
+    const parked = parkedIn(deps.streams, sessionId);
+    const offerStream = () => {
+      if (parked.size === 0) return;
+      releaseParked(parked, {
+        type: CHAT_MESSAGE_TYPES.STREAM_RESUMING,
+        id: requestId
+      });
+    };
+    // The reply this turn stored, when it stored one.
+    let finalReply: UIMessage | undefined;
     const report = async (result: ChatTurnResult) => {
       // A settled turn is not recovered: what it stashed for that goes.
       if (step.checkpoint.get(STASH_CHECKPOINT) != null) {
         step.checkpoint.set(STASH_CHECKPOINT, null);
+      }
+      // A stored reply that waits on no call has no batch left to continue.
+      if (
+        result.messageId !== undefined &&
+        finalReply !== undefined &&
+        !finalReply.parts.some((part) => {
+          const state = (part as { state?: unknown }).state;
+          return state === "input-available" || state === "approval-requested";
+        })
+      ) {
+        continueRequestsOf(deps.streams).delete(result.messageId);
+      }
+      // A tab still waiting learns there is no stream to resume.
+      if (parked.size > 0) {
+        releaseParked(parked, { type: CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE });
       }
       if (result.status !== "completed" && result.status !== "skipped") {
         send({
@@ -634,6 +786,7 @@ export function chatTurnDefinition(
         return undefined;
       }
       const stored = host.hooks?.sanitizeForPersistence?.(message) ?? message;
+      finalReply = stored;
       const sync = session.__DO_NOT_USE_WILL_BREAK__sync();
       let after: (() => Promise<void>) | undefined;
       try {
@@ -702,6 +855,33 @@ export function chatTurnDefinition(
     const storedReply = step.checkpoint.get<string>(REPLY_CHECKPOINT);
     if (storedReply !== undefined) {
       return report({ requestId, status: "completed", messageId: storedReply });
+    }
+    // The request's messages go in now, after every reply queued before it.
+    // Stopped before it started: it stores its question in its place in
+    // the lane, and ends without calling the model.
+    const stopped =
+      step.attempt === 1 &&
+      (
+        deps.tasks.peek(requestId)?.metadata?.[STOPPED_METADATA.key] as
+          | Record<string, unknown>
+          | undefined
+      )?.[STOPPED_METADATA.field] === true;
+    // A reply a tab sent back is a snapshot from before it finished: the
+    // stored one stands.
+    for (const message of run.messages ?? []) {
+      if (stopped && message.role !== "user") continue;
+      if (
+        message.role === "assistant" &&
+        (await session.getMessage(message.id)) !== null
+      ) {
+        continue;
+      }
+      await session.upsertMessage(message as never);
+    }
+    // The run ends aborted, as a stop of a running turn does.
+    if (stopped) {
+      await report({ requestId, status: "aborted" });
+      return TaskSettlement.aborted("chat turn cancelled");
     }
     const earlier = await deps.streams.status(streamId);
     if (earlier && earlier.state !== "streaming") {
@@ -938,14 +1118,17 @@ export function chatTurnDefinition(
     // question sees nothing after it), or to the reply it continues.
     const history = async () =>
       (await session.getHistory(
-        run.questionId !== undefined &&
-          !partial &&
-          run.trigger !== "tool-answer"
-          ? { leafId: run.questionId }
-          : {}
+        run.trigger === "tool-answer" && run.replyId !== undefined
+          ? { leafId: run.replyId }
+          : run.questionId !== undefined &&
+              !partial &&
+              run.trigger !== "tool-answer"
+            ? { leafId: run.questionId }
+            : {}
       )) as unknown as UIMessage[];
     const messages = await history();
-    // A tool answer continues the reply that asked for it.
+    // A tool answer continues the reply that asked for it (named, or the
+    // latest).
     if (!partial && run.trigger === "tool-answer") {
       const last = messages.at(-1);
       if (last?.role === "assistant") {
@@ -989,12 +1172,12 @@ export function chatTurnDefinition(
       }));
       const continuing = partial;
       let started = false;
-      // Chunks are written in batches (`CHUNK_BATCH`); a reader flushes
-      // first. A batch is written at once at a tool event, a part's first
-      // delta, and when the model pauses (the end of a burst), so a reset
-      // keeps a tool call while its tool runs and what a quiet model sent.
+      // Chunks are written in batches (`CHUNK_BATCH`), as the hosts' reply
+      // streams do; a reader flushes first.
       const sync = deps.streams.__DO_NOT_USE_WILL_BREAK__sync();
       const deltaParts = new Set<string>();
+      // The batch is also written when the model pauses (at the end of a
+      // burst of chunks), so a reset while it is quiet keeps what it sent.
       let flushQueued = false;
       const flushWhenQuiet = () => {
         if (flushQueued) return;
@@ -1015,10 +1198,16 @@ export function chatTurnDefinition(
         // which refuses it as it always has.
         if (bytes > Math.min(sync.maxChunkBytes, ROW_VALUE_BYTES)) {
           out.append(chunk as never);
-          return;
+        } else {
+          sync.appendJson(streamId, json, bytes, CHUNK_BATCH);
+          flushWhenQuiet();
         }
-        sync.appendJson(streamId, json, bytes, CHUNK_BATCH);
-        flushWhenQuiet();
+        // A tool call's input and its outcome are written at once: a tool
+        // runs for as long as it takes, and a reset while it runs must find
+        // the call stored (or the tool would run again).
+        // A preliminary output (progress) waits for the batch. The first
+        // delta of a text or reasoning part is written at once, as the
+        // hosts' reply streams do: a short reply cut off is kept.
         const partId = (chunk as { id?: unknown }).id;
         const firstDelta =
           (chunk.type === "text-delta" || chunk.type === "reasoning-delta") &&
@@ -1033,7 +1222,6 @@ export function chatTurnDefinition(
         ) {
           deltaParts.delete(partId);
         }
-        // A preliminary output (progress) waits for the batch.
         if (
           firstDelta ||
           (TOOL_EVENTS.has(chunk.type) &&
@@ -1042,6 +1230,18 @@ export function chatTurnDefinition(
           sync.flush(streamId);
         }
       };
+      const liveKey = sessionId;
+      const live = liveTurnsOf(deps.streams);
+      const answered: Array<() => void> = [];
+      const waitingCalls = () => waitingCallsOf(seen);
+      const checkAnswered = () => {
+        if (answered.length > 0 && waitingCalls().length === 0) {
+          for (const fn of answered.splice(0)) fn();
+        }
+      };
+      const clientToolNames = new Set(
+        (run.clientTools ?? []).map((tool) => tool.name)
+      );
       const recorded = watchStall(
         // Whatever `respond` returned, it is turned into chunks and read
         // inside the turn's context.
@@ -1058,17 +1258,59 @@ export function chatTurnDefinition(
             state?: unknown;
             approval?: { approved?: unknown };
           };
+          const name = toolNameOf(part);
+          // An approved client tool runs in the tab, not here.
           return typeof record.toolCallId === "string" &&
             record.state === "approval-responded" &&
-            record.approval?.approved === true
+            record.approval?.approved === true &&
+            !(name !== undefined && clientToolNames.has(name))
             ? [record.toolCallId]
             : [];
-        })
+        }),
+        clientToolNames
       ).pipeThrough(
         new TransformStream<UIMessageChunk, UIMessageChunk>({
+          start(controller) {
+            // A tool answer that arrives while this reply streams joins it
+            // as a chunk, stored and sent like the model's.
+            live.set(liveKey, {
+              requestId,
+              replyId: () => {
+                const start = seen.find((chunk) => chunk.type === "start");
+                return (start as { messageId?: string } | undefined)?.messageId;
+              },
+              waitingCalls,
+              whenAnswered: (fn) => {
+                answered.push(fn);
+                checkAnswered();
+              },
+              // Stored and sent like the model's chunks, through the host's
+              // chunk hook.
+              inject: (chunk) => {
+                const next =
+                  host.hooks?.transformChunk?.(chunk, parts) ?? chunk;
+                record(next);
+                // An answer the tab gave is durable before it is acted on.
+                sync.flush(streamId);
+                seen.push(next);
+                send({
+                  body: JSON.stringify(next),
+                  done: false,
+                  ...(continuing && { continuation: true })
+                });
+                controller.enqueue(next);
+                checkAnswered();
+              }
+            });
+          },
+          flush() {
+            if (live.get(liveKey)?.requestId === requestId)
+              live.delete(liveKey);
+          },
           transform(chunk, controller) {
             // Every reply has an id: a continuation keeps the reply's, a new
             // reply keeps the model's or gets one from the run.
+            if (!started) offerStream();
             if (!started && chunk.type !== "start") {
               started = true;
               const synthetic = {
@@ -1109,6 +1351,7 @@ export function chatTurnDefinition(
             if (next.type !== "error") {
               record(next);
               seen.push(next);
+              checkAnswered();
             }
             send({
               body: JSON.stringify(next),
@@ -1129,6 +1372,7 @@ export function chatTurnDefinition(
           throw step.signal.reason ?? new Error("stopped");
         break;
       } catch (error) {
+        if (live.get(liveKey)?.requestId === requestId) live.delete(liveKey);
         if (step.signal.aborted) {
           // A cleared chat keeps nothing of the turn.
           if (cancelReason(step.signal.reason) === CHAT_CLEARED) {
