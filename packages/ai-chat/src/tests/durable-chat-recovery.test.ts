@@ -7,11 +7,15 @@ import { connectChatWS, socketBarrier } from "./test-utils";
 import { MessageType } from "../types";
 
 /**
- * Wait until the recovery is over: its incident has a final status, and
- * the chat is idle.
+ * Wait until the recovery is over: its incident has a final status, no
+ * chat-turn run (the attempt's own included) is open or waiting out a
+ * backoff, and the chat is idle. A stop writes the final status while the
+ * attempt still runs, so the status alone ends too early.
  */
 async function recoveryEnded(agentStub: {
   getChatRecoveryIncidentsForTest(): Promise<unknown>;
+  chatTurnRunsInFlightForTest(): Promise<number>;
+  backingOffChatTurnRunsForTest(): Promise<number>;
   waitForIdleForTest(): Promise<unknown>;
 }): Promise<void> {
   await expect
@@ -25,6 +29,14 @@ async function recoveryEnded(agentStub: {
       { timeout: 10_000 }
     )
     .toMatch(/^(skipped|exhausted|completed|failed)$/);
+  await expect
+    .poll(
+      async () =>
+        (await agentStub.chatTurnRunsInFlightForTest()) +
+        (await agentStub.backingOffChatTurnRunsForTest()),
+      { timeout: 10_000 }
+    )
+    .toBe(0);
   await agentStub.waitForIdleForTest();
 }
 
@@ -257,6 +269,9 @@ interface ChatRecoveryTestStub {
       terminalMessage: string;
     }>
   >;
+  chatTurnRunsInFlightForTest(): Promise<number>;
+  backingOffChatTurnRunsForTest(): Promise<number>;
+  isChatResponseDrainIdleForTest(): Promise<boolean>;
   getPendingChatTerminalForTest(): Promise<{
     requestId: string;
     body: string;
@@ -3256,8 +3271,18 @@ describe("onChatRecovery", () => {
     ws.send(
       JSON.stringify({ type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST })
     );
-    // Every frame the resume request answers with is in by the barrier's
-    // echo.
+    // The resume request's answer: RESUME_NONE, or a terminal replay (which
+    // the ACK starts, after any barrier's echo). Then the barrier.
+    await vi.waitFor(() =>
+      expect(
+        received.some(
+          (m) =>
+            m.type === MessageType.CF_AGENT_STREAM_RESUME_NONE ||
+            (m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+              m.done === true)
+        )
+      ).toBe(true)
+    );
     await socketBarrier(ws, received);
     ws.close(1000);
 
@@ -3396,8 +3421,17 @@ describe("onChatRecovery", () => {
     ws.send(
       JSON.stringify({ type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST })
     );
-    // Every frame the resume request answers with is in by the barrier's
-    // echo.
+    // The terminal replay the ACK starts, then the barrier.
+    await vi.waitFor(() =>
+      expect(
+        received.some(
+          (m) =>
+            m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+            m.error === true &&
+            m.done === true
+        )
+      ).toBe(true)
+    );
     await socketBarrier(ws, received);
     ws.close(1000);
 
@@ -3588,9 +3622,12 @@ describe("stall watchdog (chatStreamStallTimeoutMs)", () => {
     // The turn that stalled last ends aborted after the give-up. A tab that
     // connects now must still learn the turn gave up.
     await agentStub.waitForIdleForTest();
+    // The aborted turn's response drain runs after the queue is idle, and
+    // could still clear the record: wait for it, then check.
     await expect
-      .poll(() => agentStub.getPendingChatTerminalForTest(), { timeout: 5000 })
-      .not.toBeNull();
+      .poll(() => agentStub.isChatResponseDrainIdleForTest(), { timeout: 5000 })
+      .toBe(true);
+    expect(await agentStub.getPendingChatTerminalForTest()).not.toBeNull();
   }, 15_000);
 
   it("keeps an incident given up when the recovered turn that gave up returns", async () => {
