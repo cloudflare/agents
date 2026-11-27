@@ -17,9 +17,15 @@ function fresh(
  * Make the wake job due now, with its dispatch failing, and return how far
  * out the failure reschedules it, from just before it was due.
  */
+/**
+ * Fail the wake job's dispatch once and return how far ahead it was put:
+ * `delay` from before the alarm ran (at least the backoff), and `left`,
+ * what is left of it once the new time was seen (at most the backoff, as
+ * the job was put back before that, whatever its retries took).
+ */
 async function failOnce(
   stub: DurableObjectStub<PiHarnessTestObject>
-): Promise<number> {
+): Promise<{ delay: number; left: number }> {
   const before = Date.now();
   await stub.wakeJobDueNow();
   // The alarm may already be running by itself.
@@ -30,7 +36,7 @@ async function failOnce(
     time = await stub.wakeJobTime();
   }
   expect(time).not.toBeNull();
-  return time! - before;
+  return { delay: time! - before, left: time! - Date.now() };
 }
 
 /**
@@ -828,7 +834,7 @@ describe("PiHarness on pi-durable", () => {
 
     // Each alarm dispatches the job three times before it gives up. The
     // delay starts at the 1s test heartbeat and doubles up to 10 minutes.
-    const delays: number[] = [];
+    const delays: { delay: number; left: number }[] = [];
     for (let i = 0; i < 12; i++) {
       delays.push(await failOnce(stub));
     }
@@ -836,10 +842,11 @@ describe("PiHarness on pi-durable", () => {
       1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000,
       512_000, 600_000, 600_000
     ];
-    for (const [i, delay] of delays.entries()) {
+    for (const [i, { delay, left }] of delays.entries()) {
       expect(delay).toBeGreaterThanOrEqual(expected[i]);
-      // Plus the dispatch's own retries, under a second.
-      expect(delay).toBeLessThan(expected[i] + 1_000);
+      // Put back once its retries ended, however long they took: no more
+      // than the backoff is left when the new time is seen.
+      expect(left).toBeLessThanOrEqual(expected[i]);
     }
 
     // A dispatch that gets through resets the backoff. pi is idle, so the
@@ -855,9 +862,9 @@ describe("PiHarness on pi-durable", () => {
     expect(time).toBeNull();
 
     await stub.failWakeSteps(true);
-    const delay = await failOnce(stub);
+    const { delay, left } = await failOnce(stub);
     expect(delay).toBeGreaterThanOrEqual(1_000);
-    expect(delay).toBeLessThan(2_000);
+    expect(left).toBeLessThanOrEqual(1_000);
   });
 
   it("counts a memory-limit reset that fails pi during the wake's wait against the alarm breaker", async () => {
