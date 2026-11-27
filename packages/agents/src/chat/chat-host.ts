@@ -8,6 +8,7 @@
  * `@cloudflare/ai-chat`, not a public API.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { readUIMessageStream } from "ai";
 import type { UIMessage, UIMessageChunk } from "ai";
 import type { Sessions } from "../sessions/sessions";
@@ -435,6 +436,42 @@ function chunksOf(
   });
 }
 
+/** The turn whose `respond` the caller runs inside, by request id. */
+const runningTurn = new AsyncLocalStorage<string>();
+
+/**
+ * `chunks`, read inside the turn's context: a host that produces its reply
+ * as it is read (its hooks and tools run then) runs that code there too.
+ */
+function insideTurn(
+  requestId: string,
+  chunks: ReadableStream<UIMessageChunk>
+): ReadableStream<UIMessageChunk> {
+  const reader = chunks.getReader();
+  return new ReadableStream<UIMessageChunk>({
+    async pull(controller) {
+      const next = await runningTurn.run(requestId, () => reader.read());
+      if (!next.done) return controller.enqueue(next.value);
+      // Read to its end: the host's stream is not left locked.
+      reader.releaseLock();
+      controller.close();
+    },
+    cancel: (reason) => runningTurn.run(requestId, () => reader.cancel(reason))
+  });
+}
+
+/**
+ * The request id of the chat turn the caller runs inside: set while the
+ * turn definition calls the host's `respond`, and seen by everything that
+ * call starts. `undefined` anywhere else. A host uses it to refuse what
+ * would wait on the turn from inside it.
+ *
+ * @internal
+ */
+export function runningChatTurn(): string | undefined {
+  return runningTurn.getStore();
+}
+
 /**
  * The one chat-turn task handler. The host registers it on its Tasks under
  * the name it chooses, and starts runs on the lane it chooses. A run builds
@@ -709,7 +746,7 @@ export function chatTurnDefinition(
     let reply: UIMessage | undefined;
     let overflowTried = false;
     for (;;) {
-      const source = await host.respond(call);
+      const source = await runningTurn.run(requestId, () => host.respond(call));
       if (!source) {
         writer?.close({ discard: true });
         return report({ requestId, status: "skipped" });
@@ -773,7 +810,12 @@ export function chatTurnDefinition(
         }
       };
       const recorded = watchStall(
-        chunksOf(source, requestId),
+        // Whatever `respond` returned, it is turned into chunks and read
+        // inside the turn's context.
+        insideTurn(
+          requestId,
+          runningTurn.run(requestId, () => chunksOf(source, requestId))
+        ),
         recovery === false ? undefined : recovery?.stallTimeoutMs,
         // An approved call of the reply continued runs with no new input.
         (continuing?.parts ?? []).flatMap((part) => {

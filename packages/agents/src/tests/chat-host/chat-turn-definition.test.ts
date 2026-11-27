@@ -4,7 +4,8 @@ import type { ChatTurnHostObject } from "../capabilities/chat-turn";
 import {
   CHAT_CLEARED,
   chatTurnDefinition,
-  chatTurnStreamId
+  chatTurnStreamId,
+  runningChatTurn
 } from "../../chat/chat-host";
 import type { TaskStep } from "../../tasks/types";
 import { TaskSettlement } from "../../tasks/settlement";
@@ -295,6 +296,149 @@ describe("chatTurnDefinition", () => {
       ).toMatchObject({ state: "streaming" });
     });
   });
+
+  it("names the running turn to what respond starts, each time it is called, and to nothing else", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const seen: Array<string | undefined> = [];
+      let calls = 0;
+      expect(runningChatTurn()).toBeUndefined();
+      const result = await definitionOf(instance, {
+        respond: async (call) => {
+          calls++;
+          seen.push(runningChatTurn());
+          // Still there after the call has waited on something.
+          await Promise.resolve();
+          await instance.sessions.session("s1").getHistory();
+          seen.push(runningChatTurn());
+          if (calls === 1) {
+            // The first reply overflows: respond is called again.
+            return new ReadableStream({
+              start(controller) {
+                controller.error(new Error("context too long"));
+              }
+            });
+          }
+          return instance.host.respond(call);
+        },
+        hooks: {
+          classifyError: () => "overflow",
+          onContextOverflow: async () => {
+            // The hook is not part of the reply.
+            seen.push(runningChatTurn());
+            return true;
+          }
+        }
+      })({ trigger: "server" }, laterAttempt("run-ctx", 1));
+      expect(result).toMatchObject({ status: "completed" });
+      expect(seen).toEqual([
+        "run-ctx",
+        "run-ctx",
+        undefined,
+        "run-ctx",
+        "run-ctx"
+      ]);
+      expect(runningChatTurn()).toBeUndefined();
+    });
+  });
+
+  it.each([
+    "a stream",
+    "an async iterable",
+    "a response",
+    "an object with toUIMessageStream"
+  ] as const)(
+    "names the running turn to a reply produced as it is read: %s",
+    async (kind) => {
+      const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+      await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+        await instance.lifecycle.start();
+        const seen: Array<string | undefined> = [];
+        let made: ReadableStream | undefined;
+        const chunks = [
+          { type: "start", messageId: "a1" },
+          { type: "text-start", id: "t1" },
+          { type: "text-delta", id: "t1", delta: "Hi" },
+          { type: "text-end", id: "t1" },
+          { type: "finish" }
+        ];
+        const result = await definitionOf(instance, {
+          respond: async () => {
+            if (kind === "a stream") {
+              let next = 0;
+              return (made = new ReadableStream({
+                // Each chunk is made when it is asked for.
+                pull(controller) {
+                  seen.push(runningChatTurn());
+                  if (next < chunks.length) {
+                    controller.enqueue(chunks[next++] as never);
+                  } else controller.close();
+                }
+              }));
+            }
+            if (kind === "a response") {
+              const encoder = new TextEncoder();
+              let next = 0;
+              return new Response(
+                new ReadableStream({
+                  pull(controller) {
+                    seen.push(runningChatTurn());
+                    if (next < chunks.length) {
+                      controller.enqueue(
+                        encoder.encode(
+                          `data: ${JSON.stringify(chunks[next++])}\n\n`
+                        )
+                      );
+                    } else controller.close();
+                  }
+                }),
+                { headers: { "content-type": "text/event-stream" } }
+              );
+            }
+            const iterable = (async function* () {
+              for (const chunk of chunks) {
+                seen.push(runningChatTurn());
+                yield chunk as never;
+              }
+            })();
+            if (kind === "an async iterable") return iterable;
+            // An iterator that says something else: it must not be read.
+            const other = (async function* () {
+              yield { type: "start", messageId: "a1" } as never;
+              yield { type: "text-start", id: "t1" } as never;
+              yield { type: "text-delta", id: "t1", delta: "Wrong" } as never;
+              yield { type: "text-end", id: "t1" } as never;
+              yield { type: "finish" } as never;
+            })();
+            // Both shapes at once: the method is the one that is read.
+            return Object.assign(other, {
+              toUIMessageStream: () => {
+                seen.push(runningChatTurn());
+                let next = 0;
+                return new ReadableStream({
+                  pull(controller) {
+                    seen.push(runningChatTurn());
+                    if (next < chunks.length) {
+                      controller.enqueue(chunks[next++] as never);
+                    } else controller.close();
+                  }
+                });
+              }
+            });
+          }
+        })({ trigger: "server" }, laterAttempt(`run-read-${kind}`, 1));
+        expect(result).toMatchObject({ status: "completed" });
+        const stored = await instance.sessions.session("s1").getHistory();
+        expect(JSON.stringify(stored.at(-1))).toContain("Hi");
+        expect(JSON.stringify(stored.at(-1))).not.toContain("Wrong");
+        // The host's own stream is not left locked once it was read.
+        if (kind === "a stream") expect(made?.locked).toBe(false);
+        expect(seen.length).toBeGreaterThanOrEqual(chunks.length);
+        expect(new Set(seen)).toEqual(new Set([`run-read-${kind}`]));
+      });
+    }
+  );
 
   it("asks the model again once after making room for a context overflow", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
