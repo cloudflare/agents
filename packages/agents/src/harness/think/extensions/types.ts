@@ -151,7 +151,14 @@ export type ExtensionHooks = {
   onStepFinish: [ThinkStepFinishContext, void];
   onTurnEnd: [ThinkTurnEndContext, void];
   onError: [{ readonly error: unknown } & ThinkHookContext, void];
-  classifyError: [{ readonly error: unknown }, ThinkErrorClass | void];
+  classifyError: [
+    {
+      readonly error: unknown;
+      readonly session?: ThinkSessionId;
+      readonly operationId?: string;
+    },
+    ThinkErrorClass | void
+  ];
   onRecovery: [ThinkRecoveryContext, "continue" | "abandon" | void];
 };
 

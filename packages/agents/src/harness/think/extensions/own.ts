@@ -96,7 +96,14 @@ export function optionsExtension(
       );
     }
     if (hooks.classifyError) {
-      ctx.on("classifyError", ({ error }) => hooks.classifyError?.(error));
+      ctx.on("classifyError", ({ error, session, operationId }) =>
+        hooks.classifyError?.(
+          error,
+          session !== undefined && operationId !== undefined
+            ? { session, operationId }
+            : undefined
+        )
+      );
     }
     if (hooks.onRecovery) {
       ctx.on("onRecovery", (recovery) => hooks.onRecovery?.(recovery));

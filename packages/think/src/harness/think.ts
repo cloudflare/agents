@@ -765,8 +765,8 @@ export class Think<
             : { ...kept, parts: [] };
         },
         onRecovery: (context) => this.#onRecovery(context),
-        onContextOverflow: ({ operationId }) =>
-          this.#onContextOverflow(operationId),
+        onContextOverflow: ({ operationId, signal }) =>
+          this.#onContextOverflow(operationId, signal),
         beforeTurn: (turn) => this.#beforeTurn(turn),
         beforeToolCall: async (call) => {
           // As in Think, the final-answer tool is plumbing: no hook sees it.
@@ -1013,7 +1013,8 @@ export class Think<
               end.reason !== undefined && { error: end.reason })
           });
         },
-        classifyError: (error) => this.#classify(error)
+        classifyError: (error, context) =>
+          this.#classify(error, context?.operationId)
       }
     });
     this.#chat = new ThinkChat({
@@ -1813,7 +1814,10 @@ export class Think<
     return error;
   }
 
-  classifyChatError(_error: unknown): ChatErrorClassification | void {}
+  classifyChatError(
+    _error: unknown,
+    _ctx?: ChatErrorContext
+  ): ChatErrorClassification | void {}
 
   // ── Messages ──────────────────────────────────────────────────────
 
@@ -3450,10 +3454,14 @@ export class Think<
    * Without it, or when compaction can't shorten the history, the
    * overflow ends the turn.
    */
-  async #onContextOverflow(operationId: string): Promise<boolean> {
+  async #onContextOverflow(
+    operationId: string,
+    signal: AbortSignal
+  ): Promise<boolean> {
     // If the turn ends on it, its caller hears an overflow.
     this.#overflowed.add(operationId);
-    if (!this.contextOverflow?.reactive) return false;
+    // A stopped turn is not compacted, nor run again.
+    if (!this.contextOverflow?.reactive || signal.aborted) return false;
     let shortened = false;
     try {
       shortened = Boolean(await this.session.compact());
@@ -3468,6 +3476,8 @@ export class Think<
       requestId: operationId,
       attempt: 1
     });
+    // Stopped while it compacted: the turn ends.
+    if (signal.aborted) return false;
     if (shortened && this.#ownTurn?.operationId === operationId) {
       // The retry is the same turn run again: its hooks run again.
       this.#ownTurn = undefined;
@@ -3577,13 +3587,17 @@ export class Think<
     if (met.some(Boolean)) this.#turnMaxSteps = step + 1;
   }
 
-  #classify(error: unknown): ThinkErrorClass {
-    // As in Think: the app's classifier wins; without a verdict from it,
-    // what the provider's error says.
+  #classify(error: unknown, operationId?: string): ThinkErrorClass {
+    // As in Think: the app's classifier wins, hearing the turn it
+    // classifies for; without a verdict from it, what the provider's
+    // error says.
     let classification: ChatErrorClassification | void = undefined;
     if (isMethodOverridden(this, "classifyChatError")) {
       try {
-        classification = this.classifyChatError(error);
+        classification = this.classifyChatError(error, {
+          ...(operationId !== undefined && { requestId: operationId }),
+          stage: "stream"
+        });
       } catch (err) {
         console.warn(
           `[Think] classifyChatError threw; treating as unclassified: ${err instanceof Error ? err.message : String(err)}`
