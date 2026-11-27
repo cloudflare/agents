@@ -24,8 +24,8 @@ type AdmissionStub = {
   getTranscriptsSeenForTest(): Promise<string[][]>;
   getIncidentsForTest(): Promise<string[]>;
   ageAdmissionsForTest(ms: number): Promise<void>;
-  queuedTurnCountForTest(): Promise<number>;
   waitUntilStableForTest(): Promise<boolean>;
+  waitForIdleForTest(): Promise<unknown>;
 };
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -89,7 +89,12 @@ async function waitFor<T>(
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const value = await read();
-    if (ok(value) || Date.now() > deadline) return value;
+    if (ok(value)) return value;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `waitFor timed out; last value: ${JSON.stringify(value)}`
+      );
+    }
     await delay(100);
   }
 }
@@ -116,6 +121,37 @@ async function agent(binding: string, room: string): Promise<AdmissionStub> {
   )) as unknown as AdmissionStub;
 }
 
+/** Every frame `ws` receives from now on, parsed. */
+function framesOf(ws: WebSocket): unknown[] {
+  const frames: unknown[] = [];
+  ws.addEventListener("message", (event: MessageEvent) => {
+    frames.push(JSON.parse(event.data as string));
+  });
+  return frames;
+}
+
+/**
+ * Wait until `requestId`'s first chunk is out: its turn is running. A queue
+ * entry alone can be only a reservation.
+ */
+async function firstChunk(
+  frames: readonly unknown[],
+  requestId: string
+): Promise<void> {
+  await waitFor(
+    async () => frames,
+    (seen) =>
+      seen.some(
+        (frame) =>
+          isUseChatResponseMessage(frame) &&
+          frame.id === requestId &&
+          !frame.done &&
+          typeof frame.body === "string" &&
+          frame.body.includes("chunk-")
+      )
+  );
+}
+
 /**
  * Start r1 (slow) and queue r2 behind it, then wait until r2 is a durable
  * record waiting on r1: the state a reset is meant to find.
@@ -124,11 +160,9 @@ async function queueBehindRunningTurn(
   ws: WebSocket,
   stub: AdmissionStub
 ): Promise<void> {
+  const frames = framesOf(ws);
   sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
-  await waitFor(
-    () => stub.queuedTurnCountForTest(),
-    (count) => count >= 1
-  );
+  await firstChunk(frames, "r1");
   sendChatRequest(ws, "r2", [user("u1", "one"), user("u2", "two")], QUICK);
   await waitFor(
     () => stub.getAdmissionsForTest(),
@@ -136,12 +170,16 @@ async function queueBehindRunningTurn(
   );
 }
 
-/** Wait until nothing is left to run: no record, no turn, no recovery. */
+/**
+ * Wait until nothing is left to run: no record, no turn (a restored request
+ * that is streaming has no record any more), and a stable chat.
+ */
 async function settled(stub: AdmissionStub): Promise<void> {
   await waitFor(
     () => stub.getAdmissionsForTest(),
     (records) => records.length === 0
   );
+  await stub.waitForIdleForTest();
   await stub.waitUntilStableForTest();
 }
 
@@ -362,12 +400,10 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
     const { ws } = await connectChatWS(
       `/agents/recovery-slow-stream-agent/${room}`
     );
+    const frames = framesOf(ws);
     sendChatRequest(ws, "r1", [user("u1", "one")], SLOW);
     const stub = await agent(binding, room);
-    await waitFor(
-      () => stub.queuedTurnCountForTest(),
-      (count) => count >= 1
-    );
+    await firstChunk(frames, "r1");
     // The fiber is there and the record is still there, as a reset in
     // between leaves them.
     await stub.seedAdmissionForTest("r1", ["u1"]);
