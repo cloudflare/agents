@@ -171,12 +171,18 @@ describe("chat recovery, through public behaviour", () => {
     async function resetDuringTurn(name: string, chunksBeforeReset: number) {
       const room = `${name}-${crypto.randomUUID()}`;
       const agent = () => getAgentByName(env.ThinkTestAgent, room);
-      await (
-        await agent()
-      ).useSlowModelForTest(
-        ["one ", "two ", "three ", "four ", "five ", "six "],
-        chunksBeforeReset === 0 ? 2_000 : 150
-      );
+      const startedAt = Date.now();
+      if (chunksBeforeReset === 0) {
+        // No stream at all: the model call waits on the provider.
+        await (await agent()).hangModelAtConnectForTest();
+      } else {
+        await (
+          await agent()
+        ).useSlowModelForTest(
+          ["one ", "two ", "three ", "four ", "five ", "six "],
+          150
+        );
+      }
       const res = await exports.default.fetch(
         `http://example.com/agents/think-test-agent/${room}`,
         { headers: { Upgrade: "websocket" } }
@@ -186,7 +192,6 @@ describe("chat recovery, through public behaviour", () => {
       ws.accept();
       const requestId = crypto.randomUUID();
       let chunks = 0;
-      let started = false;
       ws.addEventListener("message", (event) => {
         const frame = JSON.parse(String(event.data)) as {
           type?: string;
@@ -194,7 +199,6 @@ describe("chat recovery, through public behaviour", () => {
           done?: boolean;
         };
         if (frame.type !== "cf_agent_use_chat_response" || frame.done) return;
-        started = true;
         if (frame.body?.includes("text-delta")) chunks++;
       });
       ws.send(
@@ -215,12 +219,14 @@ describe("chat recovery, through public behaviour", () => {
           }
         })
       );
-      // Mid-reply: after some text. Before the first chunk: once the reply
-      // has begun streaming, with no text yet.
+      // Mid-reply: after some text. Before the first chunk: while the model
+      // call waits on the provider, before any stream.
       await vi.waitFor(
-        () => {
+        async () => {
           expect(
-            chunksBeforeReset === 0 ? started : chunks >= chunksBeforeReset
+            chunksBeforeReset === 0
+              ? await (await agent()).modelConnectingForTest()
+              : chunks >= chunksBeforeReset
           ).toBe(true);
         },
         { timeout: 10_000, interval: 10 }
@@ -241,16 +247,21 @@ describe("chat recovery, through public behaviour", () => {
         },
         { timeout: 15_000, interval: 50 }
       );
-      return { requestId, calls };
+      return { requestId, calls, startedAt };
     }
 
     it("tells onChatRecovery the partial a reset cut off mid-reply", async () => {
-      const { requestId, calls } = await resetDuringTurn("reset-mid", 2);
+      const { requestId, calls, startedAt } = await resetDuringTurn(
+        "reset-mid",
+        2
+      );
       const [first] = calls;
       // What the reset left of the reply: text the tab had seen, not empty.
       expect(first?.partialText).toMatch(/^one /);
+      expect(first?.streamId).toEqual(expect.any(String));
       expect(first?.streamId).not.toBe("");
-      expect(first?.createdAt).toEqual(expect.any(Number));
+      expect(first?.createdAt).toBeGreaterThanOrEqual(startedAt);
+      expect(first?.createdAt).toBeLessThanOrEqual(Date.now());
       expect(first?.recoveryRootRequestId).toBe(requestId);
     }, 30_000);
 

@@ -3714,6 +3714,26 @@ export class ThinkTestAgent extends Think {
     };
   }
 
+  private _modelConnectingForTest = false;
+
+  /**
+   * The next turns' model never answers its call: the turn waits on the
+   * provider's connect, with no stream begun, until it is reset.
+   */
+  async hangModelAtConnectForTest(): Promise<void> {
+    this._modelConnectingForTest = false;
+    this._turnConfigOverride = {
+      model: createAbortAwareMockModel("connect", () => {
+        this._modelConnectingForTest = true;
+      })
+    };
+  }
+
+  /** Whether a turn's model call is waiting on the provider's connect. */
+  async modelConnectingForTest(): Promise<boolean> {
+    return this._modelConnectingForTest;
+  }
+
   /** What onChatRecovery was told in this isolate, in order. */
   async recoveryCallsForTest(): Promise<
     ThinkTestAgent["_recoveryCallsForTest"]
