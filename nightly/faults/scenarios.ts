@@ -262,7 +262,8 @@ function answered(run: Run, finalText?: string): Run {
 
 /** The object restarted: the reset the scenario asked for happened. */
 function restarted(run: Run): Run {
-  if (run.state.starts < 2) {
+  // An older Worker reports no count: that is not a restart either.
+  if (!(run.state.starts >= 2)) {
     run.checks.push(`the object started ${run.state.starts} time(s): no reset`);
   }
   return run;
