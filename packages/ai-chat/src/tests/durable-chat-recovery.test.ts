@@ -300,6 +300,14 @@ interface ChatRecoveryTestStub {
   ): Promise<string>;
   startedFailingTurnStatusForTest(): Promise<string>;
   endedRequestIdsForTest(): Promise<string[]>;
+  drainReleasedChatTurnForTest(
+    runId: string,
+    input: unknown,
+    snapshot?: unknown
+  ): Promise<void>;
+  releasedLeftoversForTest(
+    runId: string
+  ): Promise<{ snapshot: boolean; progress: boolean }>;
   endRetryWaitsForTest(): Promise<number>;
   openChatLaneRunsForTest(): Promise<number>;
   setStashData(data: unknown): Promise<void>;
@@ -492,6 +500,86 @@ describe("onChatRecovery", () => {
     );
     expect(await agentStub.getChatRecoveryIncidentsForTest()).toEqual([]);
     expect(await agentStub.getChatRecoveringForTest()).toBeNull();
+  });
+
+  it("carries a released turn's run: its snapshot gives onChatRecovery the request, and the snapshot and progress count are removed", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.persistMessages([
+      { id: "u-rel", role: "user", parts: [{ type: "text", text: "Hi" }] }
+    ] as ChatMessage[]);
+
+    // The run as the release wrote it: `chat_<nonce>`, naming its request,
+    // with the turn's snapshot under the run's id.
+    await agentStub.drainReleasedChatTurnForTest(
+      "chat_released-nonce",
+      { requestId: "req-rel", continuation: false, nonce: "released-nonce" },
+      {
+        __cfAIChatFiberSnapshot: {
+          kind: "ai-chat-turn",
+          version: 1,
+          requestId: "req-rel",
+          continuation: false,
+          latestMessageId: "u-rel",
+          latestMessageRole: "user",
+          latestUserMessageId: "u-rel",
+          startedAt: Date.now(),
+          lastBody: { mode: "released" }
+        },
+        user: { responseId: "r-rel" }
+      }
+    );
+    await vi.waitFor(async () =>
+      expect(await agentStub.openChatLaneRunsForTest()).toBe(0)
+    );
+
+    const contexts = (await agentStub.getRecoveryContexts()) as Array<{
+      requestId: string;
+      recoveryKind: string;
+      recoveryData: unknown;
+      lastBody?: unknown;
+    }>;
+    expect(contexts).toEqual([
+      expect.objectContaining({
+        requestId: "req-rel",
+        recoveryKind: "retry",
+        recoveryData: { responseId: "r-rel" },
+        lastBody: { mode: "released" }
+      })
+    ]);
+    // The question is answered, under the released request id.
+    expect(await agentStub.endedRequestIdsForTest()).toContain("req-rel");
+    expect(
+      await agentStub.releasedLeftoversForTest("chat_released-nonce")
+    ).toEqual({ snapshot: false, progress: false });
+  });
+
+  it("carries a recovery attempt's run that an earlier version left waiting", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.persistMessages([
+      { id: "u-att", role: "user", parts: [{ type: "text", text: "Hi" }] },
+      {
+        id: "a-att",
+        role: "assistant",
+        parts: [{ type: "text", text: "Partial" }]
+      }
+    ] as ChatMessage[]);
+
+    await agentStub.drainReleasedChatTurnForTest("chat_attempt-run", {
+      attempt: {
+        callback: "_chatRecoveryContinue",
+        data: { originalRequestId: "req-att", targetAssistantId: "a-att" }
+      }
+    });
+    await vi.waitFor(async () =>
+      expect(await agentStub.openChatLaneRunsForTest()).toBe(0)
+    );
+
+    expect(await storedAssistantText(agentStub)).toContain(
+      "Continued response."
+    );
+    expect(await agentStub.endedRequestIdsForTest()).toContain("req-att");
   });
 
   it("does not carry a turn an earlier version left cut off when the conversation moved on", async () => {

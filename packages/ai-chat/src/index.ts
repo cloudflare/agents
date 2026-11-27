@@ -44,6 +44,7 @@ import {
   CHAT_REQUEST_CONTEXT_KEY,
   CHAT_STASH_CHECKPOINT,
   CHAT_RECOVERY_INCIDENT_KEY_PREFIX,
+  CHAT_RECOVERY_PROGRESS_KEY,
   planInterruptedTurn,
   requestContextFromLegacy,
   storableRequestContext,
@@ -4256,6 +4257,57 @@ export class AIChatAgent<
   }
 
   /**
+   * The Task handler for a chat turn's run an earlier version left
+   * (definition `__cf_internal_chat_turn`), replayed after the update. A
+   * released turn's run names its request, with its snapshot under
+   * `__cf_chat_turn_snapshot:<runId>`; a recovery attempt's run carries
+   * the attempt. Either way the turn is carried onto the chat's lane and
+   * this run ends.
+   */
+  protected async _drainReleasedChatTurn(
+    input: unknown,
+    step: { readonly id: string; readonly createdAt: number }
+  ): Promise<void> {
+    const released = (input ?? {}) as {
+      requestId?: string;
+      attempt?: { callback?: string; data?: Record<string, unknown> };
+    };
+    if (released.attempt?.callback !== undefined) {
+      await this._drainReleasedRecovery(released.attempt);
+      return;
+    }
+    if (released.requestId === undefined) return;
+    const snapshotKey = `__cf_chat_turn_snapshot:${step.id}`;
+    await this._recoverChatTurn({
+      requestId: released.requestId,
+      persisted: await this.ctx.storage.get(snapshotKey),
+      createdAt: step.createdAt
+    });
+    await this.ctx.storage.delete(snapshotKey);
+  }
+
+  /**
+   * The Task handler for a recovery an earlier version had scheduled
+   * (definition `__cf_internal_chat_recovery`, input `{ callback, data }`).
+   */
+  protected async _drainReleasedRecovery(input: unknown): Promise<void> {
+    const released = (input ?? {}) as {
+      callback?: string;
+      data?: Record<string, unknown>;
+    };
+    if (
+      released.callback !== "_chatRecoveryContinue" &&
+      released.callback !== "_chatRecoveryRetry"
+    ) {
+      return;
+    }
+    await this._carryReleasedRecovery(
+      released.callback === "_chatRecoveryContinue" ? "continue" : "retry",
+      (released.data ?? {}) as ChatRecoveryContinueData & ChatRecoveryRetryData
+    );
+  }
+
+  /**
    * A recovery an earlier version had scheduled (its Task run, replayed
    * here): the reply it was to continue, or the question it was to answer
    * again, becomes a turn on the chat's lane under the original request id.
@@ -4320,6 +4372,8 @@ export class AIChatAgent<
       )
       .map(([key]) => key);
     if (keys.length > 0) await this.ctx.storage.delete(keys);
+    // The earlier version's count of recovery progress has no reader now.
+    await this.ctx.storage.delete(CHAT_RECOVERY_PROGRESS_KEY);
     // The earlier version may have said the chat is recovering: the turn
     // is an ordinary one from here, and says so itself if it is cut off.
     await this._setChatRecovering(false);

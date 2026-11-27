@@ -4645,6 +4645,39 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     }
   }
 
+  /**
+   * Replay a chat turn's run as an earlier version left it: the run's input,
+   * and for a released turn its snapshot under the run's id.
+   */
+  async drainReleasedChatTurnForTest(
+    runId: string,
+    input: unknown,
+    snapshot?: unknown
+  ): Promise<void> {
+    if (snapshot !== undefined) {
+      await this.ctx.storage.put(`__cf_chat_turn_snapshot:${runId}`, snapshot);
+    }
+    await this.ctx.storage.put("cf:chat-recovery:progress", 7);
+    await this._drainReleasedChatTurn(input, {
+      id: runId,
+      createdAt: Date.now()
+    });
+  }
+
+  /** What is left of an earlier version's turn snapshot and progress count. */
+  async releasedLeftoversForTest(runId: string): Promise<{
+    snapshot: boolean;
+    progress: boolean;
+  }> {
+    return {
+      snapshot:
+        (await this.ctx.storage.get(`__cf_chat_turn_snapshot:${runId}`)) !==
+        undefined,
+      progress:
+        (await this.ctx.storage.get("cf:chat-recovery:progress")) !== undefined
+    };
+  }
+
   /** How the turn `startFailingReaderTurnForTest` started ended. */
   async startedFailingTurnStatusForTest(): Promise<string> {
     if (!this._startedFailingTurn) throw new Error("no turn was started");
