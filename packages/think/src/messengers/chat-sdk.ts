@@ -66,8 +66,8 @@ export class ThinkMessengerStateAgent extends ChatSdkStateAgent {}
  */
 const FALLBACK_STREAMING_PLACEHOLDER_TEXT = null;
 
-/** The posts that deliver a recovered messenger reply, in order. */
-function recoveredReplyPosts(
+/** The posts that deliver a recovered messenger reply, in order. @internal */
+export function recoveredReplyPosts(
   definition: { delivery?: MessengerDeliveryPolicy },
   input: {
     outcome: "completed" | "interrupted";
@@ -175,6 +175,55 @@ interface ChatSdkQueueInternals {
     threadId: string,
     lockKey: string
   ): Promise<void>;
+}
+
+/**
+ * Answer the messages queued on `threadId` behind a reply whose isolate
+ * died: once the dead holder's lock expires, take the lock and hand the
+ * queue to the SDK's own drain. A live holder drains the queue itself,
+ * which ends the wait.
+ *
+ * @internal
+ */
+export async function drainStrandedQueue(
+  chat: Chat<Record<string, Adapter>>,
+  definition: NormalizedMessengerDefinition,
+  threadId: string
+): Promise<void> {
+  const internals = chat as unknown as Partial<ChatSdkQueueInternals>;
+  if (
+    typeof internals.getLockKey !== "function" ||
+    typeof internals.drainQueue !== "function"
+  ) {
+    return;
+  }
+  await chat.initialize();
+  const state = chat.getState();
+  const lockKey = await internals.getLockKey.call(
+    chat,
+    definition.adapter,
+    threadId
+  );
+  const deadline = Date.now() + CHAT_SDK_LOCK_TTL_MS + 5_000;
+  while ((await state.queueDepth(lockKey)) > 0) {
+    const lock = await state.acquireLock(lockKey, CHAT_SDK_LOCK_TTL_MS);
+    if (lock) {
+      try {
+        await internals.drainQueue.call(
+          chat,
+          lock,
+          definition.adapter,
+          threadId,
+          lockKey
+        );
+      } finally {
+        await state.releaseLock(lock);
+      }
+      return;
+    }
+    if (Date.now() >= deadline) return;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
 }
 
 /** Fill in Think's queue-entry TTL where the setting leaves it unset. */
@@ -422,41 +471,11 @@ export class ThinkMessengerRuntime {
     definition: NormalizedMessengerDefinition,
     threadId: string
   ): Promise<void> {
-    const chat = (this.chat ??= this.createChat());
-    const internals = chat as unknown as Partial<ChatSdkQueueInternals>;
-    if (
-      typeof internals.getLockKey !== "function" ||
-      typeof internals.drainQueue !== "function"
-    ) {
-      return;
-    }
-    await chat.initialize();
-    const state = chat.getState();
-    const lockKey = await internals.getLockKey.call(
-      chat,
-      definition.adapter,
+    await drainStrandedQueue(
+      (this.chat ??= this.createChat()),
+      definition,
       threadId
     );
-    const deadline = Date.now() + CHAT_SDK_LOCK_TTL_MS + 5_000;
-    while ((await state.queueDepth(lockKey)) > 0) {
-      const lock = await state.acquireLock(lockKey, CHAT_SDK_LOCK_TTL_MS);
-      if (lock) {
-        try {
-          await internals.drainQueue.call(
-            chat,
-            lock,
-            definition.adapter,
-            threadId,
-            lockKey
-          );
-        } finally {
-          await state.releaseLock(lock);
-        }
-        return;
-      }
-      if (Date.now() >= deadline) return;
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-    }
   }
 
   private createChat(): Chat<Record<string, Adapter>> {

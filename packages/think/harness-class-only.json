@@ -493,7 +493,7 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > retries a pre-stream interrupted regeneration as a new branch (#2028)",
+    "test": "Think \u2014 onChatRecovery > retries a pre-stream interrupted regeneration as a new branch (#2028)",
     "reason": "an interrupted regeneration built from a seeded private fiber snapshot, recovered by hand (`runScheduledRecoveryRetryForTest`)",
     "successor": {
       "file": "chat-recovery-public.test.ts",
@@ -502,7 +502,7 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > retries an interrupted opened stream with no assistant content",
+    "test": "Think \u2014 onChatRecovery > retries an interrupted opened stream with no assistant content",
     "reason": "an interrupted turn built from seeded private stream rows with no text, recovered by hand",
     "successor": {
       "file": "chat-recovery-public.test.ts",
@@ -511,7 +511,7 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > re-throws a \"This script has been upgraded\" supersede (defer + re-run) and does NOT terminalize",
+    "test": "Think \u2014 onChatRecovery > re-throws a \"This script has been upgraded\" supersede (defer + re-run) and does NOT terminalize",
     "reason": "a superseded-isolate error injected into the class's scheduled recovery callback (private); a code update supersedes the isolate, which the successor stands for with a reset while onChatRecovery runs",
     "successor": {
       "file": "chat-recovery-public.test.ts",
@@ -520,7 +520,7 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > keeps a messenger reply pending while the platform re-runs recovery",
+    "test": "Think \u2014 onChatRecovery > keeps a messenger reply pending while the platform re-runs recovery",
     "reason": "a code-update reset error injected into the class's scheduled recovery callback (private), with a seeded messenger delivery",
     "successor": {
       "file": "messengers.test.ts",
@@ -529,7 +529,7 @@
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — onChatRecovery > leaves the recovered submission `running` on a deferral so the re-run picks it up (#1730)",
+    "test": "Think \u2014 onChatRecovery > leaves the recovered submission `running` on a deferral so the re-run picks it up (#1730)",
     "reason": "a platform deferral injected into the class's scheduled recovery callback (private), with a seeded running submission",
     "successor": {
       "file": "submissions.test.ts",
@@ -538,20 +538,137 @@
   },
   {
     "file": "media-eviction.test.ts",
-    "test": "mediaEviction — aged media leaves the conversation (#1710) > evicts media a late update puts on a row the cache does not hold",
+    "test": "mediaEviction \u2014 aged media leaves the conversation (#1710) > evicts media a late update puts on a row the cache does not hold",
     "reason": "Runs each pass by hand through Think's private _evictAgedMediaBestEffort seam.",
     "successor": {
       "file": "media-eviction.test.ts",
-      "test": "mediaEviction — a pass that runs on its own > evicts media a late update puts on a row the view does not hold"
+      "test": "mediaEviction \u2014 a pass that runs on its own > evicts media a late update puts on a row the view does not hold"
     }
   },
   {
     "file": "think-session.test.ts",
-    "test": "Think — waitUntilStable > detects a pending CLIENT-tool interaction living ONLY in the in-flight accumulator (mid-stream, pre-persist)",
+    "test": "Think \u2014 waitUntilStable > detects a pending CLIENT-tool interaction living ONLY in the in-flight accumulator (mid-stream, pre-persist)",
     "reason": "Seeds Think's private in-flight accumulator and client tools (_turns).",
     "successor": {
       "file": "client-tools.test.ts",
-      "test": "Think — a client tool's call while its reply streams > waits on it before the reply is stored"
+      "test": "Think \u2014 a client tool's call while its reply streams > waits on it before the reply is stored"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > burst replies end to end (#2312) > answers a repeated reply id once, after the first was answered",
+    "reason": "a delivery sink registered under the class's reserved `__cf_delivery:messenger-reply` name and its kept reply run (the class's reply-run rows)",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > streamed replies on adapters without native streaming > answers a webhook its platform sent twice once"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > recovered replies reach the thread (#2106) > apologizes on start for a pending reply whose incident is gone",
+    "reason": "calls the class's private start step `_replayMessengerRecoveryDeliveries` and waits on its delivery run (`tasks.peek` of `recoveredReplyId`); the successor seeds the same released row and restarts the object",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > recovered replies reach the thread (#2106) > apologizes after a restart for a reply think@0.24.0 left unsettled"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > recovered replies reach the thread (#2106) > keeps a pending reply on start while its incident is still recovering",
+    "reason": "holds a released reply for the class's own recovery incident (`cf:chat-recovery:incident:`), which the previous engine ran; after the move that recovery does not run (left-over jobs complete without doing anything), so the shell apologizes, as for an incident that is gone",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > recovered replies reach the thread (#2106) > apologizes after a restart for a reply think@0.24.0 left unsettled"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > recovered replies reach the thread (#2106) > holds a migrated reply whose incident still recovers, so recovery's release delivers it",
+    "reason": "releases the held delivery through the class's private `_releaseMessengerRecovery` after its private start step; the shell has no previous-engine recovery to release it, so a released reply left unsettled is apologized for",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > recovered replies reach the thread (#2106) > apologizes after a restart for a reply think@0.24.0 left unsettled"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > recovered replies reach the thread (#2106) > resumes a multi-post recovered reply after its last checkpoint",
+    "reason": "calls the class's private start step `_replayMessengerRecoveryDeliveries`; the successor seeds the same released row (cursor 1) and restarts the object",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > recovered replies reach the thread (#2106) > posts the rest of a reply think@0.24.0 settled, from its cursor, after a restart"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > recovered replies reach the thread (#2106) > posts each chunk once when overlapping deliveries share a recovered reply",
+    "reason": "releases the class's held delivery twice at once beside its private start step (`releaseDelivery`, `_replayMessengerRecoveryDeliveries`); the successor delivers a released reply's posts each once, from its cursor",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > recovered replies reach the thread (#2106) > posts the rest of a reply think@0.24.0 settled, from its cursor, after a restart"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > recovered replies reach the thread (#2106) > releases the reply with its outcome before recovery reports completion",
+    "reason": "reads the class's staged reply state (`tasks.checkpointOf` of `recoveredReplyId`) when its recovery emits `chat:recovery:completed`",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > recovered replies reach the thread (#2106) > posts the recovered answer instead of the apology (conversation: self)"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > burst replies end to end (#2312) > drains messages queued behind a reply recovered after a restart",
+    "reason": "drives the class's private messenger runtime (`_messengerRuntime.chat`'s state queue) and its reply recovery (`recoverMessengerReply`, `messengerReplySink`) directly; the successor queues a message behind a reply and resets the object mid-reply",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > burst replies end to end (#2312) > answers a message queued behind a reply a reset cut off"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > burst replies end to end (#2312) > answers messages queued behind a reply given up",
+    "reason": "drives the class's private messenger runtime (`_messengerRuntime.chat`'s state queue) and its reply recovery (`recoverMessengerReply`, `messengerReplySink`) directly, calling the class sink's `onGiveUp`",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > burst replies end to end (#2312) > answers a message queued behind a reply a reset cut off"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > burst replies end to end (#2312) > answers messages queued behind a completed reply",
+    "reason": "drives the class's private messenger runtime (`_messengerRuntime.chat`'s state queue) and its reply recovery (`recoverMessengerReply`, `messengerReplySink`) directly, at the class's `completed` stage",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > burst replies end to end (#2312) > answers a message queued behind a reply a reset cut off"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > burst replies end to end (#2312) > keeps queued messages behind a recovered reply that will be retried",
+    "reason": "drives the class's private messenger runtime (`_messengerRuntime.chat`'s state queue) and its reply recovery (`recoverMessengerReply`, `messengerReplySink`) directly, with a failed post the class's reply run retries; the shell's delivery retries on its own and the queue drains once the reset's turn settles",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > burst replies end to end (#2312) > answers a message queued behind a reply a reset cut off"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > burst replies end to end (#2312) > drains queued messages once a failed recovery is not retried",
+    "reason": "drives the class's private messenger runtime (`_messengerRuntime.chat`'s state queue) and its reply recovery (`recoverMessengerReply`, `messengerReplySink`) directly, with a failed post the class's reply run gives up",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > burst replies end to end (#2312) > answers a message queued behind a reply a reset cut off"
+    }
+  },
+  {
+    "file": "messengers.test.ts",
+    "test": "think messengers core > burst replies end to end (#2312) > keeps no message text with a reply once it is answered",
+    "reason": "reads the class's kept reply-run rows (`__cf_delivery:messenger-reply`); the shell keeps no reply run once delivered",
+    "successor": {
+      "file": "messengers.test.ts",
+      "test": "think messengers core > burst replies end to end (#2312) > keeps no message text in a delivery once the reply is answered"
     }
   }
 ]

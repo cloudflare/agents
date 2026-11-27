@@ -1045,6 +1045,7 @@ export class Think<
       tasks: this.tasks,
       root: () => this.parentPath.length === 0,
       kv: this.ctx.storage.kv,
+      storage: this.ctx.storage,
       parent: this,
       concurrency: () => this.messengerConcurrency
     });
@@ -1083,6 +1084,9 @@ export class Think<
       await this.#context.load();
       // As in Think: the channel registry, read at start on the root.
       if (this.parentPath.length === 0) {
+        // TEMPORARY: remove in the next minor. The recovered replies
+        // think@0.24.0 kept, delivered as deliveries.
+        await this.#messengers?.importReleasedReplies();
         // Read again at start, once its subclass is set up: the registry
         // is what it answers now.
         const resolved = resolveChannels(
@@ -3417,7 +3421,11 @@ export class Think<
 
   #classify(error: unknown): ThinkErrorClass {
     const classification = this.classifyChatError(error);
-    return classification === "context_overflow" ? "context-overflow" : "fail";
+    return classification === "context_overflow"
+      ? "context-overflow"
+      : classification === "transient"
+        ? "retry"
+        : "fail";
   }
 
   /** The root session's Sessions handle, which the harness hands over on first use. */
