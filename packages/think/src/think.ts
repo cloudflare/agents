@@ -162,7 +162,7 @@ import {
   turnMetadataFromMessages
 } from "./turn-metadata";
 import { ThinkSkills } from "./skills-runtime";
-import { systemPromptForTurn } from "./system-prompt";
+import { DEFAULT_SYSTEM_PROMPT, systemPromptForTurn } from "./system-prompt";
 import * as skills from "./skills";
 import type { SkillScriptRunner, SkillSource } from "agents/skills";
 
@@ -2644,13 +2644,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * used only when the agent overrides nothing and has no context blocks.
    */
   getSystemPrompt(): string {
-    return [
-      "You are a careful, capable assistant helping the user complete their task.",
-      "Use available tools when they materially improve accuracy or let you act on the user's request. Before changing code, understand the relevant context: existing patterns, dependencies, tests, and nearby conventions.",
-      "Keep changes focused on the user's request. Prefer small, idiomatic edits over broad rewrites or new abstractions. Do not introduce new dependencies, secrets, destructive actions, or persistent side effects unless the user clearly asks or approves.",
-      "When the task is complex, briefly state your approach and keep the user informed with concise progress updates. If you modify code, verify with the smallest relevant test, build, typecheck, lint, or runtime check available, and report any checks you could not run.",
-      "Be direct and useful in your final response: summarize the outcome, mention important files or commands, and call out real blockers or risks."
-    ].join("\n\n");
+    return DEFAULT_SYSTEM_PROMPT;
   }
 
   /**

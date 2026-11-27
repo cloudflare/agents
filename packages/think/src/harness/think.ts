@@ -31,15 +31,14 @@ import {
 import type { WebSocketHandlers } from "agents/websockets";
 import {
   convertToModelMessages,
+  getToolName,
+  isToolUIPart,
   type LanguageModel,
   type ToolSet,
   type TypedToolCall,
   type UIMessage
 } from "ai";
-import { createWorkersAI } from "workers-ai-provider";
-import { anthropic } from "workers-ai-provider/anthropic";
-import { openai } from "workers-ai-provider/openai";
-import { isWorkersAIModelId } from "../model";
+import { ThinkModelResolver } from "../model";
 import {
   reconcileScheduledTasks,
   type ThinkScheduledTasks
@@ -81,6 +80,7 @@ import type { CreateFetchToolsOptions } from "../tools/fetch";
 import type { ThinkWorkspace } from "../workspace-files";
 import { ThinkSession } from "../session";
 import { ThinkConfigStore } from "../config-store";
+import { DEFAULT_SYSTEM_PROMPT, systemPromptForTurn } from "../system-prompt";
 import { Think as LegacyThink } from "../think";
 import type { Session, SessionMessage } from "agents/sessions";
 import { Context, type ContextConfig } from "agents/context";
@@ -294,10 +294,20 @@ export class Think<
   readonly #submissionStatuses = new SubmissionStatusQueue();
   /** Skills from `getSkills()`, loaded in onStart as Think loads them. */
   readonly #skills = new ThinkSkills();
-  #defaultProvider: ReturnType<typeof createWorkersAI> | undefined;
   /** Think's `think_config` rows, the table and migration Think has. */
   readonly #config = new ThinkConfigStore();
   #configCache: unknown = null;
+  /**
+   * A step that called tools, by operation, until its tools ran: at most
+   * one per running operation, removed when it ends.
+   */
+  readonly #openSteps = new Map<string, OpenStep>();
+  /** Builds string models through one cached default provider, as Think. */
+  readonly #models = new ThinkModelResolver({
+    binding: () => this.getAIBinding(),
+    gateway: (model) => this.getGateway(model),
+    sessionAffinity: () => this.sessionAffinity
+  });
 
   constructor(ctx: AgentContext, env: Env) {
     snapshotDeclaredMembers(new.target.prototype);
@@ -433,23 +443,18 @@ export class Think<
         },
         onStepFinish: async ({ message, finishReason, operationId, step }) => {
           await this.#chunkHooks;
-          await this.#extensionHooks.stepFinish({
-            stepNumber: step,
-            finishReason: finishReason ?? "unknown",
-            text: message.parts
-              .map((part) => (part.type === "text" ? part.text : ""))
-              .join(""),
-            reasoningText: undefined,
-            toolCalls: [],
-            toolResults: []
-            // SAFETY: the fields a step snapshot reads are all here.
-          } as unknown as StepContext);
-          return this.onStepFinish({
-            response: { messages: [] },
-            finishReason,
-            message,
-            requestId: operationId
-          } as unknown as StepContext);
+          // The step before this one ran its tools since: its results are
+          // in this message now.
+          await this.#endStep(operationId, message);
+          const segment = stepSegments(message);
+          const ended = { operationId, step, finishReason, segment };
+          // A step that called tools ends once they ran, as an AI SDK step
+          // does: at the next step, or at the turn's end.
+          if (stepResultOf(message, segment).toolCalls.length > 0) {
+            this.#openSteps.set(operationId, ended);
+            return;
+          }
+          await this.#stepEnded(ended, message);
         },
         onChunk: ({ chunk }) => {
           // A snapshot reads a delta's text as `text`, as a stream part has it.
@@ -469,6 +474,8 @@ export class Think<
         onTurnEnd: async (end) => {
           // The extensions' chunk hooks finish inside the turn, as in Think.
           await this.#chunkHooks;
+          if (end.message) await this.#endStep(end.operationId, end.message);
+          else this.#openSteps.delete(end.operationId);
           if (!end.message) return;
           await this.onChatResponse({
             message: end.message,
@@ -643,28 +650,27 @@ export class Think<
 
   getAIBinding(): Ai {
     const binding = (this.env as { AI?: Ai }).AI;
-    if (!binding)
-      throw new Error('Think needs a Workers AI binding named "AI"');
+    if (!binding) {
+      throw new Error(
+        "Think's default model provider needs a Workers AI binding named " +
+          '"AI". Add `"ai": { "binding": "AI" }` to wrangler.jsonc, override ' +
+          "getAIBinding() to return your binding, or override getModel() to " +
+          "return a LanguageModel."
+      );
+    }
     return binding;
   }
 
-  getGateway(_model: string): undefined {
+  getGateway(_model: string): GatewayOptions | undefined {
     return undefined;
   }
 
   resolveModel(model: ThinkModel): LanguageModel {
-    if (typeof model !== "string") return model;
-    this.#defaultProvider ??= createWorkersAI({
-      binding: this.getAIBinding(),
-      providers: [openai, anthropic]
-    });
-    return isWorkersAIModelId(model)
-      ? this.#defaultProvider(model, { sessionAffinity: this.sessionAffinity })
-      : this.#defaultProvider(model);
+    return this.#models.resolve(model);
   }
 
   getSystemPrompt(): string {
-    return "You are a helpful assistant.";
+    return DEFAULT_SYSTEM_PROMPT;
   }
 
   getTools(): ToolSet {
@@ -780,6 +786,39 @@ export class Think<
 
   afterToolCall(_ctx: ToolCallResultContext): void | Promise<void> {}
 
+  /** End the operation's open step, if any, from `message`. */
+  async #endStep(operationId: string, message: UIMessage): Promise<void> {
+    const open = this.#openSteps.get(operationId);
+    if (!open) return;
+    this.#openSteps.delete(operationId);
+    await this.#stepEnded(open, message);
+  }
+
+  /** Tell the extensions and `onStepEnd` that a step ended. */
+  async #stepEnded(step: OpenStep, message: UIMessage): Promise<void> {
+    const result = stepResultOf(message, step.segment);
+    await this.#extensionHooks.stepFinish({
+      stepNumber: step.step,
+      finishReason: step.finishReason ?? "unknown",
+      ...result
+      // SAFETY: the fields a step snapshot reads are all here.
+    } as unknown as StepContext);
+    await this.onStepEnd({
+      ...result,
+      response: { messages: [] },
+      finishReason: step.finishReason,
+      message,
+      stepNumber: step.step,
+      requestId: step.operationId
+    } as unknown as StepContext);
+  }
+
+  /** After each step, as in Think. */
+  onStepEnd(ctx: StepContext): void | Promise<void> {
+    return this.onStepFinish(ctx);
+  }
+
+  /** @deprecated Prefer `onStepEnd`, as in Think. */
   onStepFinish(_ctx: StepContext): void | Promise<void> {}
 
   onChunk(_ctx: ChunkContext): void | Promise<void> {}
@@ -1451,8 +1490,11 @@ export class Think<
       trigger: "submission",
       continuation: turn.continuation
     };
+    // As in Think: the capability block for the turn's tools follows the
+    // prompt, unless a `beforeTurn` gives its own.
+    const base = turn.system ?? this.getSystemPrompt();
     const context = {
-      system: turn.system ?? this.getSystemPrompt(),
+      system: systemPromptForTurn(base, tools),
       messages: await convertToModelMessages([...turn.messages], {
         tools,
         ignoreIncompleteToolCalls: true
@@ -1488,9 +1530,13 @@ export class Think<
       this.#extensionTurn = { operationId: turn.operationId, changes: kept };
     }
     this.#turnMaxSteps = config.maxSteps;
-    // Nothing to change: neither the subclass nor an extension set a field.
-    if (!own && Object.keys(config).length === 0) return;
-    const system = config.instructions ?? config.system;
+    const system =
+      config.instructions ??
+      config.system ??
+      systemPromptForTurn(
+        base,
+        config.tools ? { ...tools, ...config.tools } : tools
+      );
     return {
       ...(config.model !== undefined && {
         model: this.resolveModel(config.model)
@@ -1621,6 +1667,68 @@ function stubUnsupported(target: object, legacy: object): void {
 }
 
 stubUnsupported(Think.prototype, LegacyThink.prototype);
+
+/** A step that ended, waiting for its tools when it called any. */
+type OpenStep = {
+  readonly operationId: string;
+  readonly step: number;
+  readonly finishReason: string | undefined;
+  /** Which of the reply's steps it is, counted by `step-start` parts. */
+  readonly segment: number;
+};
+
+/** How many steps a reply has, by its `step-start` parts. */
+function stepSegments(message: UIMessage): number {
+  return message.parts.filter((part) => part.type === "step-start").length;
+}
+
+/**
+ * What one step of the reply says (the `segment`-th, by `step-start`
+ * parts), in the AI SDK's step terms: its text, reasoning, the tool calls
+ * it made and the results it has.
+ */
+function stepResultOf(message: UIMessage, segment: number) {
+  const parts: UIMessage["parts"] = [];
+  let seen = 0;
+  for (const part of message.parts) {
+    if (part.type === "step-start") {
+      seen += 1;
+      continue;
+    }
+    // A reply without step parts is one step.
+    if (seen === segment || (segment === 0 && seen === 0)) parts.push(part);
+  }
+  const toolCalls: unknown[] = [];
+  const toolResults: unknown[] = [];
+  for (const part of parts) {
+    if (!isToolUIPart(part)) continue;
+    const toolName = getToolName(part);
+    toolCalls.push({
+      type: "tool-call",
+      toolCallId: part.toolCallId,
+      toolName,
+      input: part.input
+    });
+    if (part.state === "output-available") {
+      toolResults.push({
+        type: "tool-result",
+        toolCallId: part.toolCallId,
+        toolName,
+        input: part.input,
+        output: part.output
+      });
+    }
+  }
+  return {
+    text: parts.map((part) => (part.type === "text" ? part.text : "")).join(""),
+    reasoningText:
+      parts
+        .map((part) => (part.type === "reasoning" ? part.text : ""))
+        .join("") || undefined,
+    toolCalls,
+    toolResults
+  };
+}
 
 /** The fields `folded` set or changed relative to `own`. */
 function changesOf(own: TurnConfig, folded: TurnConfig): TurnConfig {
