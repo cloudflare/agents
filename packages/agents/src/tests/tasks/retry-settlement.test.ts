@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { TaskSettlement } from "../../tasks/settlement";
+import { backdateTaskWake } from "../capabilities/tasks";
 import type { TaskHarnessObject } from "../capabilities/tasks";
 
 const retrying = "__cf_test_retrying" as unknown as "pipeline";
@@ -24,7 +25,9 @@ describe("Tasks retry settlement", () => {
 
   it("waits until the time it names, then runs the next attempt", async () => {
     const stub = env.TaskHarnessObject.getByName(crypto.randomUUID());
-    const at = Date.now() + 200;
+    // Far enough out that a slow start can't pass it: the queue arms a time
+    // already past for now instead.
+    const at = Date.now() + 60_000;
     await runInDurableObject(
       stub,
       async (instance: TaskHarnessObject, state) => {
@@ -53,7 +56,18 @@ describe("Tasks retry settlement", () => {
         ).toEqual([]);
       }
     );
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    // An alarm before that time runs nothing.
+    await runDurableObjectAlarm(stub);
+    await runInDurableObject(
+      stub,
+      async (instance: TaskHarnessObject, state) => {
+        expect(await instance.tasks.get("r")).toMatchObject({
+          status: "pending"
+        });
+        // The time comes.
+        backdateTaskWake(state.storage, "r");
+      }
+    );
     await runDurableObjectAlarm(stub);
     await runInDurableObject(stub, async (instance: TaskHarnessObject) => {
       expect(await instance.tasks.get("r")).toMatchObject({

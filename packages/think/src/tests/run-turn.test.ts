@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import { tool, type UIMessage } from "ai";
 import { subscribe } from "agents/observability";
 import {
@@ -740,17 +740,25 @@ describe("Think — runTurn", () => {
   it("omits a persisted partial message from an aborted turn result", async () => {
     await runInProgrammaticAgent("runturn-aborted-result", async (instance) => {
       await instance.setDelayedChunkResponse(["Partial", " answer"], 40);
+      // The abort lands once the first chunk has streamed, not on a timer,
+      // so there is always a partial to omit.
+      await instance.holdChunksAfterForTest(1);
+      onTestFinished(() => instance.releaseChunksForTest());
       const controller = new AbortController();
-      setTimeout(
-        () => controller.abort(new Error("mid-stream runTurn abort")),
-        60
-      );
-
-      const result = await instance.runTurn({
+      const running = instance.runTurn({
         mode: "wait",
         input: "Abort me",
         signal: controller.signal
       });
+      const deadline = Date.now() + 5_000;
+      while (!(await instance.isChunkStreamHeldForTest())) {
+        if (Date.now() > deadline) throw new Error("the stream never held");
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      // Aborted while held; released, the stream sees the abort.
+      controller.abort(new Error("mid-stream runTurn abort"));
+      await instance.releaseChunksForTest();
+      const result = await running;
 
       expect(result.status).toBe("aborted");
       expect(result.message).toBeUndefined();
