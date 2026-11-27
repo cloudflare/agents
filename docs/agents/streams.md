@@ -38,6 +38,22 @@ export class ReportAgent extends Agent<Env> {
 }
 ```
 
+### More than one Streams
+
+Give a second Streams a `name` to keep its streams apart from the first:
+
+```ts
+readonly streams = new Streams();
+readonly audit = new Streams({ name: "audit" });
+readonly lifecycle = Lifecycle.install(this).use(this.streams).use(this.audit);
+```
+
+Each has its own streams, stream ids and tags; `open`, `read`, `status`,
+`list` and `delete` see only their own. A name is a lowercase letter
+followed by up to 31 lowercase letters, digits or hyphens, and two
+instances with the same name in one object throw at install. The unnamed
+Streams keeps the tables it always had. The `name` option is experimental.
+
 ## Producing
 
 ```ts
