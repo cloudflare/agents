@@ -60,7 +60,11 @@ function actionModel(): LanguageModel {
             finish(controller, "stop");
             return;
           }
-          const toolName = prompt.includes("pause") ? "pauseCharge" : "charge";
+          const toolName = prompt.includes("receipt")
+            ? "receipt"
+            : prompt.includes("pause")
+              ? "pauseCharge"
+              : "charge";
           controller.enqueue({
             type: "tool-call",
             toolCallId: "call-1",
@@ -102,6 +106,15 @@ export class ThinkHarnessActionsAgent extends Think {
         inputSchema: z.object({ amount: z.number() }),
         approval: true,
         execute: run
+      }),
+      receipt: action({
+        description: "Send a receipt",
+        inputSchema: z.object({ amount: z.number() }),
+        execute: ({ amount }, ctx) => {
+          ctx.attachReply({ type: "receipt", amount });
+          ctx.attachReply("not an attachment");
+          return { sent: true };
+        }
       }),
       pauseCharge: action({
         description: "Charge the card after a human approves",
@@ -173,6 +186,10 @@ export class ThinkHarnessActionsAgent extends Think {
   /** Ends this object, so the next call meets a fresh isolate. */
   resetForTest(): void {
     this.ctx.abort("test: reset");
+  }
+
+  attachmentsForTest(requestId?: string): unknown[] {
+    return this.replyAttachments(requestId);
   }
 
   charged(): number {

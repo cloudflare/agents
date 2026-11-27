@@ -106,7 +106,6 @@ import {
   createActionAbortSignal,
   normalizeActionAuthorization,
   prepareActionOutputForModel,
-  safeStringifyActionOutput,
   type ActionToolHost
 } from "./action-tools";
 import { defaultAttachmentText, deliverReplyAttachments } from "./attachments";
@@ -337,6 +336,7 @@ import {
   type ActionLedgerEvent,
   type LedgeredActionArgs
 } from "./action-run";
+import { ReplyAttachments } from "./reply-attachments";
 import type { TaskJson, TaskStep } from "agents/tasks";
 import {
   cancelReason,
@@ -432,7 +432,6 @@ function turnContextWithoutModel(ctx: TurnContext): Omit<TurnContext, "model"> {
   return Object.defineProperties({}, descriptors) as Omit<TurnContext, "model">;
 }
 
-const MAX_REPLY_ATTACHMENTS_PER_TURN = 32;
 /**
  * Where a hook deferred past its turn waits for the next start (and where
  * earlier versions kept every owed hook).
@@ -3209,8 +3208,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * cleared at turn end so `onChatResponse` and `replyAttachments()` can read
    * it — the next turn's reset overwrites it.
    */
-  private _activeTurnReplyAttachments: ReplyAttachment[] = [];
-  private _activeTurnReplyAttachmentsRequestId: string | undefined;
+  private readonly _replyAttachments = new ReplyAttachments();
 
   /**
    * Configure conversation storage. Called once during `onStart`. Override to
@@ -4038,10 +4036,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         pendingRetryLeaseMs: this.actionLedgerPendingRetryLeaseMs,
         emit: (event) => this._emitActionLedgerEvent(event),
         attachments: {
-          count: () => this._activeTurnReplyAttachments.length,
-          truncate: (n) => {
-            this._activeTurnReplyAttachments.length = n;
-          }
+          count: () => this._replyAttachments.count(),
+          truncate: (n) => this._replyAttachments.truncate(n)
         }
       },
       args
@@ -4279,8 +4275,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
                   })
                 });
 
-                this._activeTurnReplyAttachments = [];
-                this._activeTurnReplyAttachmentsRequestId = spec.requestId;
+                this._replyAttachments.begin(spec.requestId);
                 this._turnIsContinuation = false;
 
                 try {
@@ -5126,47 +5121,15 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
     attachment: unknown,
     actionName?: string
   ): void {
-    if (!requestId || requestId !== this._activeTurnReplyAttachmentsRequestId) {
-      return;
-    }
-    if (
-      typeof attachment !== "object" ||
-      attachment === null ||
-      Array.isArray(attachment) ||
-      typeof (attachment as { type?: unknown }).type !== "string"
-    ) {
-      return;
-    }
-    if (
-      this._activeTurnReplyAttachments.length >= MAX_REPLY_ATTACHMENTS_PER_TURN
-    ) {
-      return;
-    }
-    const serialized = safeStringifyActionOutput(attachment);
-    if (serialized.error || serialized.value === undefined) {
-      return;
-    }
-    const normalized = JSON.parse(serialized.value) as unknown;
-    if (
-      typeof normalized !== "object" ||
-      normalized === null ||
-      Array.isArray(normalized) ||
-      typeof (normalized as { type?: unknown }).type !== "string"
-    ) {
-      return;
-    }
-    this._activeTurnReplyAttachments.push(normalized as ReplyAttachment);
+    const attachmentType = this._replyAttachments.record(requestId, attachment);
+    if (attachmentType === undefined) return;
     this._emitActionReplyEvent({
       type: "action:reply-attached",
       payload: {
         ...(actionName !== undefined && { action: actionName }),
-        attachmentType: (normalized as { type: string }).type
+        attachmentType
       }
     });
-  }
-
-  private _cloneReplyAttachment(attachment: ReplyAttachment): ReplyAttachment {
-    return JSON.parse(JSON.stringify(attachment)) as ReplyAttachment;
   }
 
   /**
@@ -5176,15 +5139,7 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
    * turn (else `[]`).
    */
   replyAttachments(requestId?: string): ReplyAttachment[] {
-    if (
-      requestId !== undefined &&
-      requestId !== this._activeTurnReplyAttachmentsRequestId
-    ) {
-      return [];
-    }
-    return this._activeTurnReplyAttachments.map((attachment) =>
-      this._cloneReplyAttachment(attachment)
-    );
+    return this._replyAttachments.list(requestId);
   }
 
   private _emitActionPauseEvent(event: ActionPauseEvent): void {

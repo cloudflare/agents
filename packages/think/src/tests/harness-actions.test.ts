@@ -14,6 +14,7 @@ type ActionsStub = {
   rewriteForTest(amount: number): Promise<void>;
   sweepSettledForTest(): Promise<void>;
   ledgerRowsForTest(): Promise<number>;
+  attachmentsForTest(requestId?: string): Promise<unknown[]>;
   pendingApprovals(executionId?: string): Promise<PendingApproval[]>;
   approveExecution(executionId: string): Promise<unknown>;
   rejectExecution(
@@ -215,5 +216,14 @@ describe("harness-backed Think: actions that need a human", () => {
     const fresh = await agent(name);
     await fresh.pendingApprovals();
     expect(await fresh.ledgerRowsForTest()).toBe(0);
+  });
+
+  it("keeps the reply attachments an action recorded in its turn", async () => {
+    const think = await agent();
+    await think.say("send a receipt for 5");
+    expect(await think.attachmentsForTest()).toEqual([
+      { type: "receipt", amount: 5 }
+    ]);
+    expect(await think.attachmentsForTest("another-turn")).toEqual([]);
   });
 });

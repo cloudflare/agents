@@ -81,6 +81,7 @@ import {
   sweepEffects
 } from "../action-ledger";
 import { runLedgeredAction } from "../action-run";
+import { ReplyAttachments } from "../reply-attachments";
 import type {
   Action,
   ActionApprovalDescriptor,
@@ -88,6 +89,7 @@ import type {
   ActionAuthorizationDecision,
   ActionPermissionSpec,
   CompiledActionMetadata,
+  ReplyAttachment,
   NormalizedActionAuthorization
 } from "../actions";
 import {
@@ -506,6 +508,8 @@ export class Think<
     gateway: (model) => this.getGateway(model),
     sessionAffinity: () => this.sessionAffinity
   });
+  /** The latest turn's reply attachments, as on Think. */
+  readonly #replyAttachments = new ReplyAttachments();
   /** The action ledger's coalescing, as on Think. */
   readonly #effects = createEffectState();
   /** Each approval-gated action's summary, permissions and risk. */
@@ -1208,6 +1212,7 @@ export class Think<
     context: () => Promise<TurnContext>
   ): Promise<void> {
     if (this.#actionTurn?.operationId === operationId) return;
+    this.#replyAttachments.begin(operationId);
     this.#actionTurn = {
       operationId,
       authorization: normalizeActionAuthorization(
@@ -1264,7 +1269,22 @@ export class Think<
     authorizeAction: (ctx) => this.authorizeAction(ctx),
     recordApprovalDescriptor: (toolCallId, descriptor) =>
       this.#actionDescriptors.set(toolCallId, descriptor),
-    recordReplyAttachment: () => {},
+    recordReplyAttachment: (requestId, attachment, actionName) => {
+      const attachmentType = this.#replyAttachments.record(
+        requestId,
+        attachment
+      );
+      if (attachmentType === undefined) return;
+      (
+        this._emit as unknown as (
+          type: string,
+          payload: Record<string, unknown>
+        ) => void
+      ).call(this, "action:reply-attached", {
+        action: actionName,
+        attachmentType
+      });
+    },
     runLedgered: (args) =>
       runLedgeredAction(
         {
@@ -1278,11 +1298,23 @@ export class Think<
                 payload: Record<string, unknown>
               ) => void
             ).call(this, event.type, event.payload),
-          attachments: { count: () => 0, truncate: () => {} }
+          attachments: {
+            count: () => this.#replyAttachments.count(),
+            truncate: (n) => this.#replyAttachments.truncate(n)
+          }
         },
         args
       )
   };
+
+  /**
+   * Advisory reply attachments the latest turn's actions recorded through
+   * `ctx.attachReply`, as on Think: with a `requestId`, only if they belong
+   * to that turn.
+   */
+  replyAttachments(requestId?: string): ReplyAttachment[] {
+    return this.#replyAttachments.list(requestId);
+  }
 
   /**
    * Everything awaiting human approval: the action calls of the latest reply
