@@ -285,7 +285,7 @@ async function turnRecord(
   const runs = await ctl("think", room, "probeRuns");
   const s = state as Run["state"] & {
     responses?: { at?: number; requestId?: string }[];
-    events?: { at?: number; type: string }[];
+    events?: { at?: number; type: string; requestId?: string }[];
   };
   const starts = [...ids.values()].map((v) => v.at).sort((x, y) => x - y);
   // Every frame on every tab, the returning tab included, labelled.
@@ -321,8 +321,13 @@ async function turnRecord(
         responses: (s.responses ?? []).filter(
           (r) => r.requestId === turn?.id || inTurn(r.at)
         ),
+        // The turn's events: by its request id, or inside its window (skew
+        // between the runner's clock and the Worker's moves the edges).
         events: (s.events ?? []).filter(
-          (e) => inTurn(e.at) && !e.type.startsWith("chat:stream:chunk")
+          (e) =>
+            (turn?.id !== undefined &&
+              (e as { requestId?: string }).requestId === turn.id) ||
+            (inTurn(e.at) && !e.type.startsWith("chat:stream:chunk"))
         )
       };
     })
