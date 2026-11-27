@@ -721,6 +721,30 @@ describe("ThinkHarness durability", () => {
     expect(await stub.gateRuns()).toBe(1);
   });
 
+  it("fails a call left for a rerun when recovery gives the turn up after an eviction", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    await stub.abandonRecovery();
+    const receipt = await stub.submit("gate-safe");
+    await stub.gateStarted(1);
+
+    stub = await crash(name);
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    const result = await stub.wait(receipt.operationId);
+    expect(result).toMatchObject({
+      status: "unanswered",
+      reason: "interrupted"
+    });
+    // The stored partial is named, and its call is failed, not left open.
+    expect((result as { messageId?: string }).messageId).toBe(
+      (await stub.messageIds()).at(-1)
+    );
+    expect((await stub.messages()).at(-1)).toMatch(
+      /^assistant: \[gate_safe output-error\]/
+    );
+    expect(await stub.gateRuns()).toBe(1);
+  });
+
   it("reruns a tool marked safe to rerun after an eviction", async () => {
     const name = crypto.randomUUID();
     let stub = fresh(name);

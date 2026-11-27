@@ -1690,11 +1690,31 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     if (result.error === TURN_NOT_CONTINUED || chatRecoveryGaveUp(run)) {
       const streams = this.#streams.__DO_NOT_USE_WILL_BREAK__sync();
       const streamId = chatTurnStreamId(run.id);
+      // The stored partial is named by its stream (the loop may never have
+      // run in this attempt). A call left for a rerun nobody will make is
+      // failed as interrupted, as any given-up reply's open calls are.
+      const replyId =
+        result.messageId ??
+        replyIdOf(this.#streamChunks(streamId)) ??
+        live.reply?.id;
+      const stored = replyId
+        ? await this.#handle(session).getMessage(replyId)
+        : null;
+      if (stored) {
+        const message = asUIMessage(stored);
+        const settled = settleOpenCalls(message, "interrupted");
+        if (settled !== message) {
+          await this.#commit(run, session, undefined, (put) =>
+            put(settled, {})
+          );
+          this.#events.emit(session, { type: "message", message: settled });
+        }
+      }
       if (streams.getStream(streamId)) streams.deleteUnchecked(streamId);
       return {
         status: "unanswered",
         reason: "interrupted",
-        ...(live.reply && { messageId: live.reply.id })
+        ...(stored && { messageId: stored.id })
       };
     }
     return this.#giveUp(run, session, result.error ?? result.status, live);
@@ -2980,7 +3000,13 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                 messageId: outcome.messageId
               })
             }
-          : unanswered(outcome.reason);
+          : {
+              ...unanswered(outcome.reason),
+              // The partial it kept, as the type says: what it wrote.
+              ...(outcome.messageId !== undefined && {
+                messageId: outcome.messageId
+              })
+            };
       }
       case "error":
         return unanswered(
