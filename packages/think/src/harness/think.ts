@@ -547,6 +547,16 @@ export class Think<
         compactedHead?: UIMessage[];
         /** The turn's `stopWhen`, checked as each step ends. */
         stopWhen?: TurnConfig["stopWhen"];
+        /** Each step's usage and finish reason, for `stopWhen`. */
+        stepMeta?: Array<{ usage?: LanguageModelUsage; finishReason?: string }>;
+        /** The step whose server tools `stopWhen` waits on. */
+        pendingStop?: {
+          readonly step: number;
+          readonly message: UIMessage;
+          readonly segment: number;
+          readonly waiting: Set<string>;
+          readonly results: unknown[];
+        };
       }
     | undefined;
   /**
@@ -856,6 +866,13 @@ export class Think<
         },
         afterToolCall: async (result) => {
           if (this.#isFinalAnswer(result)) return;
+          await this.#toolSettledForStop(result.operationId, {
+            toolCallId: result.toolCallId,
+            toolName: result.toolName,
+            input: result.input,
+            ok: result.ok,
+            ...(result.ok && { output: result.output })
+          });
           const kept = this.#modelInputs.get(result.toolCallId);
           // From the decision to run it to its result, as Think times
           // `execute`: not the approval before it or the hooks after.
@@ -907,7 +924,10 @@ export class Think<
           await this.#endStep(operationId, message);
           const segment = stepSegments(message);
           const ended = { operationId, step, finishReason, segment, usage };
-          await this.#checkStopWhen(operationId, step, message, segment);
+          await this.#stepEndedForStop(operationId, step, message, segment, {
+            ...(usage && { usage }),
+            ...(finishReason !== undefined && { finishReason })
+          });
 
           // A step that called tools ends once they ran, as an AI SDK step
           // does: at the next step, or at the turn's end.
@@ -3637,22 +3657,108 @@ export class Think<
    * As in Think, a turn's `stopWhen` beside its `maxSteps`: once a step
    * meets a condition, the turn ends after that step's tools ran.
    */
-  async #checkStopWhen(
+  /**
+   * As in Think, a turn's `stopWhen` beside its `maxSteps`, checked when a
+   * step is settled: at once for a step without tool calls, else once its
+   * server tools have returned (the AI SDK checks after the step's tools).
+   * The steps are given with their usage and finish reason. Once met, the
+   * turn makes no further model call.
+   */
+  async #stepEndedForStop(
     operationId: string,
     step: number,
     message: UIMessage,
-    segment: number
+    segment: number,
+    meta: { usage?: LanguageModelUsage; finishReason?: string }
   ): Promise<void> {
     const own = this.#ownTurn;
     if (own?.operationId !== operationId || !own.stopWhen) return;
+    const metas = (own.stepMeta ??= []);
+    metas[step] = meta;
+    const calls = stepResultOf(message, segment).toolCalls as Array<{
+      toolCallId: string;
+    }>;
+    if (calls.length === 0) {
+      await this.#checkStopWhen(own, step, message, segment, []);
+      return;
+    }
+    own.pendingStop = {
+      step,
+      message,
+      segment,
+      waiting: new Set(calls.map((call) => call.toolCallId)),
+      results: []
+    };
+  }
+
+  /** A server tool of the step returned: check `stopWhen` once all have. */
+  async #toolSettledForStop(
+    operationId: string,
+    result: {
+      readonly toolCallId: string;
+      readonly toolName: string;
+      readonly input: unknown;
+      readonly ok: boolean;
+      readonly output?: unknown;
+    }
+  ): Promise<void> {
+    const own = this.#ownTurn;
+    const pending = own?.pendingStop;
+    if (own?.operationId !== operationId || !pending) return;
+    if (!pending.waiting.delete(result.toolCallId)) return;
+    if (result.ok) {
+      pending.results.push({
+        type: "tool-result",
+        toolCallId: result.toolCallId,
+        toolName: result.toolName,
+        input: result.input,
+        output: result.output
+      });
+    }
+    if (pending.waiting.size > 0) return;
+    own.pendingStop = undefined;
+    await this.#checkStopWhen(
+      own,
+      pending.step,
+      pending.message,
+      pending.segment,
+      pending.results
+    );
+  }
+
+  async #checkStopWhen(
+    own: {
+      readonly stopWhen?: TurnConfig["stopWhen"];
+      readonly stepMeta?: Array<{
+        usage?: LanguageModelUsage;
+        finishReason?: string;
+      }>;
+    },
+    step: number,
+    message: UIMessage,
+    segment: number,
+    settled: unknown[]
+  ): Promise<void> {
+    if (!own.stopWhen) return;
     const conditions = Array.isArray(own.stopWhen)
       ? own.stopWhen
       : [own.stopWhen];
-    const steps: ReturnType<typeof stepResultOf>[] = [];
-    for (let at = segment - step; at <= segment; at++) {
-      steps.push(stepResultOf(message, at));
+    const steps: unknown[] = [];
+    for (let at = segment - step, n = 0; at <= segment; at++, n++) {
+      const result = stepResultOf(message, at);
+      const meta = own.stepMeta?.[n] ?? {};
+      steps.push({
+        ...result,
+        // The step being settled has its tools' results from their calls.
+        ...(at === segment &&
+          settled.length > 0 && {
+            toolResults: [...result.toolResults, ...settled]
+          }),
+        usage: meta.usage,
+        finishReason: meta.finishReason
+      });
     }
-    // SAFETY: a condition reads the steps' calls and results, as here.
+    // SAFETY: a condition reads the steps' calls, results, usage and finish.
     const met = await Promise.all(
       conditions.map((condition) =>
         condition({ steps } as unknown as Parameters<typeof condition>[0])

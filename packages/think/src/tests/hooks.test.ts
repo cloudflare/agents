@@ -2058,6 +2058,29 @@ describe("Think — maxSteps property", () => {
     expect(result.done).toBe(true);
   });
 
+  it("checks stopWhen after the step's tools returned", async () => {
+    const agent = await freshToolAgent(
+      `hook-stop-result-${crypto.randomUUID()}`
+    );
+    await agent.stopOnEchoResultForTest();
+    const result = await agent.testChat("Call echo");
+    expect(result.done).toBe(true);
+    // The echo step's result met it: no model call after the tool.
+    expect(await agent.getBeforeStepLog()).toHaveLength(1);
+    expect(await agent.getAfterToolCallLog()).toHaveLength(1);
+  });
+
+  it("gives stopWhen each step's token usage", async () => {
+    const agent = await freshToolAgent(
+      `hook-stop-usage-${crypto.randomUUID()}`
+    );
+    await agent.stopOnTokenBudgetForTest(1);
+    const result = await agent.testChat("Call echo");
+    expect(result.done).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(await agent.getBeforeStepLog()).toHaveLength(1);
+  });
+
   it("composes TurnConfig stopWhen with the maxSteps bound", async () => {
     const agent = await freshToolAgent("hook-stop-when-tool-call");
     await agent.stopAfterEchoToolCall();
