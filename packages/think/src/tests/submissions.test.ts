@@ -126,6 +126,11 @@ type ThinkSubmissionTestStub = {
       metadata?: Record<string, unknown>;
     }
   ): Promise<SubmitMessagesResult>;
+  testSubmitOnChannel(
+    text: string,
+    channel: string,
+    options?: { submissionId?: string; metadata?: Record<string, unknown> }
+  ): Promise<SubmitMessagesResult>;
   cancelQueuedRunningSubmissionBeforeSlotForTest(options?: {
     submissionId?: string;
     metadata?: Record<string, unknown>;
@@ -444,10 +449,15 @@ function textParts(messages: Array<{ parts?: unknown[] }>): string[] {
 
 async function finalAnswerCalls(
   agent: Awaited<ReturnType<typeof freshAgent>>,
-  id: string
+  id: string,
+  channel?: string
 ) {
   await agent.setFinalAnswerResponseForTest({ title: "t" });
-  const accepted = await agent.testSubmitMessages("answer", {
+  const submit = (options: Parameters<typeof agent.testSubmitMessages>[1]) =>
+    channel
+      ? agent.testSubmitOnChannel("answer", channel, options)
+      : agent.testSubmitMessages("answer", options);
+  const accepted = await submit({
     submissionId: `sub-${id}`,
     metadata: {
       [workflowPromptMetadataKey]: {
@@ -2451,6 +2461,15 @@ describe("Think durable submissions", () => {
     const agent = await freshAgent();
     await agent.setTurnConfigOverride({ maxSteps: 1 });
     const calls = await finalAnswerCalls(agent, "last-step");
+    expect(calls[0].toolChoice).toMatchObject({
+      type: "tool",
+      toolName: "think_final_answer"
+    });
+  }, 30_000);
+
+  it("pins the last step its channel permits to the final-answer tool", async () => {
+    const agent = await freshAgent();
+    const calls = await finalAnswerCalls(agent, "channel-last-step", "brief");
     expect(calls[0].toolChoice).toMatchObject({
       type: "tool",
       toolName: "think_final_answer"
