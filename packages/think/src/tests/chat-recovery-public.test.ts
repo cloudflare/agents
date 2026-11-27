@@ -373,16 +373,11 @@ describe("chat recovery, through public behaviour", () => {
   // onChatRecovery declines.
   describe("onChatRecovery's answer after a reset", () => {
     async function settle(
-      agent: () => Promise<{
-        getMessages(): Promise<unknown[]>;
-        waitUntilStable(o: { timeout: number }): Promise<boolean>;
-      }>
+      agent: Awaited<ReturnType<typeof resetDuringTurn>>["agent"]
     ) {
       await vi.waitFor(
         async () => {
-          expect(
-            await (await agent()).waitUntilStable({ timeout: 2_000 })
-          ).toBe(true);
+          expect(await (await agent()).stableWithinForTest(2_000)).toBe(true);
         },
         { timeout: 15_000, interval: 50 }
       );
