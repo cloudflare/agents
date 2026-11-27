@@ -96,8 +96,8 @@ describe("Client tools continuation", () => {
     let done = await donePromise;
     expect(done).toBe(true);
 
-    // Verify initial request received client tools
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Verify initial request received client tools (captured before its
+    // done frame)
     const initialClientTools = await agentStub.getCapturedClientTools();
     expect(initialClientTools).toBeDefined();
     expect(initialClientTools).toHaveLength(2);
@@ -134,8 +134,10 @@ describe("Client tools continuation", () => {
       })
     );
 
-    // Wait for continuation (500ms stream wait + processing)
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    // Wait for the continuation: it captures its request context again.
+    await vi.waitFor(async () => {
+      expect(await agentStub.getCapturedClientTools()).toBeDefined();
+    });
 
     // Step 5: Verify continuation received client tools
     const continuationClientTools = await agentStub.getCapturedClientTools();
@@ -472,8 +474,12 @@ describe("Client tools continuation", () => {
       })
     );
 
-    // Let the continuation register as pending before requesting resume
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // The continuation is pending or running before the resume request.
+    await vi.waitFor(async () => {
+      expect((await agentStub.getContinuationStateForTest()).hasPending).toBe(
+        true
+      );
+    });
 
     ws.send(
       JSON.stringify({
@@ -1161,8 +1167,12 @@ describe("Client tools continuation", () => {
       })
     );
 
-    // Let the continuation register as pending before requesting resume
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // The continuation is pending or running before the resume request.
+    await vi.waitFor(async () => {
+      expect((await agentStub.getContinuationStateForTest()).hasPending).toBe(
+        true
+      );
+    });
 
     ws.send(
       JSON.stringify({
@@ -1428,7 +1438,7 @@ describe("Client tools continuation", () => {
 
     // Clear chat
     ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await waitUntilHandled(agentStub, MessageType.CF_AGENT_CHAT_CLEAR, 1);
 
     // Persist a tool call and trigger continuation
     await agentStub.persistMessages([
@@ -1551,9 +1561,12 @@ describe("Client tools continuation", () => {
       })
     );
 
-    // Let the continuation register as pending before requesting resume.
-    // Under load (parallel test files), 200ms can be too tight.
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    // The continuation is pending or running before the resume request.
+    await vi.waitFor(async () => {
+      expect((await agentStub.getContinuationStateForTest()).hasPending).toBe(
+        true
+      );
+    });
 
     ws.send(
       JSON.stringify({
@@ -1632,7 +1645,7 @@ describe("Client tools continuation", () => {
     expect(done).toBe(true);
     ws.removeEventListener("message", handler1);
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Captured before the done frame.
     let capturedTools = await agentStub.getCapturedClientTools();
     expect(capturedTools).toHaveLength(1);
 
@@ -1680,7 +1693,6 @@ describe("Client tools continuation", () => {
     expect(done).toBe(true);
     ws.removeEventListener("message", handler2);
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
     capturedTools = await agentStub.getCapturedClientTools();
     expect(capturedTools).toBeUndefined();
 
