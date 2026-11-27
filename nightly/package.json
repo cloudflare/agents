@@ -5,12 +5,19 @@
   "type": "module",
   "scripts": {
     "faults": "vitest run -c faults/vitest.config.ts",
-    "upgrade": "vitest run -c upgrade/vitest.config.ts"
+    "upgrade": "vitest run -c upgrade/vitest.config.ts",
+    "harnesses": "vitest run -c harnesses/vitest.config.ts"
   },
   "dependencies": {
     "@ai-sdk/openai": "^4.0.0",
     "@cloudflare/ai-chat": "*",
     "@cloudflare/think": "*",
+    "@earendil-works/pi-ai": "~1.6.1",
+    "@earendil-works/pi-codemode": "~1.6.1",
+    "@earendil-works/pi-durable": "~1.6.1",
+    "@earendil-works/pi-schema": "~1.6.1",
+    "@opencode/plugin": "2.0.24",
+    "@opencode/sdk": "2.0.24",
     "agents": "*",
     "ai": "^7.0.0",
     "zod": "^4.6.7"
