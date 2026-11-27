@@ -42,6 +42,7 @@ import {
   chatRecoveryGaveUp,
   chatTurnDefinition,
   chatTurnStreamId,
+  messageIdsOf,
   type ChatHost,
   type ChatModelCall,
   type ChatTurnInput,
@@ -50,6 +51,10 @@ import {
   type ChatDeps
 } from "../../chat/chat-host";
 import type { ChatLane } from "../../chat/chat-functions";
+import { frameText } from "../../chat/chat-frames";
+import { sendIfOpen } from "../../chat/connection";
+import { CHAT_MESSAGE_TYPES } from "../../chat/protocol";
+import { recordRecentChatTerminal } from "../../chat/recent-terminals";
 import { TaskSettlement } from "../../tasks/settlement";
 import {
   ChatStreamStalledError,
@@ -777,13 +782,39 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           // client tools in the request, as `enqueue`'s option does.
           const clientTools = (input as { readonly clientTools?: unknown })
             .clientTools;
-          if (!isOperationRunInput(input) && Array.isArray(clientTools)) {
-            await this.#handle(this.#operationOf(run.id)[0]).internal_setConfig(
+          if (isOperationRunInput(input)) {
+            return this.#operate(input, run);
+          }
+          const session = this.#operationOf(run.id)[0];
+          if (Array.isArray(clientTools)) {
+            await this.#handle(session).internal_setConfig(
               CLIENT_TOOLS_KEY,
               JSON.stringify(clientTools)
             );
           }
-          return this.#operate(operationInputOf(input), run);
+          const stored = operationInputOf(input);
+          if (stored.input.kind !== "messages") {
+            return this.#operate(stored, run);
+          }
+          // A tab's copy of a message the session holds does not replace
+          // it: the stored one keeps its server tool outputs (as ThinkChat
+          // and Think place only the new ones).
+          const known = await this.storedIds(
+            session,
+            stored.input.messages.map((message) => message.id)
+          );
+          return this.#operate(
+            {
+              ...stored,
+              input: {
+                ...stored.input,
+                messages: stored.input.messages.filter(
+                  (message) => !known.has(message.id)
+                )
+              }
+            },
+            run
+          );
         },
         {
           onStatus: (record) => this.#onStatus(record),
@@ -1214,6 +1245,50 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       : [];
   }
 
+  /**
+   * A tab's request through the shared chat dispatch that placing ended
+   * (its turn never runs, so it frames nothing): its tab is told it ended,
+   * as the turn's own end would tell it, and the end is kept for a resume.
+   */
+  #endUnrunChatTurn(runId: string, ended: OperationOutcome): void {
+    const webSockets = this.#chatHostDeps?.webSockets;
+    if (!webSockets || isOperationRunInput(this.#tasks.inputOf(runId))) {
+      return;
+    }
+    const metadata = this.#tasks.peek(runId)?.metadata;
+    const origin = (metadata?.chat as { origin?: unknown } | undefined)?.origin;
+    const messageIds = messageIdsOf(metadata);
+    const reason = ended.status === "unanswered" ? ended.reason : undefined;
+    const outcome =
+      ended.status === "done"
+        ? "completed"
+        : reason === "aborted"
+          ? "aborted"
+          : reason === "withdrawn" ||
+              reason === "not_waiting" ||
+              reason === "not_found" ||
+              reason === "empty"
+            ? "skipped"
+            : "error";
+    const frame = {
+      type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+      id: runId,
+      body: outcome === "error" ? (reason ?? "") : "",
+      done: true,
+      outcome,
+      ...(outcome === "error" && { error: true }),
+      ...(messageIds && { messageIds })
+    };
+    recordRecentChatTerminal(this.lifecycle.storage.kv, frame);
+    const text = frameText(frame as { type: string });
+    if (text === undefined) return;
+    for (const connection of webSockets.getConnections()) {
+      if (origin === undefined || connection.id === origin) {
+        sendIfOpen(connection, text);
+      }
+    }
+  }
+
   /** The host the shared chat dispatch runs for, once it has (H2c). */
   #chatHostDeps: Pick<ChatDeps, "kv" | "webSockets" | "emit"> | undefined;
 
@@ -1511,7 +1586,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           ? await this.#carryTurn(run, session, legacy, live)
           : await this.#place(run, session, operationId, stored, live);
       }
-      if ("ended" in placed) return placed.ended;
+      if ("ended" in placed) {
+        this.#endUnrunChatTurn(run.id, placed.ended);
+        return placed.ended;
+      }
       const built = live.built ?? (await this.#build(session));
       live.tools = built.tools;
       live.continues = placed.continues;
