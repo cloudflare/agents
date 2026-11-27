@@ -5,6 +5,8 @@ import {
   type ChatDeps,
   type ChatLane,
   continueRequestsOf,
+  cancelTurn,
+  aiSdkRecoveryCodec,
   type ChatTurnInput
 } from "agents/chat";
 import {
@@ -49,7 +51,6 @@ import {
   recentChatTerminal,
   REPLAY_CHUNK_BYTES,
   CHAT_RECOVERY_PROGRESS_KEY,
-  turnSignal,
   type ReplyFlushState,
   type ReplyStreams
 } from "agents/chat";
@@ -1803,7 +1804,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
     requestId: string,
     options?: { messageId?: string; continuation?: boolean }
   ): string {
-    return this["_replyStreams"].start(requestId, options);
+    return this["_releasedStreams"].start(requestId, options);
   }
 
   async testStoreStreamChunk(
@@ -1833,7 +1834,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   testFlushChunkBuffer(): void {
-    this._replyStreams.flushBuffer();
+    this["_releasedStreams"].flushBuffer();
   }
 
   /**
@@ -1841,7 +1842,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
    * earlier versions mirrored the progress marker into.
    */
   async probeProgressMirrorForTest(): Promise<unknown> {
-    const stream = this._replyStreams;
+    const stream = this["_releasedStreams"];
     const id = stream.start("req-mirror");
     for (let i = 0; i < 10; i++) stream.storeChunk(id, `{"i":${i}}`);
     stream.finish(id);
@@ -1852,15 +1853,15 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   testCompleteStream(streamId: string): void {
-    this["_replyStreams"].complete(streamId);
+    this["_releasedStreams"].complete(streamId);
   }
 
   testMarkStreamError(streamId: string): void {
-    this["_replyStreams"].error(streamId);
+    this["_releasedStreams"].error(streamId);
   }
 
   getActiveStreamId(): string | null {
-    return this._replyStreams.activeStreamId;
+    return this["_releasedStreams"].activeStreamId;
   }
 
   getActiveRequestId(): string | null {
@@ -1875,7 +1876,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   ): Array<{ body: string; chunk_index: number }> {
     // Delegate to ReplyStreams so tests see the same unpacked, per-chunk
     // view that production consumers get (packed segment rows are expanded).
-    return this._replyStreams.getStreamChunks(streamId);
+    return this["_releasedStreams"].getStreamChunks(streamId);
   }
 
   /** Rows a stream's chunks are stored in. */
@@ -1930,7 +1931,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   getStreamMetadata(
     streamId: string
   ): { status: string; request_id: string } | null {
-    return this._replyStreams.getStreamMetadata(streamId);
+    return this["_releasedStreams"].getStreamMetadata(streamId);
   }
 
   /**
@@ -1960,7 +1961,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
     const self = this as unknown as {
       _persistOrphanedStream(streamId: string): Promise<void>;
     };
-    const streamId = this["_replyStreams"].start("req-continued", {
+    const streamId = this["_releasedStreams"].start("req-continued", {
       messageId: "a1",
       continuation: true,
       basePartCount: 1
@@ -1969,9 +1970,9 @@ export class TestChatAgent extends AIChatAgent<Env> {
       { type: "text-start", id: "t" },
       { type: "text-delta", id: "t", delta: "After" }
     ]) {
-      this._replyStreams.storeChunk(streamId, JSON.stringify(chunk));
+      this["_releasedStreams"].storeChunk(streamId, JSON.stringify(chunk));
     }
-    this._replyStreams.flushBuffer();
+    this["_releasedStreams"].flushBuffer();
     await self._persistOrphanedStream(streamId);
     await self._persistOrphanedStream(streamId);
     const reply = this.messages.find((m) => m.id === "a1");
@@ -1982,7 +1983,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
   /** Record every stream started from now on, for {@link getStartedStreamMetadata}. */
   captureStreamStarts(): void {
-    const stream = this._replyStreams;
+    const stream = this["_releasedStreams"];
     const start = stream.start.bind(stream);
     stream.start = (requestId, options) => {
       const streamId = start(requestId, options);
@@ -2007,7 +2008,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
     created_at: number;
     message_id: string | null;
   }> {
-    return this._replyStreams.getAllStreamMetadata();
+    return this["_releasedStreams"].getAllStreamMetadata();
   }
 
   testInsertStaleStream(
@@ -2051,12 +2052,12 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   testRestoreActiveStream(): void {
-    this._replyStreams.restore();
+    this["_releasedStreams"].restore();
   }
 
   /** Reclaim leftover chat streams now, as the next stream start would. */
   testReclaimStreams(nowMs?: number): number {
-    return this._replyStreams.reclaim(nowMs);
+    return this["_releasedStreams"].reclaim(nowMs);
   }
 
   /** Number of pending stream-cleanup schedules (always 0: none are armed). */
@@ -2078,12 +2079,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   testSimulateHibernationWake(): void {
-    this._replyStreams.open(this.streams, this.sql.bind(this));
-    // A woken isolate builds its resume handshake again, around the new
-    // stream. SAFETY: a test resets the host's private lazy instance.
-    (
-      this as unknown as { _resumeHandshakeInstance: unknown }
-    )._resumeHandshakeInstance = null;
+    this["_releasedStreams"].open(this.streams, this.sql.bind(this));
   }
 
   /**
@@ -3467,6 +3463,24 @@ export class LogOnlyOnErrorAgent extends AIChatAgent<Env> {
 
 // ── ChatRecoveryTestAgent (chat recovery) ─────────────────────────────
 
+/**
+ * The carry of a release's request context writes it through the session
+ * and then empties its table: wait until the table holds no row.
+ */
+async function untilRequestContextCarried(sql: SqlStorage): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    try {
+      const rows = sql
+        .exec("SELECT 1 FROM cf_ai_chat_request_context LIMIT 1")
+        .toArray();
+      if (rows.length === 0) return;
+    } catch {
+      return; // The table is gone.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   /** The recorded end of `requestId` (the recent terminals), or null. */
   recentTerminalForTest(requestId: string): unknown {
@@ -3494,13 +3508,8 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     this.onChatMessageCallCount++;
     this.onChatMessageBodies.push(ctx?.body);
     this.onChatMessageClientTools.push(ctx?.clientTools);
-    this._recoveryRootsSeen.push(
-      (
-        this as unknown as {
-          _chatRecoveryEngine(): { activeRootRequestId?: string };
-        }
-      )._chatRecoveryEngine().activeRootRequestId ?? null
-    );
+    // A recovered turn keeps its request id: it is its own root.
+    this._recoveryRootsSeen.push(ctx?.requestId ?? null);
     if (this._throwFromNextTurn) {
       const message = this._throwFromNextTurn;
       this._throwFromNextTurn = null;
@@ -3701,7 +3710,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     beforeCall: number;
     afterCall: number;
   }> {
-    const streamId = this._replyStreams.start("req-tool-call-durability");
+    const streamId = this["_releasedStreams"].start("req-tool-call-durability");
     const store = (chunk: Record<string, unknown>) =>
       storeStreamChunk(this, streamId, JSON.stringify(chunk));
     const rawCount = (): number =>
@@ -3766,56 +3775,6 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   recoveryShouldThrow = false;
   onExhaustedCalls = 0;
-  private _simulateSupersededIsolate = false;
-
-  /**
-   * Simulate the recovery continuation alarm firing on a SUPERSEDED isolate:
-   * the first storage op throws the catchable
-   * `Durable Object reset because its code was updated.` for the whole
-   * invocation. Used to reproduce the scheduled-callback abandonment path that
-   * #1615's `_beginChatRecoveryIncident` progress logic cannot reach.
-   */
-  _supersededThrows = 0;
-
-  /**
-   * Simulate the recovery continuation alarm firing inside a deploy-reset
-   * window where SQL ops fail with the `SqlError`-wrapped transient
-   * (`SQL query failed: <message>`, original error only in `cause`) rather
-   * than the verbatim reset message (#1730). Unlike the supersede simulation
-   * this shape keeps its in-process retries — the row must still be deferred
-   * (not consumed) once they exhaust.
-   */
-  _simulateTransientErrorMessage: string | null = null;
-
-  protected override async _chatRecoveryContinueDetached(
-    ...args: Parameters<AIChatAgent<Env>["_chatRecoveryContinue"]>
-  ): Promise<void> {
-    if (this._simulateSupersededIsolate) {
-      this._supersededThrows += 1;
-      throw new Error("Durable Object reset because its code was updated.");
-    }
-    if (this._simulateTransientErrorMessage) {
-      this._supersededThrows += 1;
-      throw new Error(
-        `SQL query failed: ${this._simulateTransientErrorMessage}`,
-        { cause: new Error(this._simulateTransientErrorMessage) }
-      );
-    }
-    return super._chatRecoveryContinueDetached(...args);
-  }
-
-  setSimulateSupersededIsolateForTest(value: boolean): void {
-    this._simulateSupersededIsolate = value;
-  }
-
-  setSimulateTransientErrorForTest(message: string | null): void {
-    this._simulateTransientErrorMessage = message;
-  }
-
-  getSupersededThrowsForTest(): number {
-    return this._supersededThrows;
-  }
-
   override async onChatRecovery(
     ctx: ChatRecoveryContext
   ): Promise<ChatRecoveryOptions> {
@@ -3903,7 +3862,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       _persistOrphanedStream(streamId: string): Promise<void>;
     };
     const read = async (): Promise<number> =>
-      this._replyStreams.progressMarker();
+      this["_releasedStreams"].progressMarker();
 
     const start = await read();
     const streamId = self._replyStreams.start("req-progress-immunity");
@@ -3941,50 +3900,6 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return { start, afterFlush, afterPersist };
   }
 
-  async beginIncidentForTest(input: {
-    requestId: string;
-    recoveryRootRequestId?: string | null;
-    latestUserMessageId?: string | null;
-    recoveryKind: "retry" | "continue";
-    nowMs?: number;
-    /** Why the incident opens. Defaults to a stall, which counts nothing. */
-    trigger?: "interrupted" | "stalled";
-  }): Promise<{
-    incidentId: string;
-    attempt: number;
-    exhausted: boolean;
-    reason?: string;
-    interruptedAttempts?: number;
-  }> {
-    const { trigger = "stalled", ...identity } = input;
-    const engine = (
-      this as unknown as { _chatRecoveryEngine(): unknown }
-    )._chatRecoveryEngine() as {
-      beginIncident(
-        i: typeof identity & { trigger: "interrupted" | "stalled" }
-      ): Promise<{
-        incident: {
-          incidentId: string;
-          attempt: number;
-          reason?: string;
-          interruptedAttempts?: number;
-        };
-        exhausted: boolean;
-      }>;
-    };
-    const { incident, exhausted } = await engine.beginIncident({
-      ...identity,
-      trigger
-    });
-    return {
-      incidentId: incident.incidentId,
-      attempt: incident.attempt,
-      exhausted,
-      reason: incident.reason,
-      interruptedAttempts: incident.interruptedAttempts
-    };
-  }
-
   /** Push an incident's `lastAttemptAt` back so a subsequent real-time recovery
    *  isn't collapsed by alarm-debounce (#1637). */
   async ageIncidentForTest(incidentId: string, ms: number): Promise<void> {
@@ -3993,24 +3908,6 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     if (!inc) return;
     inc.lastAttemptAt -= ms;
     await this.ctx.storage.put(key, inc);
-  }
-
-  async updateIncidentForTest(
-    incidentId: string,
-    status: string,
-    reason?: string
-  ): Promise<void> {
-    await (
-      (
-        this as unknown as { _chatRecoveryEngine(): unknown }
-      )._chatRecoveryEngine() as {
-        updateIncident(
-          id: string,
-          status: string,
-          reason?: string
-        ): Promise<void>;
-      }
-    ).updateIncident(incidentId, status, reason);
   }
 
   async seedIncidentForTest(incident: {
@@ -4071,335 +3968,6 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       prefix: "cf:chat-recovery:incident:"
     });
     return [...entries.values()];
-  }
-
-  /**
-   * Run a recovery continue attempt that gives up on a stable-state timeout:
-   * the wait times out and the incident's attempt budget is spent. This is
-   * the path production takes to the give-up.
-   */
-  private async _giveUpOnStableTimeoutForTest(data: {
-    incidentId: string;
-    originalRequestId: string;
-  }): Promise<void> {
-    const key = `cf:chat-recovery:incident:${encodeURIComponent(data.incidentId)}`;
-    const incident = await this.ctx.storage.get<{
-      attempt: number;
-      maxAttempts: number;
-    }>(key);
-    if (incident) {
-      await this.ctx.storage.put(key, {
-        ...incident,
-        attempt: incident.maxAttempts
-      });
-    }
-    const forced = this._forceStableTimeout;
-    this._forceStableTimeout = true;
-    try {
-      await super._chatRecoveryContinueDetached(data);
-    } finally {
-      this._forceStableTimeout = forced;
-    }
-  }
-
-  /**
-   * #1730 layer 3: drive the stable-timeout give-up while the durable terminal write
-   * (`_recordChatTerminal`, #1645) rejects with a platform transient — the
-   * exact window a give-up tends to run in. The FIRST give-up must re-throw
-   * (so `Agent._executeScheduleCallback` preserves the one-shot row) and must
-   * NOT seal the incident `exhausted` (a half-seal would make the deferred
-   * re-run a no-op and drop the durable terminal record). The SECOND give-up
-   * (the deferred re-run on a healthy isolate) must terminalize fully.
-   */
-  async testStableTimeoutSealTransientDefer(input: {
-    transientMessage: string;
-    terminalMessage: string;
-  }): Promise<{
-    firstThrew: boolean;
-    incidentStatusAfterFirst: string | undefined;
-    secondThrew: boolean;
-    incidentStatusAfterSecond: string | undefined;
-    terminalBroadcast: string | undefined;
-    exhaustedReasons: string[];
-  }> {
-    const captured: ChatRecoveryExhaustedContext[] = [];
-    this.chatRecovery = {
-      maxAttempts: 5,
-      terminalMessage: input.terminalMessage,
-      onExhausted: (ctx) => {
-        captured.push(ctx);
-      }
-    };
-
-    const requestId = `seal-transient-${crypto.randomUUID()}`;
-    const begun = await this.beginIncidentForTest({
-      requestId,
-      recoveryRootRequestId: requestId,
-      latestUserMessageId: null,
-      recoveryKind: "continue"
-    });
-
-    let terminalBroadcast: string | undefined;
-    const self = this as unknown as {
-      _frames: {
-        broadcast(
-          msg: { body?: string; error?: boolean; done?: boolean },
-          exclude?: string[]
-        ): void;
-      };
-      _recordChatTerminal(requestId: string, body: string): Promise<void>;
-    };
-    const realBroadcast = self._frames.broadcast.bind(self._frames);
-    self._frames.broadcast = (m, exclude) => {
-      if (m.error && m.done) terminalBroadcast = m.body;
-      realBroadcast(m, exclude);
-    };
-    const realRecordTerminal = self._recordChatTerminal.bind(this);
-    let failTerminalWriteOnce = true;
-    self._recordChatTerminal = async (reqId, body) => {
-      if (failTerminalWriteOnce) {
-        failTerminalWriteOnce = false;
-        throw new Error(`SQL query failed: ${input.transientMessage}`, {
-          cause: new Error(input.transientMessage)
-        });
-      }
-      await realRecordTerminal(reqId, body);
-    };
-
-    const data = {
-      incidentId: begun.incidentId,
-      originalRequestId: requestId
-    };
-    const readIncidentStatus = async (): Promise<string | undefined> => {
-      const incidents = await this.ctx.storage.list<{ status: string }>({
-        prefix: "cf:chat-recovery:incident:"
-      });
-      return [...incidents.values()][0]?.status;
-    };
-
-    let firstThrew = false;
-    try {
-      await this._giveUpOnStableTimeoutForTest(data);
-    } catch {
-      firstThrew = true;
-    }
-    const incidentStatusAfterFirst = await readIncidentStatus();
-
-    let secondThrew = false;
-    try {
-      await this._giveUpOnStableTimeoutForTest(data);
-    } catch {
-      secondThrew = true;
-    } finally {
-      self._frames.broadcast = realBroadcast;
-      self._recordChatTerminal = realRecordTerminal;
-    }
-    const incidentStatusAfterSecond = await readIncidentStatus();
-
-    return {
-      firstThrew,
-      incidentStatusAfterFirst,
-      secondThrew,
-      incidentStatusAfterSecond,
-      terminalBroadcast,
-      exhaustedReasons: captured.map((c) => c.reason)
-    };
-  }
-
-  /**
-   * The incident read is only for the re-entry guard. If it fails during the
-   * give-up window, ai-chat should synthesize an incident and still deliver the
-   * terminal UX instead of aborting terminalization.
-   */
-  async testStableTimeoutIncidentReadBestEffort(input: {
-    transientMessage: string;
-    terminalMessage: string;
-  }): Promise<{
-    threw: boolean;
-    terminalBroadcast: string | undefined;
-    exhaustedReasons: string[];
-    incidentStatus: string | undefined;
-  }> {
-    const captured: ChatRecoveryExhaustedContext[] = [];
-    this.chatRecovery = {
-      maxAttempts: 5,
-      terminalMessage: input.terminalMessage,
-      onExhausted: (ctx) => {
-        captured.push(ctx);
-      }
-    };
-
-    const requestId = `read-transient-${crypto.randomUUID()}`;
-    const begun = await this.beginIncidentForTest({
-      requestId,
-      recoveryRootRequestId: requestId,
-      latestUserMessageId: null,
-      recoveryKind: "continue"
-    });
-    const incidentKey = `cf:chat-recovery:incident:${encodeURIComponent(begun.incidentId)}`;
-
-    let terminalBroadcast: string | undefined;
-    const self = this as unknown as {
-      _frames: {
-        broadcast(
-          msg: { body?: string; error?: boolean; done?: boolean },
-          exclude?: string[]
-        ): void;
-      };
-    };
-    const realBroadcast = self._frames.broadcast.bind(self._frames);
-    self._frames.broadcast = (m, exclude) => {
-      if (m.error && m.done) terminalBroadcast = m.body;
-      realBroadcast(m, exclude);
-    };
-
-    const storage = this.ctx.storage as unknown as {
-      get<T>(key: string): Promise<T | undefined>;
-    };
-    const realGet = storage.get.bind(this.ctx.storage);
-    let failReadOnce = true;
-    storage.get = async <T>(key: string): Promise<T | undefined> => {
-      if (failReadOnce && key === incidentKey) {
-        failReadOnce = false;
-        throw new Error(`SQL query failed: ${input.transientMessage}`, {
-          cause: new Error(input.transientMessage)
-        });
-      }
-      return realGet<T>(key);
-    };
-
-    let threw = false;
-    try {
-      // The give-up alone, through its production entry: on the full
-      // attempt path the failing read would be the cancelled check's.
-      await (
-        this as unknown as {
-          _chatRecoveryEngine(): {
-            exhaustRecoveryGiveUp(input: {
-              callback: string;
-              data: unknown;
-              reason: string;
-            }): Promise<void>;
-          };
-        }
-      )
-        ._chatRecoveryEngine()
-        .exhaustRecoveryGiveUp({
-          callback: "_chatRecoveryContinue",
-          data: {
-            incidentId: begun.incidentId,
-            originalRequestId: requestId
-          },
-          reason: "stable_timeout"
-        });
-    } catch {
-      threw = true;
-    } finally {
-      self._frames.broadcast = realBroadcast;
-      storage.get = realGet;
-    }
-
-    const incidents = await this.ctx.storage.list<{ status: string }>({
-      prefix: "cf:chat-recovery:incident:"
-    });
-    return {
-      threw,
-      terminalBroadcast,
-      exhaustedReasons: captured.map((c) => c.reason),
-      incidentStatus: [...incidents.values()][0]?.status
-    };
-  }
-
-  /**
-   * Once terminalization succeeds, sealing the incident is best-effort. A seal
-   * write failure should not propagate back to the scheduler and cause an
-   * unnecessary re-delivery of the whole give-up.
-   */
-  async testStableTimeoutSealWriteBestEffort(input: {
-    transientMessage: string;
-    terminalMessage: string;
-  }): Promise<{
-    threw: boolean;
-    terminalBroadcast: string | undefined;
-    exhaustedReasons: string[];
-    incidentStatus: string | undefined;
-  }> {
-    const captured: ChatRecoveryExhaustedContext[] = [];
-    this.chatRecovery = {
-      maxAttempts: 5,
-      terminalMessage: input.terminalMessage,
-      onExhausted: (ctx) => {
-        captured.push(ctx);
-      }
-    };
-
-    const requestId = `seal-write-transient-${crypto.randomUUID()}`;
-    const begun = await this.beginIncidentForTest({
-      requestId,
-      recoveryRootRequestId: requestId,
-      latestUserMessageId: null,
-      recoveryKind: "continue"
-    });
-    const incidentKey = `cf:chat-recovery:incident:${encodeURIComponent(begun.incidentId)}`;
-
-    let terminalBroadcast: string | undefined;
-    const self = this as unknown as {
-      _frames: {
-        broadcast(
-          msg: { body?: string; error?: boolean; done?: boolean },
-          exclude?: string[]
-        ): void;
-      };
-    };
-    const realBroadcast = self._frames.broadcast.bind(self._frames);
-    self._frames.broadcast = (m, exclude) => {
-      if (m.error && m.done) terminalBroadcast = m.body;
-      realBroadcast(m, exclude);
-    };
-
-    const storage = this.ctx.storage as unknown as {
-      put(key: string, value: unknown): Promise<void>;
-    };
-    const realPut = storage.put.bind(this.ctx.storage);
-    let failSealWriteOnce = true;
-    storage.put = async (key, value): Promise<void> => {
-      if (
-        failSealWriteOnce &&
-        key === incidentKey &&
-        typeof value === "object" &&
-        value !== null &&
-        (value as { status?: string }).status === "exhausted"
-      ) {
-        failSealWriteOnce = false;
-        throw new Error(`SQL query failed: ${input.transientMessage}`, {
-          cause: new Error(input.transientMessage)
-        });
-      }
-      await realPut(key, value);
-    };
-
-    let threw = false;
-    try {
-      await this._giveUpOnStableTimeoutForTest({
-        incidentId: begun.incidentId,
-        originalRequestId: requestId
-      });
-    } catch {
-      threw = true;
-    } finally {
-      self._frames.broadcast = realBroadcast;
-      storage.put = realPut;
-    }
-
-    const incidents = await this.ctx.storage.list<{ status: string }>({
-      prefix: "cf:chat-recovery:incident:"
-    });
-    return {
-      threw,
-      terminalBroadcast,
-      exhaustedReasons: captured.map((c) => c.reason),
-      incidentStatus: [...incidents.values()][0]?.status
-    };
   }
 
   private _forceStableTimeout = false;
@@ -4470,126 +4038,6 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       return false;
     }
     return super.waitUntilStable(options);
-  }
-
-  async runChatRecoveryContinueDirectForTest(
-    data: Record<string, unknown>
-  ): Promise<void> {
-    await super._chatRecoveryContinueDetached(
-      data as Parameters<AIChatAgent<Env>["_chatRecoveryContinue"]>[0]
-    );
-  }
-
-  /** The same, returning the message of what the attempt threw, if anything. */
-  async runChatRecoveryContinueCatchingForTest(
-    data: Record<string, unknown>
-  ): Promise<string | null> {
-    try {
-      await this.runChatRecoveryContinueDirectForTest(data);
-      return null;
-    } catch (error) {
-      return error instanceof Error ? error.message : String(error);
-    }
-  }
-
-  async runChatRecoveryRetryDirectForTest(
-    data: Record<string, unknown>
-  ): Promise<void> {
-    await super._chatRecoveryRetryDetached(
-      data as Parameters<AIChatAgent<Env>["_chatRecoveryRetry"]>[0]
-    );
-  }
-
-  /** Exercise platform failure ownership on either side of model handoff. */
-  async testRecoveryDispatchHandoffForTest(options: {
-    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry";
-    phase: "before" | "after";
-  }): Promise<{ threw: boolean; tasks: number; schedules: number }> {
-    const data = { incidentId: crypto.randomUUID() };
-    if (options.callback === "_chatRecoveryContinue") {
-      await this.preScheduleRecoveryContinueForTest(data);
-    } else {
-      await this.preScheduleRecoveryRetryForTest(data);
-    }
-
-    type ContinueData = Parameters<
-      AIChatAgent<Env>["_chatRecoveryContinue"]
-    >[0];
-    type RetryData = Parameters<AIChatAgent<Env>["_chatRecoveryRetry"]>[0];
-    const host = this as unknown as {
-      _chatRecoveryContinueDetached(
-        data?: ContinueData,
-        onTurnStarted?: () => void
-      ): Promise<void>;
-      _chatRecoveryRetryDetached(
-        data?: RetryData,
-        onTurnStarted?: () => void
-      ): Promise<void>;
-    };
-    const originalContinue = host._chatRecoveryContinueDetached.bind(this);
-    const originalRetry = host._chatRecoveryRetryDetached.bind(this);
-    const fail = async (onTurnStarted?: () => void): Promise<never> => {
-      if (options.phase === "after") {
-        onTurnStarted?.();
-        // Let the bounded wrapper observe handoff before the detached body
-        // rejects, matching a failure from the model turn itself.
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
-      throw new Error("Network connection lost.");
-    };
-    host._chatRecoveryContinueDetached = (_data, onTurnStarted) =>
-      fail(onTurnStarted);
-    host._chatRecoveryRetryDetached = (_data, onTurnStarted) =>
-      fail(onTurnStarted);
-
-    let threw = false;
-    try {
-      if (options.callback === "_chatRecoveryContinue") {
-        await this._chatRecoveryContinue(data);
-      } else {
-        await this._chatRecoveryRetry(data);
-      }
-    } catch (error) {
-      threw =
-        error instanceof Error &&
-        error.message.includes("Network connection lost");
-    } finally {
-      host._chatRecoveryContinueDetached = originalContinue;
-      host._chatRecoveryRetryDetached = originalRetry;
-    }
-
-    // The post-handoff catch enqueues asynchronously after the wrapper returns.
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    return {
-      threw,
-      ...this.getRecoveryTransportCountsForTest(options.callback)
-    };
-  }
-
-  /** Simulate the not-yet-settled recovery Task currently dispatching. */
-  /** What `_dispatchRecoveredChatTurn` does on a wake: schedule a continue of `target`. */
-  async rvScheduleLikeWakeForTest(
-    incidentId: string,
-    target: string
-  ): Promise<void> {
-    const incident = await this.ctx.storage.get<Record<string, unknown>>(
-      `cf:chat-recovery:incident:${encodeURIComponent(incidentId)}`
-    );
-    const engine = (
-      this as unknown as {
-        _chatRecoveryEngine(): {
-          scheduleRecoveredTurn(input: Record<string, unknown>): Promise<void>;
-        };
-      }
-    )._chatRecoveryEngine();
-    await engine.scheduleRecoveredTurn({
-      incident,
-      recoveryKind: "continue",
-      recoveryRootRequestId: incident?.recoveryRootRequestId,
-      targetAssistantId: target,
-      // The run has not fired yet when the next detection lands.
-      delaySeconds: 60
-    });
   }
 
   /**
@@ -4729,7 +4177,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       }
     ]);
     const backingOffAtStop = this.backingOffChatTurnRunsForTest();
-    await this["_turns"].cancel(result.requestId);
+    await cancelTurn(this["_chatDeps"](), result.requestId);
     return {
       status: result.status,
       requestId: result.requestId,
@@ -4836,18 +4284,6 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     );
   }
 
-  /** Start a run for a recovery attempt no turn's run kept, as the engine does. */
-  async startAttemptRunForTest(
-    callback: "_chatRecoveryContinue" | "_chatRecoveryRetry",
-    data: Record<string, unknown>,
-    delaySeconds: number
-  ): Promise<void> {
-    await this["_turns"].startAttemptRun(
-      { callback, data, delaySeconds },
-      "initial"
-    );
-  }
-
   /**
    * Leave a recovery run as the release enqueued it: a run of the recovery
    * Task, with the options its `chatRecoveryTaskRunOptions` built for a
@@ -4898,29 +4334,6 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
         WHERE run_id = ${runId} ORDER BY step_name ASC
       `.map((row) => `${row.step_name}:${row.state}`)
     );
-  }
-
-  async preScheduleRecoveryContinueForTest(
-    data: Record<string, unknown>
-  ): Promise<void> {
-    const input = {
-      callback: "_chatRecoveryContinue" as const,
-      data,
-      delaySeconds: 60
-    };
-    await this["_turns"].startAttemptRun(input, "redefer");
-  }
-
-  /** Retry-path twin of {@link preScheduleRecoveryContinueForTest}. */
-  async preScheduleRecoveryRetryForTest(
-    data: Record<string, unknown>
-  ): Promise<void> {
-    const input = {
-      callback: "_chatRecoveryRetry" as const,
-      data,
-      delaySeconds: 60
-    };
-    await this["_turns"].startAttemptRun(input, "redefer");
   }
 
   async getChatRecoveringForTest(): Promise<{ requestId?: string } | null> {
@@ -5266,7 +4679,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     status: string | undefined;
     body: Record<string, unknown> | undefined;
   }> {
-    this["_turns"].setRequestContext({ body: { theme: "dark" } });
+    await this._setRequestContext({ body: { theme: "dark" } });
     const runId = crypto.randomUUID();
     if (recovered) {
       this._failingTurn = {
@@ -5325,7 +4738,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     const followUp = this._followUpRequestId;
     const row = this["_agentToolRuns"].store.read(runId);
     const followUpStream = followUp
-      ? this._replyStreams.latestStreamInfoForRequest(followUp)?.id
+      ? this["_releasedStreams"].latestStreamInfoForRequest(followUp)?.id
       : undefined;
     return {
       status: inspection?.status,
@@ -5394,7 +4807,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       this.abortAllRequests("stopped");
     } else {
       // What the `cancel` WebSocket message does.
-      await this["_turns"].cancel(requestId);
+      await cancelTurn(this["_chatDeps"](), requestId);
     }
     // Long enough for a recovery that was not cancelled to run.
     const tailDeadline = Date.now() + 3000;
@@ -5599,12 +5012,12 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   async bumpRecoveryProgressForTest(): Promise<void> {
     // One explicit credit — the same unit a flushed segment or a forwarded
     // child chunk adds to the derived marker.
-    this._replyStreams.creditProgress();
+    this["_releasedStreams"].creditProgress();
   }
 
   /** The recovery progress marker as the engine would read it now. */
   async readProgressMarkerForTest(): Promise<number> {
-    return this._replyStreams.progressMarker();
+    return this["_releasedStreams"].progressMarker();
   }
 
   /** Simulate a parent re-attach that forwards `chunks` of a child's stream by
@@ -5626,7 +5039,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       ): Promise<number>;
     };
     const read = async (): Promise<number> =>
-      this._replyStreams.progressMarker();
+      this["_releasedStreams"].progressMarker();
     const start = await read();
     const bodies = Array.from({ length: chunks }, (_, i) => ({
       body: `chunk-${i}`
@@ -5654,39 +5067,17 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 
   getPartialText(streamId?: string) {
-    const id = streamId ?? this._replyStreams.activeStreamId ?? undefined;
+    const id = streamId ?? this["_releasedStreams"].activeStreamId ?? undefined;
     if (!id) return { text: "", parts: [] };
-    return (
-      this as unknown as {
-        _getPartialStreamText(id: string): {
-          text: string;
-          parts: unknown[];
-        };
-      }
-    )._getPartialStreamText(id);
+    return aiSdkRecoveryCodec.toRecoveryPartial(
+      this["_releasedStreams"].getStreamChunks(id).map((chunk) => chunk.body)
+    );
   }
 
   async callContinueLastTurn(
     body?: Record<string, unknown>
   ): Promise<{ requestId: string; status: string }> {
     return this.continueLastTurn(body);
-  }
-
-  async runRecoveryContinueForTest(options?: {
-    targetAssistantId?: string;
-    originMessageIds?: string[];
-    incidentId?: string;
-    originalRequestId?: string;
-  }): Promise<void> {
-    await this._chatRecoveryContinueDetached(options);
-  }
-
-  async runRecoveryRetryForTest(options?: {
-    targetUserId?: string;
-    lastBody?: Record<string, unknown>;
-    lastClientTools?: ClientToolSchema[];
-  }): Promise<void> {
-    await this._chatRecoveryRetryDetached(options);
   }
 
   private async _runQueuedRecoveryTaskForTest(
@@ -5718,38 +5109,6 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return true;
   }
 
-  /**
-   * Look up origin ids for the recovery successor from inside an open recovery
-   * scope, and for an unrelated request concurrently from outside it (#2280).
-   */
-  async probeRecoveryOriginScopeForTest(ids: string[]): Promise<{
-    successor: string[] | undefined;
-    unrelated: string[] | undefined;
-  }> {
-    const self = this as unknown as {
-      _chatRecoveryEngine(): {
-        runInAttemptScope<R>(
-          attempt: { originMessageIds: string[] },
-          fn: () => Promise<R>
-        ): Promise<R>;
-      };
-      _frames: { originIds(requestId: string): string[] | undefined };
-    };
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const scoped = self
-      ._chatRecoveryEngine()
-      .runInAttemptScope({ originMessageIds: ids }, async () => {
-        await gate;
-        return self._frames.originIds("successor");
-      });
-    const unrelated = self._frames.originIds("unrelated");
-    release();
-    return { successor: await scoped, unrelated };
-  }
-
   async runScheduledRecoveryRetryForTest(): Promise<void> {
     if (await this._runQueuedRecoveryTaskForTest("_chatRecoveryRetry")) return;
     const rows = this.sql<{ payload: string }>`
@@ -5762,7 +5121,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       await this.waitUntilStable({ pendingInteraction: () => false });
       return;
     }
-    await this._chatRecoveryRetryDetached(
+    await this._chatRecoveryRetry(
       JSON.parse(rows[0].payload) as {
         targetUserId?: string;
         lastBody?: Record<string, unknown>;
@@ -5785,7 +5144,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       await this.waitUntilStable({ pendingInteraction: () => false });
       return;
     }
-    await this._chatRecoveryContinueDetached(
+    await this._chatRecoveryContinue(
       JSON.parse(rows[0].payload) as {
         targetAssistantId?: string;
         lastBody?: Record<string, unknown> | null;
@@ -5846,7 +5205,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     stored: string | null;
     tableLeft: boolean;
   }> {
-    await this["_requestContextCarried"];
+    await untilRequestContextCarried(this.ctx.storage.sql);
     return {
       clientTools: this._lastClientTools?.map((tool) => tool.name) ?? null,
       body: JSON.stringify(this._lastBody ?? null),
@@ -5973,64 +5332,8 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   private _recoveryTaskKeyed: boolean[] = [];
 
-  /** Record whether each recovery scheduled from now on has an idempotency key. */
-  trackRecoveryTaskKeysForTest(): void {
-    const turns = this["_turns"];
-    const original = turns.startAttemptRun.bind(turns);
-    turns.startAttemptRun = (attempt, reason, key) => {
-      // The key `startAttemptRun` gives a first schedule of an incident.
-      this._recoveryTaskKeyed.push(
-        reason === "initial" && typeof attempt.data.incidentId === "string"
-      );
-      return original(attempt, reason, key);
-    };
-    // An attempt a turn's own run takes is keyed the same way: only a
-    // first (`initial`) schedule.
-    const engine = (
-      this as unknown as { _chatRecoveryEngine(): unknown }
-    )._chatRecoveryEngine() as {
-      scheduleRecovery(input: {
-        reason?: string;
-        into?: (attempt: unknown) => boolean;
-      }): Promise<boolean>;
-    };
-    const schedule = engine.scheduleRecovery.bind(engine);
-    engine.scheduleRecovery = (input) => {
-      const into = input.into;
-      return schedule(
-        into
-          ? {
-              ...input,
-              into: (attempt) => {
-                const taken = into(attempt);
-                if (taken) {
-                  this._recoveryTaskKeyed.push(
-                    (input.reason ?? "initial") === "initial"
-                  );
-                }
-                return taken;
-              }
-            }
-          : input
-      );
-    };
-  }
-
   getRecoveryTaskKeyedForTest(): boolean[] {
     return this._recoveryTaskKeyed;
-  }
-
-  /** Make the next routing into recovery throw (an incident write failure). */
-  failNextIncidentBeginForTest(): void {
-    const engine = (
-      this as unknown as { _chatRecoveryEngine(): unknown }
-    )._chatRecoveryEngine() as {
-      beginIncident(...args: unknown[]): Promise<unknown>;
-    };
-    engine.beginIncident = async () => {
-      Reflect.deleteProperty(engine, "beginIncident");
-      throw new Error("incident write failed");
-    };
   }
 
   /** The backoff, in seconds, of the recovery attempt scheduled last. */
@@ -6095,14 +5398,14 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
   async triggerInterruptedStreamCheck(): Promise<void> {
     // SAFETY: a test reads whether the restored stream has a reader.
-    const live = (this._replyStreams as unknown as { _isLive: boolean })
+    const live = (this["_releasedStreams"] as unknown as { _isLive: boolean })
       ._isLive;
-    if (!this._replyStreams.hasActiveStream() || live) {
+    if (!this["_releasedStreams"].hasActiveStream() || live) {
       return;
     }
 
-    const streamId = this._replyStreams.activeStreamId!;
-    const requestId = this._replyStreams.activeRequestId ?? "";
+    const streamId = this["_releasedStreams"].activeStreamId!;
+    const requestId = this["_releasedStreams"].activeRequestId ?? "";
 
     const partial = this.getPartialText(streamId);
 
@@ -6133,7 +5436,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       await this._persistOrphanedStream(streamId);
     }
 
-    this._replyStreams.complete(streamId);
+    this["_releasedStreams"].complete(streamId);
 
     if (options.continue !== false) {
       const targetId = this.messages
@@ -6245,7 +5548,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
                 ${body}, ${createdAt}, ${createdAt})
       `;
     }
-    this._replyStreams.restore();
+    this["_releasedStreams"].restore();
   }
 
   getActiveFibers(): Array<{ id: string; name: string }> {
@@ -6810,7 +6113,7 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     rowsLeft: number;
     stored: string | null;
   }> {
-    await this["_requestContextCarried"];
+    await untilRequestContextCarried(this.ctx.storage.sql);
     const sql = this.ctx.storage.sql;
     const tableLeft =
       sql
@@ -6874,7 +6177,8 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
     return {
       tables,
       rowsLeft,
-      importedChunks: this._replyStreams.getStreamChunks("legacy-stream").length
+      importedChunks:
+        this["_releasedStreams"].getStreamChunks("legacy-stream").length
     };
   }
 
@@ -7399,75 +6703,6 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       storedWhileQueued,
       second: { status: second?.status, error: second?.error }
     };
-  }
-
-  /** A cancel for a run that already finished must not touch other turns. */
-  async cancelFinishedRunForTest(): Promise<{
-    status: string | undefined;
-    otherTurnAborted: boolean;
-    ownRequestAborted: boolean;
-    after: { status: string; cancelledAt: number | null } | null;
-  }> {
-    const runId = crypto.randomUUID();
-    await this.startAgentToolRun({ prompt: "quick run" }, { runId });
-    const finished = await this._waitForRunTerminalForTest(runId);
-    await this._waitForRunsSettledForTest();
-    const store = this["_agentToolRuns"].store;
-    const signal = turnSignal(this["_turns"].aborts, "another-turn");
-    // A later turn could run under the finished run's old request id.
-    const ownRequestId = store.read(runId)?.requestId ?? "";
-    const own = turnSignal(this["_turns"].aborts, ownRequestId);
-    await this.cancelAgentToolRun(runId, "late cancel");
-    const otherTurnAborted = signal?.aborted ?? false;
-    const ownRequestAborted = own?.aborted ?? false;
-    this["_turns"].aborts.delete("another-turn");
-    this["_turns"].aborts.delete(ownRequestId);
-    const row = store.read(runId);
-    return {
-      status: finished?.status,
-      otherTurnAborted,
-      ownRequestAborted,
-      after: row ? { status: row.status, cancelledAt: row.cancelledAt } : null
-    };
-  }
-
-  /**
-   * A cancel of a run being recovered stops what runs under the request ids
-   * on its row (the recovered turn, a recovery attempt registered under the
-   * first id) and nothing else on the agent.
-   */
-  async cancelRecoveredRunForTest(): Promise<{
-    recoveredTurnAborted: boolean;
-    attemptAborted: boolean;
-    otherTurnAborted: boolean;
-    otherAttemptAborted: boolean;
-  }> {
-    const runId = crypto.randomUUID();
-    this.sql`
-      INSERT INTO cf_ai_chat_agent_tool_runs
-        (run_id, request_id, root_request_id, status, started_at)
-      VALUES (${runId}, 'recovered-request', 'first-request', 'running',
-        ${Date.now()})
-    `;
-    const registry = this["_turns"].aborts;
-    const recoveredTurn = turnSignal(registry, "recovered-request");
-    const otherTurn = turnSignal(registry, "a-users-turn");
-    const attempt = this["_turns"].beginRecoveryAttempt("first-request");
-    const otherAttempt = this["_turns"].beginRecoveryAttempt("a-users-root");
-    try {
-      await this.cancelAgentToolRun(runId, "parent gave up");
-      return {
-        recoveredTurnAborted: recoveredTurn?.aborted ?? false,
-        attemptAborted: attempt.signal.aborted,
-        otherTurnAborted: otherTurn?.aborted ?? false,
-        otherAttemptAborted: otherAttempt.signal.aborted
-      };
-    } finally {
-      attempt.end();
-      otherAttempt.end();
-      registry.delete("recovered-request");
-      registry.delete("a-users-turn");
-    }
   }
 
   /**
@@ -8392,41 +7627,6 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       await recovery._chatRecoveryRetryDetached({});
     }
     return { before, after: this._readChildRunStatusForTest(runId) };
-  }
-
-  /**
-   * P4 (#1630): `cancelAgentToolRun` must abort not just the original in-isolate
-   * run but any in-flight chat-recovery turn driving this child facet — which
-   * runs outside `startAgentToolRun` and registers a request controller in the
-   * `AbortRegistry` — so a torn-down child stops grinding instead of finishing
-   * an orphaned recovered turn. Registers a request signal exactly as a live
-   * turn does, then asserts cancel aborts it and seals the row `aborted`.
-   */
-  async cancelAgentToolRunAbortsRecoveryForTest(): Promise<{
-    abortedBefore: boolean;
-    abortedAfter: boolean;
-    childStatus: string | null;
-  }> {
-    const runId = crypto.randomUUID();
-    this.sql`
-      INSERT INTO cf_ai_chat_agent_tool_runs (run_id, request_id, status, started_at)
-      VALUES (${runId}, 'recovered-request', 'running', ${Date.now()})
-    `;
-    const signal = turnSignal(
-      (
-        this as unknown as {
-          _turns: { aborts: Map<string, AbortController> };
-        }
-      )._turns.aborts,
-      "recovered-request"
-    );
-    const abortedBefore = signal?.aborted ?? false;
-    await this.cancelAgentToolRun(runId, "parent gave up re-attaching");
-    return {
-      abortedBefore,
-      abortedAfter: signal?.aborted ?? false,
-      childStatus: this._readChildRunStatusForTest(runId)
-    };
   }
 }
 
@@ -9846,14 +9046,6 @@ export class AIChatAgentToolParent extends Agent<Env> {
     return (await this._freshChildForTest()).cancelQueuedRunForTest(thenReset);
   }
 
-  async childCancelFinishedRunForTest() {
-    return (await this._freshChildForTest()).cancelFinishedRunForTest();
-  }
-
-  async childCancelRecoveredRunForTest() {
-    return (await this._freshChildForTest()).cancelRecoveredRunForTest();
-  }
-
   async childRecoverCancelledRunForTest(
     path: "continue" | "retry",
     cancelled = true
@@ -9876,18 +9068,6 @@ export class AIChatAgentToolParent extends Agent<Env> {
 
   async childCancelStartingRunForTest() {
     return (await this._freshChildForTest()).cancelStartingRunForTest();
-  }
-
-  async childCancelAgentToolRunAbortsRecoveryForTest(): Promise<{
-    abortedBefore: boolean;
-    abortedAfter: boolean;
-    childStatus: string | null;
-  }> {
-    const child = await this.subAgent(
-      AIChatAgentToolChild,
-      crypto.randomUUID()
-    );
-    return child.cancelAgentToolRunAbortsRecoveryForTest();
   }
 
   async runChildWithTrackedAbortListener(

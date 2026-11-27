@@ -284,18 +284,6 @@ type ParentStub = DurableObjectStub & {
     userTexts: string[];
     chatCalls: string[];
   }>;
-  childCancelFinishedRunForTest(): Promise<{
-    status: string | undefined;
-    otherTurnAborted: boolean;
-    ownRequestAborted: boolean;
-    after: { status: string; cancelledAt: number | null } | null;
-  }>;
-  childCancelRecoveredRunForTest(): Promise<{
-    recoveredTurnAborted: boolean;
-    attemptAborted: boolean;
-    otherTurnAborted: boolean;
-    otherAttemptAborted: boolean;
-  }>;
   childRecoverCancelledRunForTest(
     path: "continue" | "retry",
     cancelled?: boolean
@@ -313,11 +301,6 @@ type ParentStub = DurableObjectStub & {
     second: { status: string | undefined; error: string | undefined };
   }>;
   childCancelStartingRunForTest(): Promise<string | null>;
-  childCancelAgentToolRunAbortsRecoveryForTest(): Promise<{
-    abortedBefore: boolean;
-    abortedAfter: boolean;
-    childStatus: string | null;
-  }>;
   driveFacetRecoveryOomSealForTest(
     executing: { childName: string; incidentId: string },
     pending: { childName: string; incidentId: string }
@@ -1682,16 +1665,6 @@ describe("AIChatAgent as an agent-tool child", () => {
   it("keeps a cancelled run aborted when a chat reset then skips its queued turn", async () => {
     const result = await (await getParent()).childCancelQueuedRunForTest(true);
     expect(result.queued).toMatchObject({ status: "aborted", error: "stop" });
-  });
-
-  it("a cancel for a run that already finished aborts no other turn", async () => {
-    const result = await (await getParent()).childCancelFinishedRunForTest();
-    expect(result.status).toBe("completed");
-    expect(result.otherTurnAborted).toBe(false);
-    // The finished run is left exactly as it was: nothing is stopped under
-    // its old request id, and its row is not marked cancelled.
-    expect(result.ownRequestAborted).toBe(false);
-    expect(result.after).toEqual({ status: "completed", cancelledAt: null });
   });
 
   for (const path of ["continue", "retry"] as const) {

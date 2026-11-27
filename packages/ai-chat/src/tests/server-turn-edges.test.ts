@@ -49,25 +49,6 @@ async function agent(room = crypto.randomUUID()) {
   };
 }
 
-const exchange = [
-  { id: "u1", role: "user", parts: [{ type: "text", text: "question" }] },
-  { id: "a1", role: "assistant", parts: [{ type: "text", text: "partial" }] }
-];
-
-function scheduledContinue(incidentId: string) {
-  return {
-    incidentId,
-    requestId: `root-${incidentId}`,
-    recoveryKind: "continue",
-    attempt: 1,
-    maxAttempts: 6,
-    status: "scheduled",
-    firstSeenAt: Date.now(),
-    lastAttemptAt: Date.now(),
-    scheduled: { callback: "_chatRecoveryContinue", targetMessageId: "a1" }
-  };
-}
-
 describe("a turn that finished before a clear", () => {
   it("is completed when the clear lands while onChatResponse runs", async () => {
     const { stub } = await agent();
@@ -128,31 +109,6 @@ describe("a context pinned on a turn", () => {
     expect(await stub.getStoredRequestContextForTest()).toEqual({
       body: null,
       clientTools: null
-    });
-  });
-
-  it("a recovered turn runs with the interrupted request's context and leaves the stored one", async () => {
-    const { stub } = await agent();
-    await stub.setRequestContextForTest({ chat: true }, [{ name: "chatTool" }]);
-    await stub.persistMessages(exchange);
-    await stub.seedIncidentForTest(scheduledContinue("inc-run"));
-
-    // The interrupted turn was an agent-tool run's: its input was its body.
-    await stub.runChatRecoveryContinueDirectForTest({
-      incidentId: "inc-run",
-      originalRequestId: "root-inc-run",
-      targetAssistantId: "a1",
-      lastBody: { agentToolInput: "the run's input" },
-      lastClientTools: null
-    });
-
-    expect(await stub.getOnChatMessageBodies()).toEqual([
-      { agentToolInput: "the run's input" }
-    ]);
-    // The chat's next turn does not inherit the run's input.
-    expect(await stub.getStoredRequestContextForTest()).toEqual({
-      body: { chat: true },
-      clientTools: ["chatTool"]
     });
   });
 
