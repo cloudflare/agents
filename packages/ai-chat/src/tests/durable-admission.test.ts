@@ -192,12 +192,9 @@ describe("durable admission: a request queued behind a turn a reset cuts off", (
       () => restarted.getPersistedMessages(),
       (m) => m.filter((x) => x.role === "assistant").length >= 2
     );
-    expect(messages.map((m) => m.id.startsWith("u") ? m.id : m.role)).toEqual([
-      "u1",
-      "assistant",
-      "u2",
-      "assistant"
-    ]);
+    expect(messages.map((m) => (m.id.startsWith("u") ? m.id : m.role))).toEqual(
+      ["u1", "assistant", "u2", "assistant"]
+    );
     expect(textOf(messages[3])).toBe(QUICK_REPLY);
   }, 30_000);
 
