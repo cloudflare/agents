@@ -10,8 +10,12 @@ import {
 } from "./test-utils";
 import { getAgentByName } from "agents";
 
-/** Bounds for waits on the agent, inside the 10 s test timeout. */
-const BOUNDS = { timeout: 5_000, interval: 20 };
+/**
+ * Bounds for waits on the agent. A test makes at most two in a row, which
+ * together stay inside the 10 s test timeout, so a missing event fails by
+ * name.
+ */
+const BOUNDS = { timeout: 3_000, interval: 20 };
 
 /**
  * Cancel `requestId` mid-stream: its stream is held after its first chunk,
