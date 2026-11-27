@@ -88,6 +88,7 @@ type ThinkSubmissionTestStub = {
   persistAssistantMessageForTest(msg: UIMessage): Promise<void>;
   setLastBodyForTest(body: Record<string, unknown>): Promise<void>;
   setSubmissionRecoveryStaleMsForTest(ms: number): Promise<void>;
+  keepSubmissionRecoveryStaleMsForTest(ms: number): Promise<void>;
   setWorkflowEventFailuresForTest(count: number): Promise<void>;
   repeatSubmissionReportForTest(submissionId: string): Promise<void>;
   getErrorsForTest(): Promise<string[]>;
@@ -764,6 +765,39 @@ describe("Think durable submissions", () => {
         "assistant"
       ]);
     }, 40_000);
+
+    it("ends in error, without asking the model again, when its turn started longer ago than the stale window", async () => {
+      const name = crypto.randomUUID();
+      const agent = await freshAgent(name);
+      // The window is far shorter than the reply's first chunk takes.
+      await agent.keepSubmissionRecoveryStaleMsForTest(20);
+      onTestFinished(async () =>
+        (await freshAgent(name)).keepSubmissionRecoveryStaleMsForTest(
+          15 * 60 * 1000
+        )
+      );
+      await agent.setDelayedChunkResponse(["alpha ", "beta ", "gamma "], 200);
+      await agent.holdChunksAfterForTest(1);
+      await agent.testSubmitMessages("too old to recover", {
+        submissionId: "sub-evicted-stale"
+      });
+      await chunkStreamHeld(agent);
+
+      await agent.resetIsolateForTest().catch(() => {});
+      const restarted = await freshAgent(name);
+      await tasksIdle(restarted);
+
+      await expect(
+        restarted.inspectSubmissionForTest("sub-evicted-stale")
+      ).resolves.toMatchObject({
+        status: "error",
+        error: "Submission was interrupted after messages were applied."
+      });
+      // The reply was not produced again: only what was streamed before
+      // the reset is stored, if anything.
+      const stored = JSON.stringify(await restarted.getStoredMessages());
+      expect(stored).not.toContain("gamma");
+    }, 30_000);
 
     it("stays aborted when it is cancelled while its reply is being recovered", async () => {
       const name = crypto.randomUUID();

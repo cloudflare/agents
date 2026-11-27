@@ -517,5 +517,14 @@
       "file": "client-tools.test.ts",
       "test": "Think — a client tool's call while its reply streams > waits on it before the reply is stored"
     }
+  },
+  {
+    "file": "submissions.test.ts",
+    "test": "Think durable submissions > marks stale running submissions with applied messages as error without replaying",
+    "reason": "a submission run imported as `running` in the class's shape with an old start time (`insertSubmissionForTest`); the class's start-up reconciliation judges it",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > ends in error, without asking the model again, when its turn started longer ago than the stale window"
+    }
   }
 ]

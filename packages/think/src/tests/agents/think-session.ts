@@ -11065,6 +11065,9 @@ export class ThinkContinueOverrideTestAgent extends ThinkTestAgent {
 const RECOVERY_TOOL_MODEL_KEY = "test:recovery-tool-model";
 /** And how many times that model's tool ran. */
 const RECOVERY_TOOL_EXECUTIONS_KEY = "test:recovery-tool-executions";
+/** Where a test keeps the stale window it set, across a reset. */
+const STALE_WINDOW_KEY = "test:submission-stale-ms";
+
 /** Where {@link ThinkProgrammaticTestAgent} keeps a hold across a reset. */
 const HOLD_AFTER_RESET_KEY = "test:hold-chunks-after-reset";
 
@@ -11152,6 +11155,12 @@ export class ThinkProgrammaticTestAgent extends Think {
   private _coldRpcOnStartCount = 0;
 
   override onStart(): void {
+    const staleMs = this.ctx.storage.kv.get<number>(STALE_WINDOW_KEY);
+    if (staleMs !== undefined) {
+      (
+        this.constructor as typeof ThinkProgrammaticTestAgent
+      ).submissionRecoveryStaleMs = staleMs;
+    }
     this._coldRpcOnStartCount++;
     this._legacySubmissionAtStart = submissionStatusOf(
       this.tasks.peek("legacy-at-start")
@@ -12014,6 +12023,15 @@ export class ThinkProgrammaticTestAgent extends Think {
     (
       this.constructor as typeof ThinkProgrammaticTestAgent
     ).submissionRecoveryStaleMs = ms;
+  }
+
+  /**
+   * The stale window for this object, kept across a reset (the class's own
+   * value is in memory): `onStart` puts it back.
+   */
+  async keepSubmissionRecoveryStaleMsForTest(ms: number): Promise<void> {
+    this.ctx.storage.kv.put(STALE_WINDOW_KEY, ms);
+    await this.setSubmissionRecoveryStaleMsForTest(ms);
   }
 
   async testSaveMessages(msgs: UIMessage[]): Promise<SaveMessagesResult> {
