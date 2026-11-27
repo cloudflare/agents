@@ -59,7 +59,12 @@ function recording(sql: Sql): Observability {
           {
             incidentId: p.incidentId,
             status: p.status,
-            reason: p.reason
+            reason: p.reason,
+            // For reading a turn that went wrong: which request, tool and error.
+            requestId: p.requestId,
+            toolName: p.toolName,
+            error:
+              p.error === undefined ? undefined : String(p.error).slice(0, 300)
           }
         )})`;
       } catch {
@@ -159,7 +164,10 @@ export class ProbeThink extends Think<Env> {
       {
         status: result.status,
         continuation: result.continuation,
-        requestId: result.requestId
+        requestId: result.requestId,
+        error: (result as { error?: unknown }).error
+          ? String((result as { error?: unknown }).error).slice(0, 300)
+          : undefined
       }
     )})`;
   }
@@ -171,6 +179,19 @@ export class ProbeThink extends Think<Env> {
       parts: [{ type: "text", text }]
     };
     return this.submitMessages([message]);
+  }
+  /** The object's own runs (turns, submissions), newest first, for a failure. */
+  async probeRuns() {
+    return (await this.tasks.list()).slice(0, 60).map((r) => ({
+      id: r.runId,
+      definition: r.definition,
+      status: r.status,
+      attempt: (r as { attempt?: number }).attempt,
+      // A settled run's snapshot keeps no attempt count; its error is an object.
+      error: (r as { error?: unknown }).error
+        ? JSON.stringify((r as { error?: unknown }).error).slice(0, 300)
+        : undefined
+    }));
   }
   async probeState() {
     tables(this.s);

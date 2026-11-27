@@ -179,8 +179,17 @@ async function drain(
   return settle("think", room, { quietMs: 6000, maxMs: 240_000 });
 }
 
-async function soak(room: string): Promise<{ run: Run; sent: string[] }> {
+async function soak(room: string): Promise<{
+  run: Run;
+  sent: string[];
+  ids: Map<string, { id?: string; at: number }>;
+}> {
   const sent: string[] = [];
+  /**
+   * Each turn's request id (a tab's request or a submission) and when it
+   * was sent, by its text, for the failure report.
+   */
+  const ids = new Map<string, { id?: string; at: number }>();
   const handled = new Set<string>();
   let tab = await open(room);
   // Every tab's requests and frames, for the done-frame checks. A request
@@ -191,14 +200,20 @@ async function soak(room: string): Promise<{ run: Run; sent: string[] }> {
     const kind = KINDS[(turn - 1) % KINDS.length];
     const text = prompt(kind, turn);
     sent.push(text);
+    ids.set(text, { at: Date.now() });
     progress(`${room} turn ${turn} ${kind}`);
     if (kind === "submit") {
       const r = await ctl("think", room, "probeSubmit", text);
+      ids.set(text, {
+        at: ids.get(text)?.at ?? Date.now(),
+        id: (r.value as { submissionId?: string } | undefined)?.submissionId
+      });
       if (!r.ok) throw new Error(`submit: ${r.error}`);
     } else {
       const id = tab.request(rid("req"), [user(text)], {
         clientTools: CLIENT_TOOLS
       });
+      ids.set(text, { at: ids.get(text)?.at ?? Date.now(), id });
       if (RESETS.has(turn)) {
         // Cut the reply off once it streams, then come back as a new tab.
         await tab.waitFor(
@@ -250,7 +265,72 @@ async function soak(room: string): Promise<{ run: Run; sent: string[] }> {
   late.close();
   return {
     run: { state, tabs, lateTab: late.frames, extra: {}, checks: [] },
-    sent
+    sent,
+    ids
+  };
+}
+
+/**
+ * What happened to turns that got no answer: each tab's frames for the
+ * request (chunk types, the terminal frame, error bodies), the object's
+ * responses and events, its recent runs, and how often it started.
+ */
+async function turnRecord(
+  room: string,
+  run: Run,
+  state: Run["state"],
+  texts: string[],
+  ids: Map<string, { id?: string; at: number }>
+) {
+  const runs = await ctl("think", room, "probeRuns");
+  const s = state as Run["state"] & {
+    responses?: { at?: number; requestId?: string }[];
+    events?: { at?: number; type: string; requestId?: string }[];
+  };
+  const starts = [...ids.values()].map((v) => v.at).sort((x, y) => x - y);
+  // Every frame on every tab, the returning tab included, labelled.
+  const tabs = [...run.tabs.map((t) => t.frames), run.lateTab];
+  const label = (f: Frame) =>
+    f.type !== MT.RESPONSE
+      ? f.type
+      : `${f.done ? `done:${f.outcome ?? ""}` : "chunk"}${f.replay ? ":replay" : ""}${f.error ? ` error ${String(f.body).slice(0, 300)}` : f.done ? "" : ` ${String(f.body).slice(0, 60)}`}`;
+  return {
+    starts: state.starts,
+    runs: runs.ok ? runs.value : runs.error,
+    turns: texts.map((text) => {
+      const turn = ids.get(text);
+      const from = turn?.at ?? 0;
+      // Until the next turn was sent: the turn's continuations have their
+      // own request ids, so the window is what ties them to it.
+      const to = starts.find((t) => t > from) ?? Number.POSITIVE_INFINITY;
+      const inTurn = (at?: number) => at !== undefined && at >= from && at < to;
+      return {
+        text,
+        id: turn?.id,
+        frames: tabs.flatMap((frames, n) =>
+          frames
+            .filter(
+              (f) =>
+                f.id === turn?.id || (inTurn(f.__t) && f.type !== MT.MESSAGES)
+            )
+            .map(
+              (f) =>
+                `${n === tabs.length - 1 ? "late" : `tab${n}`} ${f.id ?? ""} ${label(f)}`
+            )
+        ),
+        responses: (s.responses ?? []).filter(
+          (r) => r.requestId === turn?.id || inTurn(r.at)
+        ),
+        // The turn's events: by its request id, or inside its window (skew
+        // between the runner's clock and the Worker's moves the edges).
+        events: (s.events ?? []).filter(
+          (e) =>
+            (turn?.id !== undefined &&
+              (e as { requestId?: string }).requestId === turn.id) ||
+            (inTurn(e.at) && !e.type.startsWith("chat:stream:chunk"))
+        )
+      };
+    })
   };
 }
 
@@ -262,7 +342,7 @@ describe.concurrent("Think on a real model, through resets", () => {
       process.env.PROBE_URL = inject("probeUrl");
       process.env.PROBE_KEY = inject("probeKey");
       const room = `soak-${n}-${Date.now()}`;
-      const { run, sent } = await soak(room);
+      const { run, sent, ids } = await soak(room);
       const state = run.state as Run["state"] & {
         runs: { kind: string; id: string; n: number }[];
         submissions: string[];
@@ -278,11 +358,21 @@ describe.concurrent("Think on a real model, through resets", () => {
         submissions: state.submissions
       });
       // Every message sent is in the transcript, once, in order.
-      expect(texts, report).toEqual(sent);
-      // Every one is answered with text, and no tool waits on the user.
+      const missing = sent.filter((text) => !texts.includes(text));
       expect(
-        sent.filter((text) => !answeredTurn(state, text)),
-        report
+        texts,
+        missing.length
+          ? `${report}\n${JSON.stringify(await turnRecord(room, run, state, missing, ids))}`
+          : report
+      ).toEqual(sent);
+      // Every one is answered with text, and no tool waits on the user. A
+      // turn that is not shows what the tabs and the object saw for it.
+      const unanswered = sent.filter((text) => !answeredTurn(state, text));
+      expect(
+        unanswered,
+        unanswered.length
+          ? `${report}\n${JSON.stringify(await turnRecord(room, run, state, unanswered, ids))}`
+          : report
       ).toEqual([]);
       // The weather turns used their tool (a real model may answer one in
       // prose; it may not skip them all). The approval turns are the reset
