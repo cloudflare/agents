@@ -4009,6 +4009,13 @@ export class AIChatAgent<
     // What the cut-off reply streamed is stored as the reply, as the
     // release stored an orphaned stream.
     const before = await this.#session.getLatestLeaf();
+    // A continuation extends a reply that was already stored: only the
+    // parts after these are this turn's.
+    const earlierParts =
+      before?.role === "assistant"
+        ? (this.messages.find((message) => message.id === before.id)?.parts
+            .length ?? 0)
+        : 0;
     const { streamId, streamStillActive } =
       this._resolveAIChatRecoveryStream(requestId);
     if (streamId && streamStillActive) {
@@ -4018,9 +4025,14 @@ export class AIChatAgent<
     const leaf = await this.#session.getLatestLeaf();
 
     const continues = leaf?.role === "assistant";
-    const partial = continues
+    const reply = continues
       ? this.messages.find((message) => message.id === leaf.id)
       : undefined;
+    // What this turn streamed: the whole reply, or what it added to the
+    // reply it continued.
+    const streamed = (reply?.parts ?? []).slice(
+      leaf?.id === before?.id ? earlierParts : 0
+    );
     // What the release recorded about this turn's recovery is not carried:
     // the turn starts on the lane with the budget of a new one.
     await this._forgetReleasedIncidents(requestId);
@@ -4034,10 +4046,10 @@ export class AIChatAgent<
         recoveryKind: continues ? "continue" : "retry",
         streamId,
         requestId,
-        partialText: (partial?.parts ?? [])
+        partialText: streamed
           .map((part) => (part.type === "text" ? part.text : ""))
           .join(""),
-        partialParts: (partial?.parts ?? []) as MessagePart[],
+        partialParts: streamed as MessagePart[],
         recoveryData: user,
         messages: [...this.messages],
         ...(body !== undefined && { lastBody: body }),
@@ -4057,7 +4069,7 @@ export class AIChatAgent<
       decision?.persist === false &&
       leaf !== null &&
       leaf.id !== before?.id &&
-      !(partial?.parts ?? []).some(
+      !streamed.some(
         (part) =>
           part.type.startsWith("tool-") &&
           ((part as { state?: string }).state === "output-available" ||
@@ -4098,7 +4110,14 @@ export class AIChatAgent<
             questionId: plan.questionId,
             ...context
           },
-      { requestId }
+      {
+        requestId,
+        // The user messages the request came from, so its end names them.
+        ...(snapshot?.originMessageIds &&
+          snapshot.originMessageIds.length > 0 && {
+            metadata: { chat: { messageIds: snapshot.originMessageIds } }
+          })
+      }
     );
   }
 
