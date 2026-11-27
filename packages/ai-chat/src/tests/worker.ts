@@ -6392,26 +6392,23 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
     } finally {
       this._shouldThrow = false;
     }
-    // The caller hears of the failure from its turn; the turn's run fails
-    // just after, and onError hears of it then.
-    for (let i = 0; i < 200 && this._onErrorSeen.length < 2; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-    const internals = this as unknown as {
-      _chatTurnFibers: { liveTurns: Map<string, unknown> };
-      _turns: { aborts: { size: number } };
-      _turnQueue: { isActive: boolean };
-    };
+    // The chat module's state once the turn ended: no open turn, no run
+    // holding a checkpoint.
+    const open = (
+      this as unknown as {
+        _openChatTurns(): readonly { status: string }[];
+      }
+    )._openChatTurns();
     return {
       thrown,
       onErrorSeen: [...this._onErrorSeen],
-      liveRecoveryTurns: internals._chatTurnFibers.liveTurns.size,
+      liveRecoveryTurns: open.length,
       checkpointEntries: this.sql<{ n: number }>`
         SELECT COUNT(*) AS n FROM cf_agents_task_runs WHERE checkpoint IS NOT NULL
       `[0].n,
       fibers: this.getActiveFibers().length,
-      abortControllers: internals._turns.aborts.size,
-      queueIdle: !internals._turnQueue.isActive
+      abortControllers: open.filter((run) => run.status === "running").length,
+      queueIdle: open.length === 0
     };
   }
 

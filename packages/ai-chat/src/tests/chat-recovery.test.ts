@@ -408,14 +408,11 @@ describe("chatRecovery", () => {
 
       const outcome = await stub.testContinueLastTurnWhileThrowing();
 
-      // onError hears of the failure from the recovery task and from the
-      // turn, as it does for a client request and for saveMessages. Both
-      // times it gets the error onChatMessage threw, never its own result.
-      // The caller gets what onError threw.
-      expect(outcome.onErrorSeen).toEqual([
-        "Simulated onChatMessage error",
-        "Simulated onChatMessage error"
-      ]);
+      // onError hears of the failure once, from the turn (its one run), as
+      // it does for a client request and for saveMessages. It gets the error
+      // onChatMessage threw, never its own result. The caller gets what
+      // onError threw.
+      expect(outcome.onErrorSeen).toEqual(["Simulated onChatMessage error"]);
       expect(outcome.thrown).toBe("onError(Simulated onChatMessage error)");
       // The recovery fiber, the turn's checkpoint, the turn queue and the
       // abort registry are clean.

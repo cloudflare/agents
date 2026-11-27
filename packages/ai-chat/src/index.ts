@@ -922,6 +922,9 @@ export class AIChatAgent<
   /** Whether each running call continues a reply, for `onChatResponse`. */
   private readonly _callContinues = new Map<string, boolean>();
 
+  /** What `onError` threw in place of a turn's error, for its waiting caller. */
+  private readonly _onErrorReplaced = new Map<string, unknown>();
+
   /** Turns whose `onChatMessage` answered with a reply, until they end. */
   private readonly _answered = new Set<string>();
 
@@ -990,6 +993,12 @@ export class AIChatAgent<
     );
     const result = await Promise.race([ended, settled]);
     this._turnWaiters.delete(requestId);
+    // `onError` replaced what `onChatMessage` threw: the caller gets that.
+    if (this._onErrorReplaced.has(requestId)) {
+      const replaced = this._onErrorReplaced.get(requestId);
+      this._onErrorReplaced.delete(requestId);
+      throw replaced;
+    }
     // Skipped before anything ran: no request is named.
     const ranNothing =
       result.status === "skipped" &&
@@ -1102,15 +1111,31 @@ export class AIChatAgent<
               Object.keys(call.body).length > 0 && { body: { ...call.body } }),
             continuation: call.mode === "continue"
           });
-        const response = await agentContext.run(
-          {
-            agent: this,
-            connection: originConnection,
-            request: undefined,
-            email: undefined
-          },
-          ask
-        );
+        let response: Awaited<ReturnType<typeof ask>>;
+        try {
+          response = await agentContext.run(
+            {
+              agent: this,
+              connection: originConnection,
+              request: undefined,
+              email: undefined
+            },
+            ask
+          );
+        } catch (error) {
+          // `onError` observes what `onChatMessage` threw and may replace it
+          // by throwing; the turn ends with the original either way, and a
+          // caller waiting on it (`saveMessages`, `continueLastTurn`) gets
+          // the replacement. A stop is not an error.
+          if (!call.signal.aborted) {
+            try {
+              await this.onError(error);
+            } catch (replaced) {
+              this._onErrorReplaced.set(call.requestId, replaced);
+            }
+          }
+          throw error;
+        }
         // It answered with a reply: however that reply ends, the hook
         // hears of it.
         if (response) this._answered.add(call.requestId);
@@ -1120,6 +1145,8 @@ export class AIChatAgent<
         onResponse: async (result) => {
           this._shownQueued.delete(result.requestId);
           const waiter = this._turnWaiters.get(result.requestId);
+          // No caller waits on it (a tab's request): nothing gets it.
+          if (!waiter) this._onErrorReplaced.delete(result.requestId);
           this._turnWaiters.delete(result.requestId);
           // Whether the model was asked: a turn stopped before it started
           // reports nothing to `onChatResponse`.
