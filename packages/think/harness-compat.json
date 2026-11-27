@@ -1,8 +1,8 @@
 {
   "total": 1676,
-  "passed": 902,
+  "passed": 901,
   "needThink": 1329,
-  "needThinkPassed": 591,
+  "needThinkPassed": 590,
   "classOnly": 36,
   "mechanicsOnly": 6,
   "files": {
@@ -96,7 +96,7 @@
     },
     "durable-admission.test.ts": {
       "total": 9,
-      "passed": 4
+      "passed": 3
     },
     "empty-reply.test.ts": {
       "total": 10,
@@ -444,7 +444,6 @@
     "detached-reconcile-lane.test.ts > Think detached delivery and the chat lane > does not hold the alarm on a detached delivery that waits for a busy chat lane",
     "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > a clear before the replay drops it",
     "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > a record left between the turn's fiber and the record's delete is recovery's",
-    "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > runs however long it waited: its question is never dropped",
     "durable-admission.test.ts > durable admission: a request queued behind a turn a reset cuts off > submissions: one running and one pending at the reset each get their own reply, in order",
     "execute-hitl.test.ts > Think HITL — approve/reject paused executions > stores nothing for approvals of ids nothing is pending under",
     "execute-tool.test.ts > execute tool on the codemode runtime > maps needsApproval AI SDK tools to requiresApproval — the call pauses durably",
