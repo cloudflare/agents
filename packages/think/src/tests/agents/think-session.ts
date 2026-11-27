@@ -2861,6 +2861,15 @@ export class ThinkTestAgent extends Think {
     await Promise.all([blocker, ...runs]);
   }
 
+  /** Start continuations, in order, without waiting for any to finish. */
+  async runConcurrentContinuationsForTest(
+    channels: Array<string | undefined>
+  ): Promise<void> {
+    await Promise.all(
+      channels.map((channel) => this.continueLastTurn(undefined, { channel }))
+    );
+  }
+
   async getAutoContinuationChannelForTest(): Promise<string | undefined> {
     return (
       this as unknown as { _channelForAutoContinuation(): string | undefined }
