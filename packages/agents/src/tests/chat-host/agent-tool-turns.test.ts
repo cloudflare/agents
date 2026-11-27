@@ -11,6 +11,7 @@ import {
   agentToolTurnOf,
   chunksOfMessage,
   cancelAgentToolTurn,
+  carryForwardAgentToolRuns,
   inspectAgentToolTurn,
   recordAgentToolProgress,
   startAgentToolTurn
@@ -241,6 +242,62 @@ describe("agent-tool runs as chat turns", () => {
         inspectAgentToolTurn(instance.deps, "run-3", collect)
       ).toMatchObject({ status: "aborted", error: "the parent stopped" });
     });
+  });
+
+  it("stops the carried turn of a released run it carries as interrupted", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: ChatTurnHostObject, state) => {
+        await instance.lifecycle.start();
+        const host = instance.host as { respond: ChatHost["respond"] };
+        let started!: () => void;
+        let modelCall: AbortSignal | undefined;
+        const running = new Promise<void>((resolve) => {
+          started = resolve;
+        });
+        // The released run's turn, carried on under its request id and
+        // still generating.
+        host.respond = async (call: ChatModelCall) =>
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue({ type: "start", messageId: "reply-carried" });
+              modelCall = call.signal;
+              started();
+              call.signal.addEventListener("abort", () => controller.close());
+            }
+          });
+        await submitTurn(
+          instance.deps,
+          instance.lane,
+          { trigger: "server" },
+          { requestId: "released-req" }
+        );
+        await running;
+        const sql = state.storage.sql;
+        sql.exec(
+          "CREATE TABLE released_runs (run_id TEXT PRIMARY KEY, request_id TEXT, status TEXT NOT NULL, input_json TEXT, output_json TEXT, summary TEXT, error_message TEXT, started_at INTEGER NOT NULL, completed_at INTEGER, progress_json TEXT, last_signal_at INTEGER, event_delivery TEXT)"
+        );
+        sql.exec(
+          "INSERT INTO released_runs (run_id, request_id, status, started_at) VALUES ('released-run', 'released-req', 'running', ?)",
+          Date.now()
+        );
+        await carryForwardAgentToolRuns(
+          instance.deps,
+          sql,
+          { runs: "released_runs", milestones: "released_milestones" },
+          "chat"
+        );
+        expect(
+          inspectAgentToolTurn(instance.deps, "released-run", collect)
+        ).toMatchObject({
+          status: "error",
+          error: "Agent tool run was interrupted by an upgrade."
+        });
+        // Its turn stopped: no model work for a run its parent sees ended.
+        expect(modelCall?.aborted).toBe(true);
+      }
+    );
   });
 
   it("has nothing for a run id the child never took, and no agent-tool turn for a plain one", async () => {

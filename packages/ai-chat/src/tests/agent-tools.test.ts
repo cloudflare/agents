@@ -769,6 +769,31 @@ describe("AIChatAgent as an agent-tool child", () => {
     expect(laterChunks).toEqual(chunks.slice(1));
   });
 
+  it("forwards the reply's finish to a parent that follows the run live", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+    // Slow chunks: the parent follows the run while it streams.
+    const result = await parent.runChild(
+      { prompt: "stream slowly", chunkDelayMs: 30 },
+      runId
+    );
+    expect(result.status).toBe("completed");
+    const chunks = (await parent.getEventsForTest())
+      .filter((event) => event.event.kind === "chunk")
+      .map(
+        (event) =>
+          (
+            JSON.parse(
+              (event.event as { kind: "chunk"; body: string }).body
+            ) as { type: string }
+          ).type
+      );
+    // Live: the model's two deltas (a replay of the stored reply has one),
+    // and the message ends with its finish.
+    expect(chunks.filter((type) => type === "text-delta")).toHaveLength(2);
+    expect(chunks.at(-1)).toBe("finish");
+  });
+
   it("forwards a chunk that lands in the tail attach window (#1589)", async () => {
     // A sub-agent that proxies a remote `toUIMessageStreamResponse()` streams
     // chunks at network pace, so a chunk routinely lands in the window between

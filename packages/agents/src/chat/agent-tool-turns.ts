@@ -16,6 +16,7 @@ import type {
   AgentToolRunInspection,
   AgentToolStoredChunk
 } from "../agent-tool-types";
+import { StreamNotFoundError } from "../streams/errors";
 import type { TaskJson } from "../tasks/types";
 import { cancelTurn, submitTurn, type ChatLane } from "./chat-functions";
 import {
@@ -258,7 +259,12 @@ export function chunksOfMessage(message: UIMessage): UIMessageChunk[] {
       });
     }
   });
-  chunks.push({ type: "finish" });
+  chunks.push({
+    type: "finish",
+    ...(message.metadata !== undefined && {
+      messageMetadata: message.metadata
+    })
+  } as UIMessageChunk);
   return chunks;
 }
 
@@ -330,7 +336,40 @@ export async function tailAgentToolTurn(
     ? AbortSignal.any([options.signal, stop.signal])
     : stop.signal;
   const encoder = new TextEncoder();
+  const line = (sequence: number, chunk: unknown) =>
+    `${JSON.stringify({ sequence, body: JSON.stringify(chunk) })}\n`;
   let reader: AsyncGenerator<{ seq: number; chunk: unknown }[]> | undefined;
+  let last: { sequence: number; type: unknown } | undefined;
+  // The turn writes its last chunks as it stores the reply and drops the
+  // stream, in one step a reader cannot see: when the stream ended before
+  // the reply's finish, the stored reply's finish closes the message.
+  const end = async (
+    controller: ReadableStreamDefaultController<Uint8Array>
+  ) => {
+    if (!signal.aborted && last?.type !== "finish") {
+      const id = agentToolTurnId(runId);
+      const record = await deps.tasks.wait(id, { signal }).catch(() => null);
+      const messageId = (record?.result as ChatTurnResult | undefined)
+        ?.messageId;
+      if (record?.status === "completed" && messageId) {
+        const input = deps.tasks.inputOf<{ session?: string }>(id);
+        const message = await deps.sessions
+          .session(input?.session ?? deps.session ?? "")
+          .getMessage(messageId);
+        const finish = message
+          ? chunksOfMessage(message as unknown as UIMessage).at(-1)
+          : undefined;
+        if (finish) {
+          controller.enqueue(
+            encoder.encode(
+              line((last?.sequence ?? options.afterSequence ?? -1) + 1, finish)
+            )
+          );
+        }
+      }
+    }
+    controller.close();
+  };
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       reader ??= deps.streams.readBatches(streamId, {
@@ -339,24 +378,23 @@ export async function tailAgentToolTurn(
       }) as AsyncGenerator<{ seq: number; chunk: unknown }[]>;
       try {
         const next = await reader.next();
-        if (next.done) {
-          controller.close();
-          return;
-        }
+        if (next.done) return await end(controller);
+        const batch = next.value;
+        const tip = batch[batch.length - 1];
+        last = {
+          sequence: tip.seq,
+          type: (tip.chunk as { type?: unknown } | null)?.type
+        };
         controller.enqueue(
           encoder.encode(
-            next.value
-              .map(
-                (item) =>
-                  `${JSON.stringify({ sequence: item.seq, body: JSON.stringify(item.chunk) })}\n`
-              )
-              .join("")
+            batch.map((item) => line(item.seq, item.chunk)).join("")
           )
         );
       } catch (error) {
-        // A stop of the read, or a stream deleted as the turn settled, ends
-        // the tail: the parent inspects the run then.
+        // A stop of the read ends the tail; a stream deleted as the turn
+        // settled ends it as a settled stream does.
         if (signal.aborted) controller.close();
+        else if (error instanceof StreamNotFoundError) await end(controller);
         else controller.error(error);
       }
     },
@@ -388,6 +426,7 @@ export async function carryForwardAgentToolRuns(
   if (!exists(tables.runs)) return;
   type ReleasedRun = {
     run_id: string;
+    request_id: string | null;
     status: string;
     output_json: string | null;
     summary: string | null;
@@ -428,9 +467,10 @@ export async function carryForwardAgentToolRuns(
       milestones.set(row.run_id, list);
     }
   }
+  const interrupted: string[] = [];
   for (const row of sql
     .exec(
-      `SELECT run_id, status, output_json, summary, error_message, started_at, completed_at, progress_json, event_delivery FROM ${tables.runs}`
+      `SELECT run_id, request_id, status, output_json, summary, error_message, started_at, completed_at, progress_json, event_delivery FROM ${tables.runs}`
     )
     .toArray() as ReleasedRun[]) {
     const fields: Record<string, unknown> = {
@@ -450,6 +490,13 @@ export async function carryForwardAgentToolRuns(
         : row.status === "aborted"
           ? "aborted"
           : "error";
+    if (
+      status === "error" &&
+      row.request_id !== null &&
+      (row.status === "running" || row.status === "starting")
+    ) {
+      interrupted.push(row.request_id);
+    }
     if (status === "completed") {
       const output = parse(row.output_json);
       fields.result = {
@@ -479,6 +526,18 @@ export async function carryForwardAgentToolRuns(
       createdAt: row.started_at,
       settledAt: row.completed_at ?? Date.now()
     });
+  }
+  // A turn of a run carried as an error is not the run's any more: if the
+  // upgrade carried it on as a chat turn, it stops, so it calls no model.
+  for (const requestId of interrupted) {
+    const status = deps.tasks.peek(requestId)?.status;
+    if (status === "pending" || status === "running") {
+      await cancelTurn(
+        deps,
+        requestId,
+        "Agent tool run was interrupted by an upgrade."
+      );
+    }
   }
   sql.exec(`DROP TABLE IF EXISTS ${tables.milestones}`);
   sql.exec(`DROP TABLE ${tables.runs}`);
