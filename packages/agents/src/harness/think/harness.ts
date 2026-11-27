@@ -2917,8 +2917,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       generateMessageId: () => messageId,
 
       // The participant who started the turn runs its client tools.
-      messageMetadata: ({ part }) =>
-        part.type === "start" && owner !== undefined ? { owner } : undefined
+      messageMetadata: ({ part }) => {
+        const own =
+          part.type === "start" && owner !== undefined ? { owner } : undefined;
+        const host = config.messageMetadata?.({ part });
+        return host === undefined ? own : { ...host, ...own };
+      }
     });
     return {
       hideReasoning: config.sendReasoning === false,
