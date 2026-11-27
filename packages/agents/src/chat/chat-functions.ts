@@ -550,6 +550,14 @@ async function applyAnswer(
 /** The answered tool calls of a message, as a stable key. */
 function answeredCalls(message: UIMessage): string {
   return message.parts
+    .filter((part) => {
+      const state = (part as { state?: unknown }).state;
+      return (
+        state === "output-available" ||
+        state === "output-error" ||
+        state === "output-denied"
+      );
+    })
     .map((part) => (part as { toolCallId?: unknown }).toolCallId)
     .filter((id): id is string => typeof id === "string")
     .sort()

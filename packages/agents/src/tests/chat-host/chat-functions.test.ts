@@ -2206,4 +2206,64 @@ describe("chat functions over a minimal host", () => {
       });
     });
   });
+
+  it("an answer that lands while its batch's continuation waits on the model gets a continuation of its own", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-locate",
+            toolCallId: "c1",
+            state: "input-available",
+            input: {}
+          },
+          {
+            type: "tool-other",
+            toolCallId: "c2",
+            state: "approval-responded",
+            input: {},
+            approval: { id: "ap-2", approved: true }
+          }
+        ]
+      } as never);
+      // The first continuation waits on the model.
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const respond = instance.host.respond;
+      (instance.host as { respond: typeof respond }).respond = async (call) => {
+        await gate;
+        return respond(call);
+      };
+      await answerTool(
+        instance.deps,
+        instance.lane,
+        { kind: "result", toolCallId: "c1", output: {} },
+        { autoContinue: true }
+      );
+      await answerTool(
+        instance.deps,
+        instance.lane,
+        { kind: "result", toolCallId: "c2", output: {} },
+        { autoContinue: true }
+      );
+      const open = instance.tasks.peekList({
+        definition: instance.lane.definition,
+        lane: instance.lane.lane,
+        status: ["pending", "running"],
+        results: false
+      });
+      release();
+      expect(open).toHaveLength(2);
+    });
+  });
 });
