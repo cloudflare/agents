@@ -4193,6 +4193,25 @@ export class ThinkTestAgent extends Think {
     return this._recoveryCallsForTest;
   }
 
+  /**
+   * Start a continueLastTurn and reset the isolate while its first model
+   * call waits in `beforeStep`, before it has streamed anything. The turn
+   * runs again after the restart.
+   */
+  async resetContinuationBeforeItStreamsForTest(): Promise<void> {
+    await this.holdBeforeStepForTest();
+    void this.continueLastTurn().catch(() => {});
+    const deadline = Date.now() + 10_000;
+    while (!this._beforeStepGateEntered) {
+      if (Date.now() > deadline) {
+        throw new Error("the continuation never started");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await this.ctx.storage.sync();
+    this.ctx.abort("test: forced reset");
+  }
+
   /** Reset this agent's isolate, as an eviction does. */
   async resetIsolateForTest(): Promise<void> {
     this.ctx.abort("test: forced reset");

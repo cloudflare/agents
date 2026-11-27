@@ -3471,6 +3471,23 @@ describe("Think — addMessages", () => {
 // ── continueLastTurn ─────────────────────────────────────────────
 
 describe("Think — continueLastTurn", () => {
+  it("runs a continuation a reset cut off before it streamed again as a continuation", async () => {
+    const name = `continue-reset-${crypto.randomUUID()}`;
+    let agent = await getAgentByName(env.ThinkTestAgent, name);
+    await agent.testChat("hello");
+    await agent.resetContinuationBeforeItStreamsForTest().catch(() => {});
+    // The new isolate runs the cut-off turn again; its beforeTurn says it
+    // continues the conversation, as the first run's did.
+    agent = await getAgentByName(env.ThinkTestAgent, name);
+    const deadline = Date.now() + 15_000;
+    let log = await agent.getBeforeTurnLog();
+    while (log.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      log = await agent.getBeforeTurnLog();
+    }
+    expect(log.map((entry) => entry.continuation)).toEqual([true]);
+  });
+
   it("should continue from the last assistant message", async () => {
     const agent = await freshProgrammaticAgent("continue-basic");
 
