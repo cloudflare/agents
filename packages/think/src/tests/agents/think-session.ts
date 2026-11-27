@@ -1637,8 +1637,16 @@ function ensureReleasedAgentToolTable(sql: SqlStorage): void {
 
 /** Where a test keeps the answer onChatRecovery gives after a reset. */
 const RECOVERY_ANSWER_KEY = "test:recovery-answer";
+/** Where a test keeps `chatRecovery` across resets. */
+const RECOVERY_CONFIG_KEY = "test:recovery-config";
+/** Where a test keeps a slow model across resets: chunks and delay. */
+const SLOW_MODEL_KEY = "test:slow-model";
 
 export class ThinkTestAgent extends Think {
+  // A test that resets the isolate can leave its config in storage: the
+  // next isolate's recovery, which runs before any call, reads it here.
+  override chatRecovery: ChatRecoveryConfig =
+    this.ctx.storage.kv.get<ChatRecoveryConfig>(RECOVERY_CONFIG_KEY) ?? true;
   private _response = "Hello from the assistant!";
   private _nextSubAgentConnectionSendDelayMs = 0;
   private _chatErrorLog: string[] = [];
@@ -3959,6 +3967,32 @@ export class ThinkTestAgent extends Think {
         .map((p) => (p.type === "text" ? p.text : ""))
         .join("")
     };
+  }
+
+  /**
+   * From now on, across resets: every model call streams `chunks` slowly,
+   * and `chatRecovery` is `config`.
+   */
+  async keepAcrossResetsForTest(options: {
+    chunks: string[];
+    delayMs: number;
+    config: { maxAttempts?: number; maxInterruptedAttempts?: number };
+  }): Promise<void> {
+    this.ctx.storage.kv.put(SLOW_MODEL_KEY, {
+      chunks: options.chunks,
+      delayMs: options.delayMs
+    });
+    this.ctx.storage.kv.put(RECOVERY_CONFIG_KEY, options.config);
+    this.chatRecovery = options.config;
+  }
+
+  /** The last assistant message's text. */
+  async lastAssistantTextForTest(): Promise<string> {
+    const messages = await this.getMessages();
+    const last = messages.filter((m) => m.role === "assistant").at(-1);
+    return (last?.parts ?? [])
+      .map((p) => (p.type === "text" ? p.text : ""))
+      .join("");
   }
 
   /** What onChatRecovery answers from now on, across resets. */
@@ -6555,6 +6589,11 @@ export class ThinkTestAgent extends Think {
   }
 
   override getModel(): ThinkModel {
+    const slow = this.ctx.storage.kv.get<{ chunks: string[]; delayMs: number }>(
+      SLOW_MODEL_KEY
+    );
+    if (slow)
+      return createDelayedMultiChunkMockModel(slow.chunks, slow.delayMs);
     // A lasting stall that makes progress: each call writes new text, in
     // enough chunks that some land in the stream log before the stall.
     if (this._progressingForTest) this._progressCallsForTest++;
