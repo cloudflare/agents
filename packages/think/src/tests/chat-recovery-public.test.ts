@@ -23,7 +23,11 @@ describe("chat recovery, through public behaviour", () => {
 
     expect(result.stable).toBe(true);
     expect(result.recoveryCalls.length).toBeGreaterThanOrEqual(1);
-    expect(result.recoveryCalls[0]).toMatchObject({ attempt: 1 });
+    expect(result.recoveryCalls[0]).toMatchObject({
+      attempt: 1,
+      recoveryKind: "continue",
+      partialText: "Hello from the assistant!"
+    });
     expect(result.roles).toEqual(["user", "assistant"]);
   });
 

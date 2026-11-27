@@ -1694,9 +1694,13 @@ export class Think<
    */
   chatStreamStallTimeoutMs = 0;
 
+  /** The running model call's own stall timeout, from `beforeTurn`. */
+  #turnStallTimeoutMs: number | undefined;
+
   #recoveryOptions(): { maxAttempts?: number; stallTimeoutMs: number } {
     const config = this.chatRecovery;
-    const stallTimeoutMs = this.chatStreamStallTimeoutMs;
+    const stallTimeoutMs =
+      this.#turnStallTimeoutMs ?? this.chatStreamStallTimeoutMs;
     if (config === true || config.maxAttempts === undefined) {
       return { stallTimeoutMs };
     }
@@ -1804,6 +1808,9 @@ export class Think<
         ...(resolved && { defaultModel: resolved })
       };
     }
+    // As on Think: a turn may set its own stall timeout. The harness asks
+    // before every model call and reads `recovery` right after.
+    this.#turnStallTimeoutMs = own?.chatStreamStallTimeoutMs;
     // The sandboxed extensions see the subclass's config, as in Think,
     // once per operation: Think prepares a turn once for its whole tool
     // loop, and the harness asks before every model call.
