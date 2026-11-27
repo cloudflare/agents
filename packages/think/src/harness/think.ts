@@ -811,7 +811,9 @@ export class Think<
             .catch((error: unknown) =>
               console.error("[Think] An extension's onChunk failed", error)
             );
-          void this.onChunk({ chunk } as unknown as ChunkContext);
+          void this.onChunk({
+            chunk: streamPartOf(chunk)
+          } as unknown as ChunkContext);
         },
         onTurnEnd: async (end) => {
           // The extensions' chunk hooks finish inside the turn, as in Think.
@@ -3365,6 +3367,31 @@ function systemText(value: unknown): string | undefined {
     return typeof content === "string" ? [content] : [];
   });
   return texts.length > 0 ? texts.join("\n\n") : undefined;
+}
+
+/**
+ * A UI chunk as the AI SDK's stream has it in Think's `onChunk`: a tool's
+ * output is a `tool-result` (or `tool-error`) part, a delta carries its
+ * `text`. Other chunks pass as they are.
+ */
+function streamPartOf(chunk: UIMessageChunk): unknown {
+  switch (chunk.type) {
+    case "tool-output-available":
+      return {
+        type: "tool-result",
+        toolCallId: chunk.toolCallId,
+        output: chunk.output,
+        ...(chunk.preliminary && { preliminary: true })
+      };
+    case "tool-output-error":
+      return {
+        type: "tool-error",
+        toolCallId: chunk.toolCallId,
+        error: chunk.errorText
+      };
+    default:
+      return "delta" in chunk ? { ...chunk, text: chunk.delta } : chunk;
+  }
 }
 
 /** `fields` without its undefined ones. */
