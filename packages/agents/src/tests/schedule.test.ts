@@ -192,8 +192,10 @@ describe("schedule operations", () => {
         }
       );
 
-      // Create an interval schedule (1 second interval)
-      const scheduleId = await agentStub.createIntervalSchedule(1);
+      // An interval long enough that its next run cannot come due while the
+      // test reads the row: with a 1 s interval, a slow runner's real alarm
+      // could start the next run and the read would see it running.
+      const scheduleId = await agentStub.createIntervalSchedule(60);
 
       // Backdate the schedule so runDurableObjectAlarm considers it due
       await runInDurableObject(
