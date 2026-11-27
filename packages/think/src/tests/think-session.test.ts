@@ -1401,7 +1401,7 @@ describe("Think — error handling", () => {
     const errAgent = await freshAgent(
       `no-interrupt-err-${crypto.randomUUID()}`
     );
-    const errResult = await errAgent.testChatWithError(
+    const errResult = await errAgent.testChatWithModelError(
       "boom under no-interrupt"
     );
     expect(errResult.error).toContain("boom under no-interrupt");

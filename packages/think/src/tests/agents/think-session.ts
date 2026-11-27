@@ -5890,12 +5890,15 @@ export class ThinkTestAgent extends Think {
     timeoutMs: number,
     errorMessage = "Mock error under guard"
   ): Promise<TestChatResult> {
-    this._errorConfig = { afterChunks: 1, message: errorMessage };
+    // The model `beforeTurn` gives reports the error in-band, after a chunk.
+    this._turnConfigOverride = {
+      model: createInBandErrorAfterTextMockModel("partial", errorMessage)
+    };
     this.chatStreamStallTimeoutMs = timeoutMs;
     try {
       return await this.testChat("error under guard");
     } finally {
-      this._errorConfig = null;
+      this._turnConfigOverride = null;
       this.chatStreamStallTimeoutMs = 0;
     }
   }
