@@ -71,6 +71,7 @@ type Stub = {
   handledMessageCountForTest(type: string): Promise<number>;
   getQueuedMessageIdsForTest(): Promise<string[]>;
   connectionCountForTest(): Promise<number>;
+  receivedAtForTest(id: string): Promise<number | null>;
 };
 
 const SLOW = { chunkCount: 20, chunkDelayMs: 50 };
@@ -216,6 +217,17 @@ describe("a message queued behind a running turn", () => {
           QUICK
         );
       }
+      // While r1 still holds the lane (tab A is gone already, so r2's end
+      // cannot reach it): the stop is handled, or the superseding request
+      // has arrived (its handler waits for the lane, so it ends only after
+      // r1 does).
+      await waitFor(async () =>
+        end === "stopped"
+          ? (await stub.handledMessageCountForTest(
+              MessageType.CF_AGENT_CHAT_REQUEST_CANCEL
+            )) === 1
+          : (await stub.receivedAtForTest("r3")) !== null
+      );
       await stub.releaseStreamForTest("r1");
       await waitFor(() =>
         seenB.some(
