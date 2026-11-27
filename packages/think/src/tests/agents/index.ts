@@ -10,6 +10,7 @@ export {
   ThinkTestAgent,
   ThinkPropsTestAgent,
   ThinkToolsTestAgent,
+  ThinkRewriteContextTestAgent,
   ThinkSessionTestAgent,
   ThinkSystemPromptSkillsWarningAgent,
   ThinkDefaultSystemPromptSkillsAgent,

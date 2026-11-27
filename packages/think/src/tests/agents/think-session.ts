@@ -17554,3 +17554,46 @@ export class ThinkAdmissionTestAgent extends Think {
 export class ThinkLatestAdmissionTestAgent extends ThinkAdmissionTestAgent {
   override messageConcurrency = "latest" as const;
 }
+
+/**
+ * A rewritten turn whose tool writes a context block: the next model call
+ * must still carry the tool's result after the reply, with the context
+ * reminder after that.
+ */
+export class ThinkRewriteContextTestAgent extends ThinkToolsTestAgent {
+  private _keepHistory = false;
+
+  /** `beforeTurn` rewrites the prompt to the messages it was given. */
+  async rewriteKeepingHistoryForTest(): Promise<void> {
+    this._keepHistory = true;
+  }
+
+  override beforeTurn(ctx: TurnContext): TurnConfig | void {
+    if (this._keepHistory) return { messages: ctx.messages };
+    return super.beforeTurn(ctx);
+  }
+
+  async continueForTest(): Promise<string> {
+    return (await this.runTurn({ continuation: true })).status;
+  }
+
+  override configureSession(session: Session): Session {
+    return session.withContext("notes", {
+      description: "Notes the tool keeps",
+      maxTokens: 200
+    });
+  }
+
+  override getTools(): ToolSet {
+    return {
+      echo: tool({
+        description: "Echo a message back",
+        inputSchema: z.object({ message: z.string() }),
+        execute: async ({ message }: { message: string }) => {
+          await this.context.setBlock("notes", "the tool wrote this");
+          return `echo-written: ${message}`;
+        }
+      })
+    };
+  }
+}

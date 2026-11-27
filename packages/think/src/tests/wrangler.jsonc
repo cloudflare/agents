@@ -60,6 +60,10 @@
         "name": "ThinkToolsTestAgent"
       },
       {
+        "class_name": "ThinkRewriteContextTestAgent",
+        "name": "ThinkRewriteContextTestAgent"
+      },
+      {
         "class_name": "ThinkFiberTestAgent",
         "name": "ThinkFiberTestAgent"
       },
@@ -348,7 +352,8 @@
         "ThinkPointerHydrationAgent",
         "ThinkLegacySessionApiAgent",
         "ThinkConfigStoreProbe",
-        "BrowserToolsHost"
+        "BrowserToolsHost",
+        "ThinkRewriteContextTestAgent"
       ],
       "tag": "v1"
     }

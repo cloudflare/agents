@@ -385,6 +385,20 @@ describe("Think — beforeStep hook", () => {
     expect(first).toContain("Answer in JSON");
   });
 
+  it("sends a rewritten turn's tool result when the tool changed the context", async () => {
+    const agent = await getAgentByName(
+      env.ThinkRewriteContextTestAgent,
+      `hook-bt-rewrite-ctx-${crypto.randomUUID()}`
+    );
+    await agent.rewriteTurnMessagesForTest();
+    await agent.testChat("the original ask");
+    const prompts = await agent.getToolPrompts();
+    expect(prompts.length).toBeGreaterThanOrEqual(2);
+    // The call after the tool has its result, not only the rewritten ask.
+    expect(prompts[1]).toContain("the rewritten ask");
+    expect(prompts[1]).toContain("echo-written:");
+  });
+
   it("keeps the messages beforeTurn rewrote for every model call of the turn", async () => {
     const agent = await freshToolAgent("hook-bt-rewrite");
     await agent.rewriteTurnMessagesForTest();
