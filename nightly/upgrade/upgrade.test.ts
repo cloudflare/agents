@@ -312,22 +312,33 @@ describe("an upgrade from the latest release, mid-turn", () => {
       runsOf(p, "call").map((r) => r.id),
       breakdown
     ).toContain("main");
-    // Every call answered one of the submissions, or continued the one the
-    // deploy cut off (recovery asks the model to continue where it stopped),
-    // and no turn ran twice on one build.
+    // Every call answered one of the submissions once per build, or
+    // continued the one the deploy cut off: recovery asks the model to
+    // continue where it stopped. The deploy may reach the object more than
+    // once, cutting off the continuation too, so each new isolate (a
+    // `main start` in the log) may make one continue call, and no more.
     const isContinue = (id: string) =>
       id.startsWith("main|Continue your previous response");
     expect(
       turns.every(
         (r) =>
-          r.n === 1 && (/\|submission [123]$/.test(r.id) || isContinue(r.id))
+          (r.n === 1 && /\|submission [123]$/.test(r.id)) || isContinue(r.id)
       ),
       breakdown
     ).toBe(true);
-    expect(
-      turns.filter((r) => isContinue(r.id)).length,
-      breakdown
-    ).toBeLessThanOrEqual(1);
+    let freshIsolate = false;
+    let extraContinue = false;
+    for (const line of p.log ?? []) {
+      if (line.includes(" main start")) freshIsolate = true;
+      else if (
+        line.includes("main model call") &&
+        line.includes("Continue your previous response")
+      ) {
+        if (!freshIsolate) extraContinue = true;
+        freshIsolate = false;
+      }
+    }
+    expect(extraContinue, breakdown).toBe(false);
     for (const n of [1, 2, 3]) {
       expect(
         turns.some((r) => r.id.endsWith(`|submission ${n}`)),
