@@ -1224,7 +1224,10 @@ export class OverflowRecoveryTestAgent extends Think {
    * completion proves the second splice did not corrupt the prompt (e.g. drop a
    * tool result or duplicate the recompacted head).
    */
-  async testProactiveMultiFire(message: string): Promise<OverflowChatResult> {
+  async testProactiveMultiFire(
+    message: string,
+    maxCompactions = 2
+  ): Promise<OverflowChatResult> {
     this.proactiveMode = true;
     this.proactiveMultiFire = true;
     this.compactionNoOp = false;
@@ -1241,7 +1244,7 @@ export class OverflowRecoveryTestAgent extends Think {
     // step 3. proactive.maxCompactions: 2 lets it compact on both (independent
     // of the reactive maxRetries budget).
     this.contextOverflow = {
-      proactive: { maxInputTokens: 10, maxCompactions: 2 }
+      proactive: { maxInputTokens: 10, maxCompactions }
     };
 
     await this.session.appendMessage({
