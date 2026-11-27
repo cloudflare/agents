@@ -853,7 +853,8 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         SELECT COUNT(*) AS n FROM cf_agents_task_runs
         WHERE (
           definition IN (
-            '__cf_internal_messenger_reply', '__cf_delivery:messenger-reply'
+            '__cf_internal_messenger_reply', '__cf_delivery:messenger-reply',
+            '__cf_delivery:think-messenger-recovery'
           )
           -- The harness-backed Think sends replies through Channels.
           OR definition LIKE '__cf_delivery:channels:%'
