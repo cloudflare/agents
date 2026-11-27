@@ -454,6 +454,9 @@ async function applyAnswer(
       parts: applied.parts as unknown as UIMessage["parts"]
     };
     await session.upsertMessage(next as never);
+    // Only the latest reply continues: once a later message moved the chat
+    // on, an answer for an older call is stored and nothing more.
+    if (i !== history.length - 1) return true;
     // One continuation per answered batch, however many answers race to
     // complete it; an earlier answer of the batch may have asked for it.
     const wanted = continueWanted(deps);

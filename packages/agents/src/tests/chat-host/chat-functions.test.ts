@@ -600,7 +600,7 @@ describe("chat functions over a minimal host", () => {
     });
   });
 
-  it("an answer to a call in an older reply continues that reply, not the latest", async () => {
+  it("an answer to a call in an older reply is stored, and nothing continues", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
       await instance.lifecycle.start();
@@ -632,25 +632,30 @@ describe("chat functions over a minimal host", () => {
         role: "assistant",
         parts: [{ type: "text", text: "Latest" }]
       } as never);
-      const done = instance.nextResult();
-      await answerTool(
-        instance.deps,
-        instance.lane,
-        { kind: "result", toolCallId: "c1", output: { ok: true } },
-        { autoContinue: true }
+      expect(
+        await answerTool(
+          instance.deps,
+          instance.lane,
+          { kind: "result", toolCallId: "c1", output: { ok: true } },
+          { autoContinue: true }
+        )
+      ).toBe(true);
+      expect(JSON.stringify(await session.getMessage("a1"))).toContain(
+        "output-available"
       );
-      await done;
-      expect(instance.calls[0]).toMatchObject({
-        mode: "continue",
-        replyId: "a1"
-      });
-      expect(instance.calls[0].messages.map((m) => m.id)).toEqual(["u1", "a1"]);
       expect(await session.getMessage("a2")).toMatchObject({
         parts: [{ type: "text", text: "Latest" }]
       });
+      expect(
+        instance.tasks.peekList({
+          definition: instance.lane.definition,
+          lane: instance.lane.lane,
+          status: ["pending", "running"],
+          results: false
+        })
+      ).toHaveLength(0);
     });
   });
-
   it("a tab parked on a tool answer that starts a turn is offered that turn's stream, with its probe id", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
@@ -1312,69 +1317,6 @@ describe("chat functions over a minimal host", () => {
       ).not.toBeNull();
       release();
       await instance.resultFor("r1");
-    });
-  });
-
-  it("a stop of the streaming turn keeps another reply's request to continue", async () => {
-    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
-    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
-      await instance.lifecycle.start();
-      const session = instance.sessions.session("s1");
-      await session.appendMessage({
-        id: "u0",
-        role: "user",
-        parts: []
-      } as never);
-      await session.appendMessage({
-        id: "a0",
-        role: "assistant",
-        parts: [
-          {
-            type: "tool-ask",
-            toolCallId: "k1",
-            state: "input-available",
-            input: {}
-          },
-          {
-            type: "tool-ask",
-            toolCallId: "k2",
-            state: "input-available",
-            input: {}
-          }
-        ]
-      } as never);
-      // An answer for a0's batch asks to continue it; the batch is not done.
-      await answerTool(
-        instance.deps,
-        instance.lane,
-        { kind: "result", toolCallId: "k1", output: 1 },
-        { autoContinue: true }
-      );
-      const release = await streamThenHold(instance, [
-        { type: "start", messageId: "a1" }
-      ]);
-      await chatDispatch(
-        instance.deps,
-        instance.lane,
-        tab,
-        JSON.stringify({ type: "cf_agent_chat_request_cancel", id: "r1" })
-      );
-      release();
-      await instance.resultFor("r1");
-      // The last answer of a0's batch asks for nothing, yet a0 continues.
-      await answerTool(instance.deps, instance.lane, {
-        kind: "result",
-        toolCallId: "k2",
-        output: 2
-      });
-      while (!instance.calls.some((c) => c.trigger === "tool-answer")) {
-        await instance.nextResult();
-      }
-      expect(
-        instance.calls.find((c) => c.trigger === "tool-answer")
-      ).toMatchObject({
-        replyId: "a0"
-      });
     });
   });
 
