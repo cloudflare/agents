@@ -198,6 +198,65 @@ function makeToolMessage(
  * chat protocol starts that apply without awaiting it): the event a test
  * waits for after it sends one, not a time.
  */
+/**
+ * What a tab has seen of the live reply's tool calls: a result the server
+ * applied, or else each call's latest streamed state while the reply's
+ * stream is open (undefined once it ends).
+ */
+function watchToolFrames(ws: WebSocket): {
+  state(toolCallId: string): string | undefined;
+  open(): boolean;
+} {
+  const states = new Map<string, string>();
+  const applied = new Map<string, string>();
+  let open = false;
+  ws.addEventListener("message", (event: MessageEvent) => {
+    const frame = JSON.parse(event.data as string) as {
+      type?: string;
+      body?: string;
+      done?: boolean;
+    };
+    // A result the server applied to the reply, mid-stream or after it.
+    if (frame.type === MSG_MESSAGE_UPDATED) {
+      const message = (frame as { message?: UIMessage }).message;
+      for (const part of (message?.parts ?? []) as Array<{
+        toolCallId?: string;
+        state?: string;
+      }>) {
+        if (part.toolCallId && part.state?.startsWith("output-")) {
+          applied.set(part.toolCallId, part.state);
+        }
+      }
+      return;
+    }
+    if (frame.type !== MSG_CHAT_RESPONSE) return;
+    if (frame.done) {
+      open = false;
+      states.clear();
+      return;
+    }
+    open = true;
+    if (!frame.body) return;
+    const chunk = JSON.parse(frame.body) as {
+      type?: string;
+      toolCallId?: string;
+    };
+    if (!chunk.toolCallId) return;
+    if (chunk.type === "tool-input-available") {
+      states.set(chunk.toolCallId, "input-available");
+    } else if (chunk.type === "tool-output-available") {
+      states.set(chunk.toolCallId, "output-available");
+    } else if (chunk.type === "tool-output-error") {
+      states.set(chunk.toolCallId, "output-error");
+    }
+  });
+  return {
+    state: (toolCallId) =>
+      applied.get(toolCallId) ?? (open ? states.get(toolCallId) : undefined),
+    open: () => open
+  };
+}
+
 async function handled(
   agent: {
     handledMessageCountForTest(type: string): Promise<number>;
@@ -1531,6 +1590,7 @@ describe("Think — auto-continuation", () => {
     // before the end-of-stream persist (the real #1649 window).
     await agent.setSlowClientToolStreamMode(true, 25, 16);
     const { ws } = await connectWS(room);
+    const tools = watchToolFrames(ws);
     await collectMessages(ws, 3);
 
     const repairedToolCallIds: Array<string[] | undefined> = [];
@@ -1550,7 +1610,7 @@ describe("Think — auto-continuation", () => {
       // guess. On `main` this result lands before the message is persisted and
       // is dropped.
       await waitUntil(async () => {
-        const state = await agent.streamingToolCallState("tc-client-1");
+        const state = tools.state("tc-client-1");
         if (state === undefined) return false;
         if (state !== "input-available") {
           throw new Error(`unexpected streaming tool state: ${state}`);
@@ -1602,13 +1662,14 @@ describe("Think — auto-continuation", () => {
     const agent = await freshAgent(room);
     await agent.setSlowClientToolStreamMode(true, 25, 16, "stop");
     const { ws } = await connectWS(room);
+    const tools = watchToolFrames(ws);
     await collectMessages(ws, 3);
 
     sendChatRequest(ws, [makeUserMessage("do the thing")], {
       clientTools: [{ name: "client_action", description: "A client tool" }]
     });
     await waitUntil(async () => {
-      const state = await agent.streamingToolCallState("tc-client-1");
+      const state = tools.state("tc-client-1");
       return state === "input-available";
     }, 8000);
     ws.send(
@@ -2367,6 +2428,7 @@ describe("Think — auto-continuation", () => {
     // ~800ms of open stream after the fast tool before the slow tool is emitted.
     await agent.setMidStreamParallelToolMode(true, 40, 20);
     const { ws } = await connectWS(room);
+    const tools = watchToolFrames(ws);
     await collectMessages(ws, 3);
 
     const repairedToolCallIds: Array<string[] | undefined> = [];
@@ -2387,14 +2449,14 @@ describe("Think — auto-continuation", () => {
       // Wait until the fast tool is streamed and still mid-stream — and assert
       // the slow tool has NOT been emitted yet (the crux of the race).
       await waitUntil(async () => {
-        const fast = await agent.streamingToolCallState("tc-fast");
+        const fast = tools.state("tc-fast");
         if (fast === undefined) return false;
         if (fast !== "input-available") {
           throw new Error(`unexpected tc-fast state: ${fast}`);
         }
         return true;
       }, 8000);
-      expect(await agent.streamingToolCallState("tc-slow")).toBeUndefined();
+      expect(tools.state("tc-slow")).toBeUndefined();
 
       // Resolve the fast tool mid-stream, before the slow sibling exists.
       ws.send(
@@ -2410,9 +2472,7 @@ describe("Think — auto-continuation", () => {
       // Wait for the stream to finalize and the slow tool to materialize in the
       // persisted transcript (still awaiting its client result).
       await waitUntil(async () => {
-        if ((await agent.streamingToolCallState("tc-fast")) !== undefined) {
-          return false; // stream still open
-        }
+        if (tools.open()) return false; // stream still open
         const messages = (await agent.getMessages()) as UIMessage[];
         const slow = messages
           .flatMap((m) => m.parts as Array<Record<string, unknown>>)
@@ -2468,6 +2528,7 @@ describe("Think — auto-continuation", () => {
     const agent = await freshAgent(room);
     await agent.setMidStreamParallelToolMode(true, 40, 20);
     const { ws } = await connectWS(room);
+    const tools = watchToolFrames(ws);
     await collectMessages(ws, 3);
 
     const repairedToolCallIds: Array<string[] | undefined> = [];
@@ -2488,9 +2549,7 @@ describe("Think — auto-continuation", () => {
 
       // Resolve the fast tool as soon as it streams.
       await waitUntil(async () => {
-        return (
-          (await agent.streamingToolCallState("tc-fast")) === "input-available"
-        );
+        return tools.state("tc-fast") === "input-available";
       }, 8000);
       ws.send(
         JSON.stringify({
@@ -2505,9 +2564,7 @@ describe("Think — auto-continuation", () => {
       // Resolve the slow tool the moment it streams — still DURING the stream,
       // so no result event survives past stream end.
       await waitUntil(async () => {
-        return (
-          (await agent.streamingToolCallState("tc-slow")) === "input-available"
-        );
+        return tools.state("tc-slow") === "input-available";
       }, 8000);
       ws.send(
         JSON.stringify({
@@ -2557,6 +2614,7 @@ describe("Think — auto-continuation", () => {
     // the stream open (~960ms) so the fast result + timer land mid-stream.
     await agent.setMidStreamParallelToolMode(true, 40, 0, 24);
     const { ws } = await connectWS(room);
+    const tools = watchToolFrames(ws);
     await collectMessages(ws, 3);
 
     const repairedToolCallIds: Array<string[] | undefined> = [];
@@ -2576,8 +2634,8 @@ describe("Think — auto-continuation", () => {
 
       // Wait until BOTH parallel calls are exposed in the accumulator.
       await waitUntil(async () => {
-        const fast = await agent.streamingToolCallState("tc-fast");
-        const slow = await agent.streamingToolCallState("tc-slow");
+        const fast = tools.state("tc-fast");
+        const slow = tools.state("tc-slow");
         return fast === "input-available" && slow === "input-available";
       }, 8000);
 
@@ -2595,7 +2653,7 @@ describe("Think — auto-continuation", () => {
       // Let the stream finish and persist (tc-slow still `input-available`)
       // WITHOUT answering the slow tool yet.
       await waitUntil(async () => {
-        return (await agent.streamingToolCallState("tc-slow")) === undefined;
+        return tools.state("tc-slow") === undefined;
       }, 8000);
       await batchParked(agent);
 
@@ -4057,6 +4115,7 @@ describe("Think — a tool result while the reply is being stored", () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
     const { ws } = await connectWS(room);
+    const tools = watchToolFrames(ws);
     await collectMessages(ws, 3);
 
     // The turn ends on a client tool call. Its store is held open after the
@@ -4077,9 +4136,7 @@ describe("Think — a tool result while the reply is being stored", () => {
       })
     );
     await waitUntil(
-      async () =>
-        (await agent.streamingToolCallState("tc-client-1")) ===
-        "output-available"
+      async () => tools.state("tc-client-1") === "output-available"
     );
     await handled(agent, MSG_TOOL_RESULT);
     await agent.releaseReplyStoreForTest();
@@ -4747,6 +4804,7 @@ describe("Think — stop means stop for continuations", () => {
     // The reply streams a client tool call and keeps the stream open.
     await agent.setSlowClientToolStreamMode(true, 25, 40);
     const { ws } = await connectWS(room);
+    const tools = watchToolFrames(ws);
     await collectMessages(ws, 3);
 
     const requestId = sendChatRequest(ws, [makeUserMessage("do the thing")], {
@@ -4754,7 +4812,7 @@ describe("Think — stop means stop for continuations", () => {
     });
     const done = waitForDoneId(ws, requestId, 10000);
     await waitUntil(async () => {
-      const state = await agent.streamingToolCallState("tc-client-1");
+      const state = tools.state("tc-client-1");
       return state === "input-available";
     }, 8000);
     // The tab answers the call while the reply streams, then the user stops
@@ -4769,7 +4827,7 @@ describe("Think — stop means stop for continuations", () => {
       })
     );
     await waitUntil(async () => {
-      const state = await agent.streamingToolCallState("tc-client-1");
+      const state = tools.state("tc-client-1");
       return state === "output-available";
     }, 8000);
     ws.send(
@@ -4921,6 +4979,7 @@ describe("Think — stop means stop for continuations", () => {
     // race 5: a late stop used to land after the continuation had started).
     await agent.holdSlowClientToolStreamForTest();
     const { ws } = await connectWS(room);
+    const tools = watchToolFrames(ws);
     await collectMessages(ws, 3);
 
     const requestId = sendChatRequest(ws, [makeUserMessage("do the thing")], {
@@ -4928,7 +4987,7 @@ describe("Think — stop means stop for continuations", () => {
     });
     const done = waitForDoneId(ws, requestId, 10000);
     await waitUntil(async () => {
-      const state = await agent.streamingToolCallState("tc-client-1");
+      const state = tools.state("tc-client-1");
       return state === "input-available";
     }, 8000);
     ws.send(
