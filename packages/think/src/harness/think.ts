@@ -279,6 +279,11 @@ export class Think<
   /** Think's `think_config` rows, the table and migration Think has. */
   readonly #config = new ThinkConfigStore();
   #configCache: unknown = null;
+  /**
+   * A step that called tools, by operation, until its tools ran: at most
+   * one per running operation, removed when it ends.
+   */
+  readonly #openSteps = new Map<string, OpenStep>();
   /** Builds string models through one cached default provider, as Think. */
   readonly #models = new ThinkModelResolver({
     binding: () => this.getAIBinding(),
@@ -415,21 +420,18 @@ export class Think<
         },
         onStepFinish: async ({ message, finishReason, operationId, step }) => {
           await this.#chunkHooks;
-          const result = stepResultOf(message);
-          await this.#extensionHooks.stepFinish({
-            stepNumber: step,
-            finishReason: finishReason ?? "unknown",
-            ...result
-            // SAFETY: the fields a step snapshot reads are all here.
-          } as unknown as StepContext);
-          return this.onStepEnd({
-            ...result,
-            response: { messages: [] },
-            finishReason,
-            message,
-            stepNumber: step,
-            requestId: operationId
-          } as unknown as StepContext);
+          // The step before this one ran its tools since: its results are
+          // in this message now.
+          await this.#endStep(operationId, message);
+          const segment = stepSegments(message);
+          const ended = { operationId, step, finishReason, segment };
+          // A step that called tools ends once they ran, as an AI SDK step
+          // does: at the next step, or at the turn's end.
+          if (stepResultOf(message, segment).toolCalls.length > 0) {
+            this.#openSteps.set(operationId, ended);
+            return;
+          }
+          await this.#stepEnded(ended, message);
         },
         onChunk: ({ chunk }) => {
           // A snapshot reads a delta's text as `text`, as a stream part has it.
@@ -449,6 +451,8 @@ export class Think<
         onTurnEnd: async (end) => {
           // The extensions' chunk hooks finish inside the turn, as in Think.
           await this.#chunkHooks;
+          if (end.message) await this.#endStep(end.operationId, end.message);
+          else this.#openSteps.delete(end.operationId);
           if (!end.message) return;
           await this.onChatResponse({
             message: end.message,
@@ -787,6 +791,33 @@ export class Think<
   ): ToolCallDecision | void | Promise<ToolCallDecision | void> {}
 
   afterToolCall(_ctx: ToolCallResultContext): void | Promise<void> {}
+
+  /** End the operation's open step, if any, from `message`. */
+  async #endStep(operationId: string, message: UIMessage): Promise<void> {
+    const open = this.#openSteps.get(operationId);
+    if (!open) return;
+    this.#openSteps.delete(operationId);
+    await this.#stepEnded(open, message);
+  }
+
+  /** Tell the extensions and `onStepEnd` that a step ended. */
+  async #stepEnded(step: OpenStep, message: UIMessage): Promise<void> {
+    const result = stepResultOf(message, step.segment);
+    await this.#extensionHooks.stepFinish({
+      stepNumber: step.step,
+      finishReason: step.finishReason ?? "unknown",
+      ...result
+      // SAFETY: the fields a step snapshot reads are all here.
+    } as unknown as StepContext);
+    await this.onStepEnd({
+      ...result,
+      response: { messages: [] },
+      finishReason: step.finishReason,
+      message,
+      stepNumber: step.step,
+      requestId: step.operationId
+    } as unknown as StepContext);
+  }
 
   /** After each step, as in Think. */
   onStepEnd(ctx: StepContext): void | Promise<void> {
@@ -1584,17 +1615,36 @@ function stubUnsupported(target: object, legacy: object): void {
 
 stubUnsupported(Think.prototype, LegacyThink.prototype);
 
-/** The fields `folded` set or changed relative to `own`. */
+/** A step that ended, waiting for its tools when it called any. */
+type OpenStep = {
+  readonly operationId: string;
+  readonly step: number;
+  readonly finishReason: string | undefined;
+  /** Which of the reply's steps it is, counted by `step-start` parts. */
+  readonly segment: number;
+};
+
+/** How many steps a reply has, by its `step-start` parts. */
+function stepSegments(message: UIMessage): number {
+  return message.parts.filter((part) => part.type === "step-start").length;
+}
+
 /**
- * What a step's part of the reply says, in the AI SDK's step terms: its
- * text, reasoning, the tool calls it made and the results it has.
+ * What one step of the reply says (the `segment`-th, by `step-start`
+ * parts), in the AI SDK's step terms: its text, reasoning, the tool calls
+ * it made and the results it has.
  */
-function stepResultOf(message: UIMessage) {
-  let start = -1;
-  message.parts.forEach((part, index) => {
-    if (part.type === "step-start") start = index;
-  });
-  const parts = message.parts.slice(start + 1);
+function stepResultOf(message: UIMessage, segment: number) {
+  const parts: UIMessage["parts"] = [];
+  let seen = 0;
+  for (const part of message.parts) {
+    if (part.type === "step-start") {
+      seen += 1;
+      continue;
+    }
+    // A reply without step parts is one step.
+    if (seen === segment || (segment === 0 && seen === 0)) parts.push(part);
+  }
   const toolCalls: unknown[] = [];
   const toolResults: unknown[] = [];
   for (const part of parts) {
@@ -1627,6 +1677,7 @@ function stepResultOf(message: UIMessage) {
   };
 }
 
+/** The fields `folded` set or changed relative to `own`. */
 function changesOf(own: TurnConfig, folded: TurnConfig): TurnConfig {
   const changes: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(folded)) {
