@@ -1405,9 +1405,11 @@ export function chatTurnDefinition(
       run.trigger === "tool-answer" &&
       step.checkpoint.get(BASE_CHECKPOINT) === undefined
     ) {
-      const last = messages.at(-1);
+      // The chat's latest message, not the end of the path read up to the
+      // reply.
+      const latest = (await session.getLatestLeaf()) as { id?: string } | null;
       const dropped =
-        run.replyId !== undefined && last?.id !== run.replyId
+        run.replyId !== undefined && latest?.id !== run.replyId
           ? "moved_on"
           : transcriptEndsInAnswer(messages)
             ? "answered"

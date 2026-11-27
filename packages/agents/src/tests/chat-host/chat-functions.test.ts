@@ -2878,4 +2878,45 @@ describe("chat functions over a minimal host", () => {
       expect(ids).toEqual(["u1", "reply-2"]);
     });
   });
+
+  it("a continuation whose reply later messages moved past is skipped and reported as moved on", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-locate",
+            toolCallId: "c1",
+            state: "output-available",
+            input: {},
+            output: {}
+          }
+        ]
+      } as never);
+      await session.appendMessage({
+        id: "u2",
+        role: "user",
+        parts: []
+      } as never);
+      const done = instance.nextResult();
+      await submitTurn(instance.deps, instance.lane, {
+        trigger: "tool-answer",
+        replyId: "a1"
+      });
+      expect(await done).toMatchObject({ status: "skipped" });
+      expect(instance.calls).toHaveLength(0);
+      expect(instance.events.map((e) => e.payload.reason)).toEqual([
+        "moved_on"
+      ]);
+    });
+  });
 });
