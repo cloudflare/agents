@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { Connection } from "agents";
 import type { ChatTurnHostObject } from "../capabilities/chat-turn";
 import {
+  type ChatLane,
   answerTool,
   cancelTurn,
   chatDispatch,
@@ -1491,6 +1492,140 @@ describe("chat functions over a minimal host", () => {
       expect(last).toContain("u2");
       expect(last).toContain("u3");
       instance.host.respond = respond;
+    });
+  });
+
+  /** Start r1 and hold it in respond until the returned release is called. */
+  async function holdFirstTurn(instance: ChatTurnHostObject, lane: ChatLane) {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let running!: () => void;
+    const started = new Promise<void>((resolve) => (running = resolve));
+    const respond = instance.host.respond;
+    let first = true;
+    instance.host.respond = async (call) => {
+      if (first) {
+        first = false;
+        running();
+        await released;
+      }
+      return respond(call);
+    };
+    const one = instance.resultFor("r1");
+    await chatDispatch(instance.deps, lane, tab, chatRequest("r1", "one"));
+    await started;
+    return async () => {
+      release();
+      await one;
+    };
+  }
+
+  function regenerateRequest(id: string) {
+    return JSON.stringify({
+      type: "cf_agent_use_chat_request",
+      id,
+      init: {
+        method: "POST",
+        body: JSON.stringify({
+          trigger: "regenerate-message",
+          messages: [
+            { id: "u1", role: "user", parts: [{ type: "text", text: "one" }] }
+          ]
+        })
+      }
+    });
+  }
+
+  it("under drop, a message that arrives while a turn runs is not started, and the tab is told", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const sent: Array<Record<string, unknown>> = [];
+      const deps = {
+        ...instance.deps,
+        webSockets: {
+          getConnections: () => [recordingTab("tab-x", sent)]
+        } as never
+      };
+      const lane = { ...instance.lane, arrival: "drop" as const };
+      const finish = await holdFirstTurn(instance, lane);
+      await chatDispatch(deps, lane, tab, chatRequestWith("r2", "u2", "two"));
+      await finish();
+      expect(instance.calls.map((c) => c.requestId)).toEqual(["r1"]);
+      expect(await instance.sessions.session("s1").getMessage("u2")).toBeNull();
+      expect(sent).toContainEqual(
+        expect.objectContaining({ id: "r2", done: true, outcome: "skipped" })
+      );
+    });
+  });
+
+  it("under merge, the queued questions are joined into one message that one turn answers", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const lane = { ...instance.lane, arrival: "merge" as const };
+      const finish = await holdFirstTurn(instance, lane);
+      await chatDispatch(
+        instance.deps,
+        lane,
+        tab,
+        chatRequestWith("r2", "u2", "two")
+      );
+      await chatDispatch(
+        instance.deps,
+        lane,
+        tab,
+        chatRequestWith("r3", "u3", "three")
+      );
+      await finish();
+      await instance.resultFor("r3");
+      expect(instance.calls.map((c) => c.requestId)).toEqual(["r1", "r3"]);
+      const history = await instance.sessions.session("s1").getHistory();
+      expect(history.map((m) => m.id)).not.toContain("u2");
+      const merged = history.find((m) => m.id === "u3");
+      expect(JSON.stringify(merged?.parts)).toContain("two\\n\\nthree");
+    });
+  });
+
+  it("under debounce, a burst of messages is answered by its last turn", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const lane = { ...instance.lane, arrival: { debounceMs: 1 } };
+      const finish = await holdFirstTurn(instance, lane);
+      await chatDispatch(
+        instance.deps,
+        lane,
+        tab,
+        chatRequestWith("r2", "u2", "two")
+      );
+      await chatDispatch(
+        instance.deps,
+        lane,
+        tab,
+        chatRequestWith("r3", "u3", "three")
+      );
+      await finish();
+      await instance.resultFor("r3");
+      expect(instance.calls.map((c) => c.requestId)).toEqual(["r1", "r3"]);
+      const last = instance.calls[1].messages.map((m) => m.id);
+      expect(last).toContain("u2");
+      expect(last).toContain("u3");
+    });
+  });
+
+  it("the arrival policy applies to new messages only: a regenerate under drop still queues", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const lane = { ...instance.lane, arrival: "drop" as const };
+      const finish = await holdFirstTurn(instance, lane);
+      await chatDispatch(instance.deps, lane, tab, regenerateRequest("g1"));
+      await finish();
+      expect(await instance.resultFor("g1")).toMatchObject({
+        status: "completed"
+      });
+      expect(instance.calls.map((c) => c.requestId)).toEqual(["r1", "g1"]);
     });
   });
 });
