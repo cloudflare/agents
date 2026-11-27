@@ -510,6 +510,20 @@ export class Think<
    */
   readonly #turns = new Map<string, { readonly trigger: TurnTrigger }>();
   /**
+   * A signal for a resumed approval's grant, by operation, until the
+   * operation settles: it fires if the operation ends unanswered.
+   */
+  readonly #grantSignals = new Map<string, AbortController>();
+
+  #grantSignal(operationId: string): AbortSignal {
+    let controller = this.#grantSignals.get(operationId);
+    if (!controller) {
+      controller = new AbortController();
+      this.#grantSignals.set(operationId, controller);
+    }
+    return controller.signal;
+  }
+  /**
    * A step that called tools, by operation, until its tools ran: at most
    * one per running operation, removed when it ends.
    */
@@ -709,8 +723,13 @@ export class Think<
               },
               continuation: true,
               requestId: call.operationId,
-              // What started the operation, as the turn's grant is told.
-              trigger: this.#turns.get(call.operationId)?.trigger
+              // As Think's resuming turn: what started it (after a restart,
+              // an approval's continuation), and a signal that fires if the
+              // operation is stopped.
+              trigger:
+                this.#turns.get(call.operationId)?.trigger ??
+                "auto-continuation",
+              abortSignal: this.#grantSignal(call.operationId)
             } as unknown as TurnContext;
           });
           const decision = await this.#beforeToolCall(call);
@@ -946,6 +965,11 @@ export class Think<
       ) {
         this.#turns.delete(event.status.operationId);
         this.#webRequests.delete(event.status.operationId);
+        const grant = this.#grantSignals.get(event.status.operationId);
+        if (grant) {
+          if (event.status.status === "unanswered") grant.abort();
+          this.#grantSignals.delete(event.status.operationId);
+        }
         // A call the operation left without an afterToolCall is forgotten.
         for (const [toolCallId, kept] of this.#modelInputs) {
           if (kept.operationId === event.status.operationId) {

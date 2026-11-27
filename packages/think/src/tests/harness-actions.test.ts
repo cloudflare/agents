@@ -235,6 +235,11 @@ describe("harness-backed Think: actions that need a human", () => {
       charged: 5
     });
     expect(await fresh.charged()).toBe(1);
+    // The grant of the resumed turn is told what resumed it, with a signal.
+    expect(await fresh.grantContext()).toEqual({
+      trigger: "auto-continuation",
+      hasSignal: true
+    });
   });
 
   it("does not run an approved action whose input beforeToolCall changed", async () => {
