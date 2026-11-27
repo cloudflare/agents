@@ -22,6 +22,7 @@
 - A resume request that names several requests gets the end of each one that ended, not only the newest, also when the tab is parked on a continuation or offered a pending error.
 - `AIChatAgent` runs its turns as durable Task runs on the shared chat module, one implementation with `Think`'s harness.
 - An `AIChatAgent` request whose `onChatMessage` returns no response ends with `outcome: "skipped"`.
+- An `AIChatAgent` turn that a clear reaches, waiting or running, ends with `outcome: "skipped"` and keeps nothing.
 - `AIChatAgent` turns store their messages directly, so a `persistMessages` override no longer sees a turn's writes.
 - A request context over the row budget is no longer kept in memory.
 - A tab that reconnects learns how a request ended by naming it in its resume request, as the client does, and is no longer sent the last request's end.
