@@ -193,6 +193,12 @@ function callerAbortReason(record: TaskRecord): string | undefined {
 }
 const DEFINITIONS = [OPERATION_DEFINITION, SUBMISSION_DEFINITION] as const;
 /**
+ * The run metadata key under which the harness records the reply a
+ * cancelled operation kept (`{ messageId }`). Not part of the caller's
+ * metadata.
+ */
+const KEPT_REPLY_KEY = "think:kept-reply";
+/**
  * The session value (Sessions config) that records a session the harness
  * knows of: `{ parent?, createdAt }`. Not a `transcript:` key, so a reset
  * keeps it.
@@ -1270,15 +1276,24 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
   /** A run's status, with its times, key and metadata. */
   #inspection(record: TaskRecord): ThinkOperationInspection {
+    const { [KEPT_REPLY_KEY]: kept, ...metadata } = record.metadata ?? {};
+    const keptId =
+      kept && typeof kept === "object" && !Array.isArray(kept)
+        ? (kept as { messageId?: unknown }).messageId
+        : undefined;
+    const status = this.#status(record);
     return {
-      ...this.#status(record),
+      ...status,
+      ...(typeof keptId === "string" &&
+        !("messageId" in status && status.messageId) && { messageId: keptId }),
       createdAt: record.createdAt,
       ...(record.startedAt !== undefined && { startedAt: record.startedAt }),
       ...(record.settledAt !== undefined && { settledAt: record.settledAt }),
       ...(record.idempotencyKey !== undefined && {
         idempotencyKey: callerKeyOf(record.idempotencyKey)
       }),
-      ...(record.metadata !== undefined && { metadata: record.metadata }),
+      ...(record.metadata !== undefined &&
+        Object.keys(metadata).length > 0 && { metadata }),
       ...(callerAbortReason(record) !== undefined && {
         abortReason: callerAbortReason(record)
       })
@@ -1636,6 +1651,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       console.error(`ThinkHarness operation ${operationId} failed`, error);
       return this.#giveUp(run, session, errorText(error), live);
     } finally {
+      // A cancelled attempt keeps the reply it streamed; its run has no
+      // result to name it, so the inspection reads it from here.
+      const keptId = live.reply?.id ?? replyIdOf(live.partial);
+      if (run.signal.aborted && keptId !== undefined) {
+        this.#tasks.patchMetadata(run.id, KEPT_REPLY_KEY, {
+          messageId: keptId
+        });
+      }
       if (this.#live.get(session) === live) this.#live.delete(session);
       finish();
     }
@@ -2884,6 +2907,13 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           ? (result.reason ?? "unanswered")
           : "unanswered"
       );
+      // A cancelled run has no result to carry the reply it left: its
+      // inspection reads it from here.
+      if (message && record.status === "aborted") {
+        this.#tasks.patchMetadata(record.runId, KEPT_REPLY_KEY, {
+          messageId: message.id
+        });
+      }
     }
     this.#events.emit(session, {
       type: "operation",

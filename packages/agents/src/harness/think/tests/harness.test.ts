@@ -270,6 +270,28 @@ describe("ThinkHarness turns", () => {
     ).toHaveLength(1024);
   });
 
+  it("names the reply an aborted operation kept on its inspection", async () => {
+    const stub = fresh();
+    await stub.submit("slow", { operationId: "cut" });
+    await vi.waitFor(async () =>
+      expect(await stub.inFlightChunks()).toBeGreaterThan(0)
+    );
+    expect(await stub.abortWithReason("cut", "enough")).toBe(true);
+    await stub.releaseSlow();
+    await stub.wait("cut");
+
+    const ids = await stub.messageIds();
+    // Recorded when the operation's end is reported, just after it settles.
+    const inspection = await vi.waitFor(async () => {
+      const found = JSON.parse(await stub.inspectRecord("cut"));
+      expect(found.messageId).toBeDefined();
+      return found;
+    });
+    expect(inspection.messageId).toBe(ids.at(-1));
+    // The harness's own record is not part of the caller's metadata.
+    expect(inspection.metadata).toBeUndefined();
+  });
+
   it("tells withdrawn from aborted by the run, also when the caller's reason is one of those words", async () => {
     const stub = fresh();
     await stub.submit("gate", { operationId: "running" });
