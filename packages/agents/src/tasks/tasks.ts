@@ -282,6 +282,8 @@ export class Tasks<
   #storeInstance: TaskStore | undefined;
   readonly #stepDefaults: ResolvedStepPolicy;
   readonly #onError: ((error: unknown) => void | Promise<void>) | undefined;
+  /** When this isolate's start began: runs accepted before it are older. */
+  #isolateStartedAt = 0;
   /** This instance's tables, resolved once. */
   readonly #tables: TaskTables;
   /** This instance's schema version key. */
@@ -503,8 +505,41 @@ export class Tasks<
 
   // ── Lifecycle capability hooks ───────────────────────────────────────────
 
+  /**
+   * During startup: give a new run of `lane` the position of the lane's
+   * first open run accepted before this isolate started, moving those
+   * runs one place back. Returns the run's placement, or undefined when the
+   * lane holds no such run.
+   */
+  #placeAheadOfEarlier(
+    lane: string,
+    now: number
+  ): { open: boolean; seq: number } | undefined {
+    const since = this.#isolateStartedAt;
+    const [first] = this.#store.sql<{ seq: number }>`
+      SELECT seq FROM ${this.#tables.runs}
+      WHERE lane = ${lane} AND status IN ('pending', 'running')
+        AND created_at < ${since}
+      ORDER BY seq LIMIT 1
+    `;
+    if (first === undefined) return undefined;
+    this.#store.sql`
+      UPDATE ${this.#tables.runs} SET seq = seq + 1, updated_at = ${now}
+      WHERE lane = ${lane} AND status IN ('pending', 'running')
+        AND created_at < ${since}
+    `;
+    // Runs this startup already placed ahead stay ahead of this one.
+    const [ahead] = this.#store.sql<{ n: number }>`
+      SELECT COUNT(*) AS n FROM ${this.#tables.runs}
+      WHERE lane = ${lane} AND status IN ('pending', 'running')
+        AND created_at >= ${since} AND seq < ${first.seq}
+    `;
+    return { open: (ahead?.n ?? 0) > 0, seq: first.seq };
+  }
+
   /** Migrate storage and reconcile run deadlines during Lifecycle startup. */
   async onStart(): Promise<void> {
+    this.#isolateStartedAt = Date.now();
     // Each step looks at what is there, so a step a reset repeats, or one
     // a newer table makes moot, does nothing.
     const sql = this.lifecycle.storage.sql;
@@ -1125,7 +1160,19 @@ export class Tasks<
     // no wake job) until that run settles. A debounced arrival at a busy
     // lane keeps its quiet period as its deadline, wait reason `debounce`:
     // it starts when it is the head and the period is over.
-    const place = lane === null ? null : this.#store.lanePlace(lane);
+    let place = lane === null ? null : this.#store.lanePlace(lane);
+    // A caller waiting here during startup (an `onStart` that awaits its
+    // own run) goes ahead of the lane's runs left from before this isolate:
+    // those run only after startup, so behind them it would wait forever.
+    if (
+      lane !== null &&
+      place?.open &&
+      options.local !== undefined &&
+      startMode !== "queued" &&
+      this.lifecycle.status() === "starting"
+    ) {
+      place = this.#placeAheadOfEarlier(lane, now) ?? place;
+    }
     const queued = place?.open ?? false;
     const debounceUntil = busy && debounceMs > 0 ? now + debounceMs : null;
     this.#store.sql`
