@@ -18,6 +18,7 @@ describe("runChatRecoveryAttempt", () => {
       }
     } as unknown as TaskStep;
     const calls: unknown[] = [];
+    const waits: boolean[] = [];
     await runChatRecoveryAttempt(
       step,
       {
@@ -45,9 +46,12 @@ describe("runChatRecoveryAttempt", () => {
         },
         _chatRecoveryRetry: async () => {}
       },
-      { callback: "_chatRecoveryContinue", data: { n: 1 }, delaySeconds: 0 }
+      { callback: "_chatRecoveryContinue", data: { n: 1 }, delaySeconds: 0 },
+      (waiting) => void waits.push(waiting)
     );
     expect(steps).toEqual(["continuation", "backoff-2:5000", "continuation-2"]);
+    // The run was told about the one wait it took: started, then over.
+    expect(waits).toEqual([true, false]);
     expect(calls).toEqual([{ n: 1 }, { n: 2 }]);
     // Outside an attempt there is nowhere to plan.
     expect(currentRunAttempt()).toBeUndefined();

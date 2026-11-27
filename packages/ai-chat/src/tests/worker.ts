@@ -4537,6 +4537,46 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     );
   }
 
+  /**
+   * Drive a turn that is cut off, and stop its request as soon as the
+   * turn's result is back: before its run starts waiting out the recovery's
+   * backoff.
+   *
+   * @returns `backingOffAtStop`: how many runs were already backing off
+   *   when the stop was issued (0 when the stop landed in the window).
+   */
+  async driveFailingReaderTurnThenStopForTest(
+    message: string,
+    options: { responseHeaders?: Record<string, string> } = {}
+  ): Promise<{
+    status: SaveMessagesResult["status"];
+    requestId: string;
+    backingOffAtStop: number;
+  }> {
+    this._failingTurn = {
+      message,
+      remaining: 2,
+      prelude: "partial",
+      responseHeaders: options.responseHeaders,
+      statusCode: undefined
+    };
+    const result = await this.saveMessages((current) => [
+      ...current,
+      {
+        id: `u-${crypto.randomUUID()}`,
+        role: "user",
+        parts: [{ type: "text", text: "tell me a long story" }]
+      }
+    ]);
+    const backingOffAtStop = this.backingOffChatTurnRunsForTest();
+    await this["_turns"].cancel(result.requestId);
+    return {
+      status: result.status,
+      requestId: result.requestId,
+      backingOffAtStop
+    };
+  }
+
   /** How many chat-turn runs are waiting out a recovery's backoff. */
   backingOffChatTurnRunsForTest(): number {
     return (

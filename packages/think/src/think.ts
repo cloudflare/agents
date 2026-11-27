@@ -3021,6 +3021,8 @@ import { createAITools } from "@cloudflare/computer/tools/ai-sdk";
         replay: (runId, record) => this._turns.replayInRun(runId, record),
         parkUntil: (runId, reply) => this._turns.parkUntil(runId, reply),
         laneHeldForRecovery: () => this._turns.laneHeldForRecovery(),
+        backingOff: (runId, requestId, waiting) =>
+          this._turns.backingOff(runId, requestId, waiting),
         holdParksUntil: (reply) => this._turns.holdParksUntil(reply),
         attempts
       })

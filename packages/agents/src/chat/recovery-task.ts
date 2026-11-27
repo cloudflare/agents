@@ -188,7 +188,12 @@ export function createChatRecoveryTaskDefinition(
 export async function runChatRecoveryAttempt(
   step: TaskStep,
   hooks: ChatRecoveryTaskHooks,
-  first: ChatRecoveryAttemptInput
+  first: ChatRecoveryAttemptInput,
+  /**
+   * Told `true` as the run starts to wait out a backoff and `false` once
+   * that wait is over. A wait that suspends the run is still going.
+   */
+  backingOff?: (waiting: boolean) => void
 ): Promise<void> {
   // An attempt that times out waiting for a stable chat plans the next one
   // (`rescheduleAfterStableTimeout`) into this run, bounded by the
@@ -197,7 +202,9 @@ export async function runChatRecoveryAttempt(
   for (let n = 1; ; n++) {
     const suffix = n === 1 ? "" : `-${n}`;
     if (input.delaySeconds > 0) {
+      backingOff?.(true);
       await step.sleep(`backoff${suffix}`, input.delaySeconds * 1000);
+      backingOff?.(false);
     }
     const next = await step.do(
       `continuation${suffix}`,

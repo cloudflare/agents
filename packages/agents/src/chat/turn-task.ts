@@ -152,6 +152,12 @@ export type ChatTurnTaskHooks = {
    * (`ChatTurns.holdParksUntil`).
    */
   holdParksUntil(reply: Promise<void>): void;
+  /**
+   * The lane run `runId` of the request `requestId` starts to wait out its
+   * kept attempt's backoff (`waiting`), or that wait is over
+   * (`ChatTurns.backingOff`).
+   */
+  backingOff(runId: string, requestId: string, waiting: boolean): void;
 };
 
 /** The Tasks lane the chat turns of an agent run on, one at a time. */
@@ -401,7 +407,18 @@ export function createChatTurnTaskDefinition(
         return (scheduled ?? null) as TaskJson;
       }
     );
-    if (attempt) return runKeptAttempt(hooks, step, attempt, lane);
+    if (attempt) {
+      // A lane run that wakes from its backoff replays through here: the
+      // host hears that its wait is over.
+      return runKeptAttempt(
+        hooks,
+        step,
+        attempt,
+        lane,
+        false,
+        lane ? requestId : undefined
+      );
+    }
   };
 }
 
@@ -419,7 +436,9 @@ async function runKeptAttempt(
   attempt: TaskJson,
   lane: boolean | undefined,
   /** The run was started from the alarm only to run the attempt. */
-  fromAlarm = false
+  fromAlarm = false,
+  /** A lane run's request: a user's stop of it ends the run's backoff. */
+  laneRequestId?: string
 ): Promise<void | TaskSettlement> {
   const scheduled = attempt as unknown as ChatRecoveryAttemptInput;
   const run = () =>
@@ -434,7 +453,12 @@ async function runKeptAttempt(
             // runs from the alarm, where the host keeps the continuation's
             // model turn inside the memory-limit breaker.
             delaySeconds: Math.max(scheduled.delaySeconds, 0.001)
-          }
+          },
+      // Known to the stop from before the run is recorded as sleeping: a
+      // stop that lands while the run suspends ends it all the same.
+      laneRequestId === undefined
+        ? undefined
+        : (waiting) => hooks.backingOff(step.id, laneRequestId, waiting)
     );
   if (!lane) {
     const release = continuedHolds.get(step.id);
@@ -697,7 +721,9 @@ async function runLaneTurn(
       return (scheduled ?? null) as TaskJson;
     }
   );
-  if (attempt) return runKeptAttempt(hooks, step, attempt, true);
+  if (attempt) {
+    return runKeptAttempt(hooks, step, attempt, true, false, input.requestId);
+  }
 }
 
 /**

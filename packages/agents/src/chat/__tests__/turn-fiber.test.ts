@@ -88,6 +88,7 @@ describe("ChatTurnFibers", () => {
       replay: async () => {},
       parkUntil: () => {},
       laneHeldForRecovery: () => false,
+      backingOff: () => {},
       holdParksUntil: () => {}
     })({ requestId: "r1", continuation: false, nonce: "n0", lane: true }, step);
     // The model call ran in a run of its own, which keeps the snapshot.

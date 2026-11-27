@@ -1977,12 +1977,53 @@ export class ChatTurns<
   }
 
   /**
+   * The lane runs of this isolate that wait out a kept attempt's backoff,
+   * by run id, with their request. Set as the wait starts, which is before
+   * Tasks records the run as sleeping, and removed when the run wakes (its
+   * replay says the wait is over) or a stop ends it.
+   */
+  readonly #backingOff = new Map<string, string>();
+
+  /**
+   * The requests a user's stop named in this isolate, newest last. A stop
+   * can land after a cut-off turn's result and before its run starts the
+   * backoff: the run finds it here as it starts to wait. Bounded: an id
+   * matters only until its turn's run has ended.
+   */
+  readonly #stoppedRequests = new Set<string>();
+
+  /** See `ChatTurnTaskHooks.backingOff`. */
+  backingOff(runId: string, requestId: string, waiting: boolean): void {
+    if (!waiting) {
+      this.#backingOff.delete(runId);
+      return;
+    }
+    if (!this.#stoppedRequests.has(requestId)) {
+      this.#backingOff.set(runId, requestId);
+      return;
+    }
+    // The stop came first: the run ends as it starts to wait.
+    void this.#lane
+      .tasks()
+      .cancel(runId, "chat recovery stopped")
+      .catch((error) =>
+        console.error("[chat] failed to end a stopped recovery's run:", error)
+      );
+  }
+
+  /**
    * End the lane runs that wait out the backoff of the recovery attempt
    * they kept for `requestId`: the stop has settled its incident, and what
    * is queued behind must not wait for its wake. A clear leaves them: their
    * attempt wakes, finds the conversation changed and settles its incident.
    */
   async #endKeptBackoffs(requestId: string): Promise<void> {
+    this.#stoppedRequests.delete(requestId);
+    this.#stoppedRequests.add(requestId);
+    if (this.#stoppedRequests.size > 64) {
+      const [oldest] = this.#stoppedRequests;
+      this.#stoppedRequests.delete(oldest);
+    }
     try {
       const tasks = this.#lane.tasks();
       const waiting = tasks
@@ -1999,8 +2040,15 @@ export class ChatTurns<
             // A lane run sleeps only in its kept attempt's backoff.
             run.waitReason === "sleep"
         );
-      for (const run of waiting) {
-        await tasks.cancel(run.runId, "chat recovery stopped");
+      // A run that has started its backoff and is not recorded as sleeping
+      // yet (it is suspending) is known from `backingOff`.
+      const runIds = new Set(waiting.map((run) => run.runId));
+      for (const [runId, id] of this.#backingOff) {
+        if (id === requestId) runIds.add(runId);
+      }
+      for (const runId of runIds) {
+        this.#backingOff.delete(runId);
+        await tasks.cancel(runId, "chat recovery stopped");
       }
     } catch (error) {
       console.error("[chat] failed to end a stopped recovery's run:", error);

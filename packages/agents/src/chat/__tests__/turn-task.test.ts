@@ -59,6 +59,7 @@ const hooks = {
   replay: async () => {},
   parkUntil: () => {},
   laneHeldForRecovery: () => false,
+  backingOff: () => {},
   holdParksUntil: () => {}
 };
 
@@ -579,6 +580,74 @@ describe("createChatTurnTaskDefinition", () => {
     finishReply();
     await held;
     expect(released).toBe(true);
+  });
+
+  it("tells the host when a lane run starts its kept attempt's backoff, before it suspends", async () => {
+    const { step } = fakeStep(undefined);
+    const marks: Array<[string, string, boolean]> = [];
+    const suspended = new Error("suspended");
+    Object.assign(step, {
+      id: "run-lane",
+      // The backoff has not passed: the run suspends.
+      sleep: async () => {
+        throw suspended;
+      }
+    });
+    const lane: ChatLaneEntry = {
+      lane: true,
+      run: (inside) =>
+        inside(async () => {
+          currentChatRun()?.(
+            { requestId: "r-lane", envelope: null, onStash: () => {} },
+            async () => {
+              currentTurnAttempt()?.({
+                callback: "_chatRecoveryContinue",
+                data: { incidentId: "i-lane" },
+                delaySeconds: 30
+              });
+              return "reply";
+            }
+          );
+        }),
+      dropped: () => {}
+    };
+    Object.assign(step, { local: lane });
+    await expect(
+      createChatTurnTaskDefinition({
+        ...hooks,
+        backingOff: (runId, requestId, waiting) =>
+          void marks.push([runId, requestId, waiting])
+      })({ requestId: "r-lane", nonce: "n-lane", lane: true }, step)
+    ).rejects.toBe(suspended);
+    // Marked as waiting, and not unmarked: the wait is still going.
+    expect(marks).toEqual([["run-lane", "r-lane", true]]);
+  });
+
+  it("tells the host that a lane run's backoff is over when the run wakes", async () => {
+    // The wake replays the run: its turn's closure went with the attempt
+    // that suspended. The host must still hear that the wait ended, or it
+    // would keep the run as waiting and a later stop would end it.
+    const { step, checkpoint } = fakeStep(undefined);
+    Object.assign(step, { id: "run-lane" });
+    checkpoint.set("snapshot", JSON.stringify({ __cfBeganAt: 1 }));
+    checkpoint.set(
+      "attempt",
+      JSON.stringify({
+        callback: "_chatRecoveryContinue",
+        data: { incidentId: "i-lane" },
+        delaySeconds: 30
+      })
+    );
+    const marks: Array<[string, string, boolean]> = [];
+    await createChatTurnTaskDefinition({
+      ...hooks,
+      backingOff: (runId, requestId, waiting) =>
+        void marks.push([runId, requestId, waiting])
+    })({ requestId: "r-lane", nonce: "n-lane", lane: true }, step);
+    expect(marks).toEqual([
+      ["run-lane", "r-lane", true],
+      ["run-lane", "r-lane", false]
+    ]);
   });
 
   it("keeps a live turn's planned attempt in the checkpoint at once", async () => {

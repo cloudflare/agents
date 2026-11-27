@@ -268,6 +268,14 @@ interface ChatRecoveryTestStub {
   getScheduledRecoveryDelayForTest(): Promise<number | null>;
   endRecoveryBackoffsForTest(): Promise<number>;
   backingOffChatTurnRunsForTest(): Promise<number>;
+  driveFailingReaderTurnThenStopForTest(
+    message: string,
+    options?: { responseHeaders?: Record<string, string> }
+  ): Promise<{
+    status: "completed" | "error" | "aborted" | "skipped";
+    requestId: string;
+    backingOffAtStop: number;
+  }>;
   getFailingReaderCallsForTest(): Promise<number>;
   setStashData(data: unknown): Promise<void>;
   trackRecoveryTaskKeysForTest(): Promise<void>;
@@ -4242,6 +4250,42 @@ describe("platform-transient reader errors (#1964)", () => {
         .join("")
     ).toContain("Continued response.");
     expect(after.at(-1)?.role).toBe("assistant");
+  }, 30_000);
+
+  it("frees the lane at once for a stop that lands before the cut-off turn's run starts its backoff", async () => {
+    const room = `transient-cancel-window-${crypto.randomUUID()}`;
+    const agentStub = await getTestAgent(room);
+
+    // The stop is issued as soon as the turn's result is back: its run has
+    // not started waiting out the recovery's backoff yet.
+    const stopped = await agentStub.driveFailingReaderTurnThenStopForTest(
+      "Network connection lost.",
+      HELD_BACKOFF
+    );
+    expect(stopped).toMatchObject({ status: "aborted", backingOffAtStop: 0 });
+    // The stop is the recovery's outcome.
+    expect(
+      (await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]
+    ).toMatchObject([{ status: "skipped", reason: "user_cancelled" }]);
+    expect(await agentStub.getChatRecoveringForTest()).toBeNull();
+
+    // The run finds the recovery stopped and ends without waiting out the
+    // held backoff, so nothing queued behind it waits either. Nothing ends
+    // that backoff here: only the run ending by itself empties the count.
+    await vi.waitFor(
+      async () => {
+        expect(await agentStub.openChatTurnRunsForTest()).toBe(0);
+      },
+      { timeout: 10_000, interval: 20 }
+    );
+    expect(await agentStub.backingOffChatTurnRunsForTest()).toBe(0);
+    await agentStub.waitForIdleForTest();
+    // The model is not called again.
+    expect(await agentStub.getFailingReaderCallsForTest()).toBe(1);
+    expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
+    expect(
+      (await agentStub.getChatRecoveryIncidentsForTest()) as unknown[]
+    ).toMatchObject([{ status: "skipped", reason: "user_cancelled" }]);
   }, 30_000);
 
   it("ends the turn's run when the user stops a recovery waiting out its backoff", async () => {
