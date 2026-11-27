@@ -8865,6 +8865,12 @@ export class ThinkToolsTestAgent extends Think {
 
   override beforeStep(ctx: PrepareStepContext): StepConfig | void {
     this._stepHookOrder.push(`before:${ctx.stepNumber}`);
+    if (this._stepSystemForTest) {
+      // SAFETY: StepConfig takes the AI SDK's system message forms.
+      return {
+        system: [{ role: "system", content: this._stepSystemForTest }]
+      } as unknown as StepConfig;
+    }
     this._beforeStepLog.push({
       stepNumber: ctx.stepNumber,
       previousStepCount: ctx.steps.length,
@@ -9084,7 +9090,11 @@ export class ThinkToolsTestAgent extends Think {
     if (this._repairToolCalls) {
       return createToolCallingMockModel('```json\n{"message":"repaired"}\n```');
     }
-    if (this._echoExecuteMode === "validated-output") {
+    if (
+      this._echoExecuteMode === "validated-output" ||
+      this._rewriteTurnMessagesForTest ||
+      this._stepSystemForTest
+    ) {
       return createToolCallingMockModel(undefined, (prompt) =>
         this._toolPrompts.push(prompt)
       );
@@ -9503,6 +9513,19 @@ export class ThinkToolsTestAgent extends Think {
       | "validated-output"
   ): Promise<void> {
     this._echoExecuteMode = mode;
+  }
+
+  private _rewriteTurnMessagesForTest = false;
+  private _stepSystemForTest: string | undefined;
+
+  /** `beforeStep` returns this as a structured system message. */
+  async setStepSystemForTest(text: string): Promise<void> {
+    this._stepSystemForTest = text;
+  }
+
+  /** `beforeTurn` rewrites the turn's messages to one question. */
+  async rewriteTurnMessagesForTest(): Promise<void> {
+    this._rewriteTurnMessagesForTest = true;
   }
 
   /** Model prompts recorded in `validated-output` mode, as JSON. */
@@ -10178,6 +10201,16 @@ export class ThinkToolsTestAgent extends Think {
     }
     if (this._turnStopCondition) {
       return { stopWhen: this._turnStopCondition };
+    }
+    if (this._rewriteTurnMessagesForTest) {
+      return {
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "the rewritten ask" }]
+          }
+        ]
+      };
     }
   }
 

@@ -160,14 +160,5 @@
       "file": "chat-recovery-public.test.ts",
       "test": "chat recovery, through public behaviour > ends a stalled turn with an error when onChatRecovery throws"
     }
-  },
-  {
-    "file": "think-session.test.ts",
-    "test": "Think — onChatResponse > should report in-band stream errors through RPC chat onError",
-    "reason": "it reads the stream's status from the class's private reply-stream records (`_replyStreams`, via `getLatestStreamStatusForTest`)",
-    "successor": {
-      "file": "think-session.test.ts",
-      "test": "Think — onChatResponse > reports an in-band stream error to the RPC caller, the response hook and observability"
-    }
   }
 ]

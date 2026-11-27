@@ -40,6 +40,7 @@ import {
   getToolName,
   isToolUIPart,
   type LanguageModel,
+  type LanguageModelUsage,
   type ToolSet,
   type TypedToolCall,
   type UIMessage
@@ -311,6 +312,8 @@ export class Think<
 
   /** Model calls per turn. Read per call, so a subclass field applies. */
   maxSteps = 10;
+  /** Whether reasoning reaches the stream, as in Think; a turn may say. */
+  sendReasoning = true;
 
   /** How a messenger thread's burst of messages is answered, as on Think. */
   messengerConcurrency: MessengerConcurrency = DEFAULT_MESSENGER_CONCURRENCY;
@@ -442,16 +445,15 @@ export class Think<
         readonly own: TurnConfig | void;
         /** The default model, once a call of the turn resolved it. */
         defaultModel?: LanguageModel;
+        /** The messages `beforeTurn` rewrote the turn's prompt to, if any. */
+        messages?: TurnConfig["messages"];
       }
     | undefined;
   /**
    * What started each operation (Think's `TurnTrigger`) and its turn's
    * abort signal, by operation id, until it settles.
    */
-  readonly #turns = new Map<
-    string,
-    { readonly trigger: TurnTrigger; readonly abort: AbortController }
-  >();
+  readonly #turns = new Map<string, { readonly trigger: TurnTrigger }>();
   /**
    * A step that called tools, by operation, until its tools ran: at most
    * one per running operation, removed when it ends.
@@ -467,8 +469,8 @@ export class Think<
     {
       readonly operationId: string;
       readonly input: unknown;
-      /** When `beforeToolCall` was asked, for the call's duration. */
-      readonly started: number;
+      /** When the call was decided, for its duration. */
+      started: number;
     }
   >();
   /** Builds string models through one cached default provider, as Think. */
@@ -617,19 +619,21 @@ export class Think<
           return decision;
         },
         afterToolCall: async (result) => {
+          const kept = this.#modelInputs.get(result.toolCallId);
+          // From the decision to run it to its result, as Think times
+          // `execute`: not the approval before it or the hooks after.
+          const toolExecutionMs = kept ? Date.now() - kept.started : 0;
           await this.#extensionHooks.toolCallFinish({
             // SAFETY: a snapshot reads the name, id and input only.
             toolCall: result as unknown as TypedToolCall<ToolSet>,
             stepNumber: undefined,
-            durationMs: 0,
+            durationMs: toolExecutionMs,
             success: result.ok,
             ...(result.ok
               ? { output: result.output }
               : { error: result.errorText })
           });
-          const kept = this.#modelInputs.get(result.toolCallId);
           const modelInput = kept ? kept.input : result.input;
-          const toolExecutionMs = kept ? Date.now() - kept.started : 0;
           this.#modelInputs.delete(result.toolCallId);
           return this.afterToolCall({
             toolName: result.toolName,
@@ -653,13 +657,19 @@ export class Think<
                 })
           } as unknown as ToolCallResultContext);
         },
-        onStepFinish: async ({ message, finishReason, operationId, step }) => {
+        onStepFinish: async ({
+          message,
+          finishReason,
+          operationId,
+          step,
+          usage
+        }) => {
           await this.#chunkHooks;
           // The step before this one ran its tools since: its results are
           // in this message now.
           await this.#endStep(operationId, message);
           const segment = stepSegments(message);
-          const ended = { operationId, step, finishReason, segment };
+          const ended = { operationId, step, finishReason, segment, usage };
           // A step that called tools ends once they ran, as an AI SDK step
           // does: at the next step, or at the turn's end.
           if (stepResultOf(message, segment).toolCalls.length > 0) {
@@ -726,16 +736,13 @@ export class Think<
           }
           if (end.status === "unanswered" && end.reason !== "aborted") {
             // As on Think, a failed turn is reported to observability: in its
-            // stream once the model streamed (a message error too, as the
-            // reply pump reports one), in the turn before that. Its messages
-            // were placed once it reached `beforeTurn`.
-            const error = end.reason ?? "unanswered";
-            if (streamed) this._emit("message:error", { error });
+            // stream once the model streamed, in the turn before that. Its
+            // messages were placed once it reached `beforeTurn`.
             this._emit("chat:request:failed", {
               requestId: end.operationId,
               stage: streamed ? "stream" : "turn",
               messagesPersisted: continued !== undefined,
-              error
+              error: end.reason ?? "unanswered"
             });
           }
           await this.onChatResponse({
@@ -792,10 +799,6 @@ export class Think<
         event.type === "operation" &&
         (event.status.status === "done" || event.status.status === "unanswered")
       ) {
-        const turn = this.#turns.get(event.status.operationId);
-        if (turn && event.status.status === "unanswered") {
-          turn.abort.abort(event.status.reason);
-        }
         this.#turns.delete(event.status.operationId);
         // A call the operation left without an afterToolCall is forgotten.
         for (const [toolCallId, kept] of this.#modelInputs) {
@@ -1112,7 +1115,7 @@ export class Think<
   #turnOf(operationId: string) {
     let turn = this.#turns.get(operationId);
     if (!turn) {
-      turn = { trigger: "submission", abort: new AbortController() };
+      turn = { trigger: "submission" };
       this.#turns.set(operationId, turn);
     }
     return turn;
@@ -1132,6 +1135,7 @@ export class Think<
     await this.#extensionHooks.stepFinish({
       stepNumber: step.step,
       finishReason: step.finishReason ?? "unknown",
+      ...(step.usage && { usage: step.usage }),
       ...result
       // SAFETY: the fields a step snapshot reads are all here.
     } as unknown as StepContext);
@@ -1139,6 +1143,7 @@ export class Think<
       ...result,
       response: { messages: [] },
       finishReason: step.finishReason,
+      ...(step.usage && { usage: step.usage }),
       message,
       stepNumber: step.step,
       requestId: step.operationId
@@ -1832,10 +1837,7 @@ export class Think<
       typeof userMessage === "function"
         ? await userMessage(this.messages)
         : toInput(userMessage);
-    this.#turns.set(operationId, {
-      trigger: "rpc",
-      abort: new AbortController()
-    });
+    this.#turns.set(operationId, { trigger: "rpc" });
     options?.signal?.addEventListener(
       "abort",
       () => this.#stopForCaller(operationId),
@@ -2174,6 +2176,26 @@ export class Think<
     this.#turnMaxSteps = config.maxSteps;
     // Then `beforeStep`, before each model call, as the AI SDK's
     // `prepareStep` runs in Think. Its fields win for this call.
+    // A `beforeTurn` that rewrote the messages rewrote them for the whole
+    // turn, as Think's base prompt: a later call sends them with what this
+    // turn's reply added since.
+    if (first && config.messages && this.#ownTurn) {
+      this.#ownTurn.messages = config.messages;
+    }
+    const rewritten = this.#ownTurn?.messages;
+    const latest = turn.messages.at(-1);
+    const turnMessages =
+      rewritten === undefined
+        ? undefined
+        : first || latest?.role !== "assistant"
+          ? rewritten
+          : [
+              ...rewritten,
+              ...(await convertToModelMessages([latest], {
+                tools,
+                ignoreIncompleteToolCalls: true
+              }))
+            ];
     const self = this;
     const step: StepFields = isMethodOverridden(this, "beforeStep")
       ? (((await this.beforeStep({
@@ -2184,13 +2206,13 @@ export class Think<
               ? self.resolveModel(config.model)
               : resolveDefault();
           },
-          messages: context.messages,
+          messages: turnMessages ?? context.messages,
           experimental_context: undefined
         } as unknown as PrepareStepContext)) ?? {}) as StepFields)
       : {};
-    const stepSystem = step.instructions ?? step.system;
+    const stepSystem = systemText(step.instructions ?? step.system);
     const system =
-      (typeof stepSystem === "string" ? stepSystem : undefined) ??
+      stepSystem ??
       config.instructions ??
       config.system ??
       systemPromptForTurn(
@@ -2201,9 +2223,21 @@ export class Think<
     // Without an override, the turn's one resolution of the default.
     const sent =
       model !== undefined ? this.resolveModel(model) : resolveDefault();
-    const messages = step.messages ?? (first ? config.messages : undefined);
+    const messages = step.messages ?? turnMessages;
     const activeTools = step.activeTools ?? config.activeTools;
     const toolChoice = step.toolChoice ?? config.toolChoice;
+    const callSettings = defined({
+      topP: config.topP,
+      topK: config.topK,
+      presencePenalty: config.presencePenalty,
+      frequencyPenalty: config.frequencyPenalty,
+      stopSequences: config.stopSequences,
+      seed: config.seed,
+      maxRetries: config.maxRetries,
+      headers: config.headers,
+      experimental_transform: config.experimental_transform,
+      experimental_repairToolCall: config.repairToolCall
+    });
     return {
       model: sent,
       ...(typeof system === "string" && { system }),
@@ -2224,8 +2258,11 @@ export class Think<
       }),
       ...(config.temperature !== undefined && {
         temperature: config.temperature
-      })
-    };
+      }),
+      // The rest of Think's call settings, as `streamText` takes them.
+      ...(Object.keys(callSettings).length > 0 && { callSettings }),
+      sendReasoning: config.sendReasoning ?? this.sendReasoning
+    } as ThinkTurnConfig;
   }
 
   async #beforeToolCall(call: {
@@ -2236,11 +2273,12 @@ export class Think<
   }): Promise<ThinkToolCallDecision | void> {
     // `afterToolCall` sees the input the model gave, as in Think, even when
     // the call runs with one `beforeToolCall` substituted.
-    this.#modelInputs.set(call.toolCallId, {
+    const kept = {
       operationId: call.operationId,
       input: call.input,
       started: Date.now()
-    });
+    };
+    this.#modelInputs.set(call.toolCallId, kept);
     let decision: ToolCallDecision | void;
     try {
       decision = await this.beforeToolCall({
@@ -2256,6 +2294,8 @@ export class Think<
       // the error as the AI SDK words it in Think.
       return { action: "block", reason: String(error) };
     }
+    // The call's time starts once it is decided.
+    kept.started = Date.now();
     if (!decision) return;
     switch (decision.action) {
       case "block":
@@ -2369,6 +2409,8 @@ type OpenStep = {
   readonly finishReason: string | undefined;
   /** Which of the reply's steps it is, counted by `step-start` parts. */
   readonly segment: number;
+  /** The step's token usage, when the provider gave it. */
+  readonly usage?: LanguageModelUsage;
 };
 
 /** The fields of a `StepConfig` the harness-backed Think applies. */
@@ -2448,6 +2490,27 @@ function stepResultOf(message: UIMessage, segment: number) {
     toolCalls,
     toolResults
   };
+}
+
+/**
+ * A step's `instructions` or `system` as text: a string, or the text of
+ * the system messages the AI SDK also takes there.
+ */
+function systemText(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  const messages = Array.isArray(value) ? value : value ? [value] : [];
+  const texts = messages.flatMap((message: unknown) => {
+    const content = (message as { content?: unknown } | null)?.content;
+    return typeof content === "string" ? [content] : [];
+  });
+  return texts.length > 0 ? texts.join("\n\n") : undefined;
+}
+
+/** `fields` without its undefined ones. */
+function defined<T extends Record<string, unknown>>(fields: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(fields).filter(([, value]) => value !== undefined)
+  ) as Partial<T>;
 }
 
 /** The fields `folded` set or changed relative to `own`. */

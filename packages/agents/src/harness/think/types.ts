@@ -13,7 +13,9 @@ import type {
   ToolChoice,
   ToolSet,
   UIMessage,
-  UIMessageChunk
+  UIMessageChunk,
+  LanguageModelUsage,
+  streamText
 } from "ai";
 import type { ClientToolSchema } from "../../chat/client-tools";
 import type {
@@ -290,7 +292,33 @@ export type ThinkTurnConfig = {
   readonly providerOptions?: Record<string, Record<string, JSONValue>>;
   readonly maxOutputTokens?: number;
   readonly temperature?: number;
+  /**
+   * @internal The AI SDK's other call settings for this call, spread into
+   * `streamText` before the harness's own arguments, so none of those can
+   * be overridden here.
+   */
+  readonly callSettings?: ThinkCallSettings;
+  /** @internal Whether reasoning reaches the stream; default true. */
+  readonly sendReasoning?: boolean;
 };
+
+/**
+ * @internal `streamText`'s call settings a turn may set, beyond the ones
+ * `ThinkTurnConfig` names.
+ */
+export type ThinkCallSettings = Pick<
+  Parameters<typeof streamText>[0],
+  | "topP"
+  | "topK"
+  | "presencePenalty"
+  | "frequencyPenalty"
+  | "stopSequences"
+  | "seed"
+  | "maxRetries"
+  | "headers"
+  | "experimental_transform"
+  | "experimental_repairToolCall"
+>;
 
 /** Context for `beforeToolCall`. @experimental */
 export type ThinkToolCallContext = ThinkHookContext & {
@@ -331,6 +359,8 @@ export type ThinkStepFinishContext = ThinkHookContext & {
   /** The assistant message as persisted after this model call. */
   readonly message: UIMessage;
   readonly finishReason: string | undefined;
+  /** @internal The model call's token usage, when the provider gave it. */
+  readonly usage?: LanguageModelUsage;
 };
 
 /** Context for `onChunk`. @experimental */

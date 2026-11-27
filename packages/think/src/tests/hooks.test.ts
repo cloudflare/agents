@@ -377,6 +377,29 @@ describe("Think — beforeStep hook", () => {
     expect(log[0].text).toBe("Async override applied");
   });
 
+  it("sends a step's structured system message", async () => {
+    const agent = await freshToolAgent("hook-bs-system");
+    await agent.setStepSystemForTest("Answer in JSON");
+    await agent.testChat("call echo");
+    const [first] = await agent.getToolPrompts();
+    expect(first).toContain("Answer in JSON");
+  });
+
+  it("keeps the messages beforeTurn rewrote for every model call of the turn", async () => {
+    const agent = await freshToolAgent("hook-bt-rewrite");
+    await agent.rewriteTurnMessagesForTest();
+    await agent.testChat("the original ask");
+    const prompts = await agent.getToolPrompts();
+    // The tool call, then the answer after its result.
+    expect(prompts.length).toBeGreaterThanOrEqual(2);
+    for (const prompt of prompts) {
+      expect(prompt).toContain("the rewritten ask");
+      expect(prompt).not.toContain("the original ask");
+    }
+    // The second call has the tool's result too.
+    expect(prompts[1]).toContain("echo");
+  });
+
   it("ends a step that ran a tool before the next step's beforeStep", async () => {
     const agent = await freshToolAgent("hook-bs-order");
     await agent.testChat("Run a tool");

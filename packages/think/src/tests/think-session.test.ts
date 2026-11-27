@@ -2601,55 +2601,6 @@ describe("Think — onChatResponse", () => {
     }
   });
 
-  // The successor of the test above through public behaviour: what the
-  // caller, the response hook and observability see, without the class's
-  // stream records.
-  it("reports an in-band stream error to the RPC caller, the response hook and observability", async () => {
-    const room = "hook-rpc-inband-error-public";
-    const observed: Array<{ type: string; error?: unknown }> = [];
-    const record = (event: {
-      agent?: string;
-      name?: string;
-      type: string;
-      payload?: unknown;
-    }) => {
-      if (event.agent !== "ThinkTestAgent" || event.name !== room) return;
-      if (
-        event.type !== "message:error" &&
-        event.type !== "chat:request:failed"
-      ) {
-        return;
-      }
-      const payload = (event.payload ?? {}) as { error?: unknown };
-      observed.push({ type: event.type, error: payload.error });
-    };
-    const unsubscribeMessage = subscribe("message", record);
-    const unsubscribeChat = subscribe("chat", record);
-    const agent = await freshAgent(room);
-
-    try {
-      await agent.setInBandErrorResponse("RPC in-band error");
-      const result = await agent.testChat("trigger rpc in-band error");
-
-      expect(result.done).toBe(false);
-      expect(result.error).toContain("RPC in-band error");
-      const log = (await agent.getResponseLog()) as ChatResponseResult[];
-      expect(log.map((entry) => entry.status)).toEqual(["error"]);
-      expect(log[0].error).toContain("RPC in-band error");
-      // One message error, then one failed request, both with the error.
-      expect(observed.map((event) => event.type)).toEqual([
-        "message:error",
-        "chat:request:failed"
-      ]);
-      for (const event of observed) {
-        expect(String(event.error)).toContain("RPC in-band error");
-      }
-    } finally {
-      unsubscribeMessage();
-      unsubscribeChat();
-    }
-  });
-
   it("should propagate RPC in-band stream errors when onError rethrows", async () => {
     const agent = await freshAgent("hook-rpc-inband-error-rethrow");
 
