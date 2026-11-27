@@ -68,7 +68,8 @@ async function quiet(cls: Cls, room: string, quietMs = 10_000): Promise<Probe> {
   }
 }
 
-const roles = (p: Probe) => p.messages.map((m) => m.role[0]).join("");
+// The agent rooms have no messages.
+const roles = (p: Probe) => (p.messages ?? []).map((m) => m.role[0]).join("");
 const text = (m: UIMessage) =>
   m.parts.map((part) => (part.type === "text" ? part.text : "")).join("");
 const summary = (p: Probe) => ({
