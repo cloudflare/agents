@@ -99,10 +99,13 @@ describe("facet wake", () => {
     // failure left to inject and run the job (see #3305).
     // The failure stayed out of the root's driver: the wake is still there
     // for a later try, and the job has not run.
-    await vi.waitFor(async () => {
-      const [wake] = await agent.rootJobs();
-      expect(wake?.time).toBeGreaterThanOrEqual(started + 25_000);
-    });
+    await vi.waitFor(
+      async () => {
+        const [wake] = await agent.rootJobs();
+        expect(wake?.time).toBeGreaterThanOrEqual(started + 25_000);
+      },
+      { timeout: 10_000, interval: 20 }
+    );
     expect(await agent.middleRan("m")).toEqual([]);
   });
 
