@@ -7,6 +7,7 @@
 import { env, exports } from "cloudflare:workers";
 import { getAgentByName } from "agents";
 import { describe, expect, it, vi } from "vitest";
+import { subscribe } from "agents/observability";
 
 async function freshAgent(name: string) {
   return getAgentByName(env.ThinkTestAgent, `${name}-${crypto.randomUUID()}`);
@@ -481,4 +482,97 @@ describe("chat recovery, through public behaviour", () => {
       expect(messages.map((message) => message.role)).toEqual(["user"]);
     }, 30_000);
   });
+
+  // Successor of the interrupted-attempts bound (think-session, "Think —
+  // onChatRecovery", the work-budget and progress tests): resets that each
+  // land after some progress go on past maxAttempts, and stop at
+  // maxInterruptedAttempts, which never resets.
+  it("recovers past maxAttempts across resets that each follow progress, until maxInterruptedAttempts", async () => {
+    const room = `resets-bound-${crypto.randomUUID()}`;
+    const agent = () => getAgentByName(env.ThinkTestAgent, room);
+    const exhausted: Array<{ reason?: string }> = [];
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:recovery:exhausted" && event.name === room) {
+        exhausted.push(event.payload as { reason?: string });
+      }
+    });
+    /** A tab, counting the text chunks it is sent. */
+    async function connect() {
+      const res = await exports.default.fetch(
+        `http://example.com/agents/think-test-agent/${room}`,
+        { headers: { Upgrade: "websocket" } }
+      );
+      const ws = res.webSocket;
+      if (!ws) throw new Error("no socket");
+      ws.accept();
+      const tab = { ws, chunks: 0 };
+      ws.addEventListener("message", (event) => {
+        const frame = JSON.parse(String(event.data)) as {
+          type?: string;
+          body?: string;
+        };
+        if (
+          frame.type === "cf_agent_use_chat_response" &&
+          frame.body?.includes("text-delta")
+        ) {
+          tab.chunks++;
+        }
+      });
+      return tab;
+    }
+    try {
+      await (
+        await agent()
+      ).keepAcrossResetsForTest({
+        chunks: Array.from({ length: 200 }, (_, k) => `w${k} `),
+        delayMs: 40,
+        config: { maxAttempts: 1, maxInterruptedAttempts: 3 }
+      });
+      let tab = await connect();
+      tab.ws.send(
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: crypto.randomUUID(),
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [
+                {
+                  id: crypto.randomUUID(),
+                  role: "user",
+                  parts: [{ type: "text", text: "reset me, again" }]
+                }
+              ]
+            })
+          }
+        })
+      );
+      let resets = 0;
+      for (;;) {
+        // Some new text reached the tab: this attempt made progress.
+        await vi.waitFor(
+          () => {
+            expect(tab.chunks >= 3 || exhausted.length > 0).toBe(true);
+          },
+          { timeout: 15_000, interval: 20 }
+        );
+        if (exhausted.length > 0 || resets >= 6) break;
+        await (await agent()).resetIsolateForTest().catch(() => undefined);
+        resets++;
+        tab.ws.close();
+        // A new tab wakes the agent, whose start recovers the turn.
+        tab = await connect();
+      }
+      tab.ws.close();
+
+      // Past maxAttempts (1): more than one reset was recovered. Stopped at
+      // maxInterruptedAttempts (3), which progress does not reset.
+      expect(resets).toBeGreaterThan(1);
+      expect(exhausted.map((entry) => entry.reason)).toEqual([
+        "interrupted_attempts_exceeded"
+      ]);
+    } finally {
+      unsubscribe();
+    }
+  }, 90_000);
 });
