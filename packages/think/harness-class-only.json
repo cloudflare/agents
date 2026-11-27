@@ -409,5 +409,32 @@
       "file": "chat-recovery-public.test.ts",
       "test": "chat recovery, through public behaviour > finishes a regeneration a reset cut off on its new branch, keeping the earlier answer"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > re-throws a memory-limit reset from a recovery callback without writing anything (#2613)",
+    "reason": "a memory-limit reset error injected into the class's scheduled recovery callback (private)",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > re-runs a recovery a reset cut while onChatRecovery ran, and sends no terminal"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > re-throws a deploy code-update reset (preserve the row to re-run on the fresh isolate) and does NOT terminalize",
+    "reason": "a code-update reset error injected into the class's scheduled recovery callback (private)",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > re-runs a recovery a reset cut while onChatRecovery ran, and sends no terminal"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > re-throws the exact Durable Object storage-reset error through a SqlError cause and does NOT terminalize",
+    "reason": "a storage-reset error injected into the class's scheduled recovery callback (private)",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > re-runs a recovery a reset cut while onChatRecovery ran, and sends no terminal"
+    }
   }
 ]

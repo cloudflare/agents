@@ -18,11 +18,13 @@ async function freshAgent(name: string) {
 async function resetDuringTurn(
   name: string,
   chunksBeforeReset: number,
-  answer?: { continue?: boolean; persist?: boolean }
+  answer?: { continue?: boolean; persist?: boolean },
+  options?: { holdRecovery?: boolean }
 ) {
   const room = `${name}-${crypto.randomUUID()}`;
   const agent = () => getAgentByName(env.ThinkTestAgent, room);
   if (answer) await (await agent()).answerRecoveryForTest(answer);
+  if (options?.holdRecovery) await (await agent()).holdRecoveryOnceForTest();
   const startedAt = Date.now();
   if (chunksBeforeReset === 0) {
     // No stream at all: the model call waits on the provider.
@@ -100,7 +102,7 @@ async function resetDuringTurn(
     },
     { timeout: 15_000, interval: 50 }
   );
-  return { requestId, calls, startedAt, resetAt, agent };
+  return { requestId, calls, startedAt, resetAt, agent, room };
 }
 
 describe("chat recovery, through public behaviour", () => {
@@ -694,5 +696,72 @@ describe("chat recovery, through public behaviour", () => {
       .map((part) => (part.type === "text" ? part.text : ""))
       .join("");
     expect(text).toMatch(/^one /);
+  }, 60_000);
+
+  // Successor of the platform-reset tests (think-session, "Think —
+  // onChatRecovery", #1730/#2613): a recovery attempt the platform cuts
+  // (here, a reset while onChatRecovery is running) does not end the turn:
+  // the next start runs the recovery again, and no terminal is sent.
+  it("re-runs a recovery a reset cut while onChatRecovery ran, and sends no terminal", async () => {
+    const exhausted: unknown[] = [];
+    let room = "";
+    const unsubscribe = subscribe("chat", (event) => {
+      if (event.type === "chat:recovery:exhausted" && event.name === room) {
+        exhausted.push(event.payload);
+      }
+    });
+    try {
+      // First reset: mid-reply. Its recovery's onChatRecovery is held.
+      const first = await resetDuringTurn("platform-cut", 2, undefined, {
+        holdRecovery: true
+      });
+      room = first.room;
+      const agent = first.agent;
+      await vi.waitFor(
+        async () => {
+          expect((await (await agent()).recoveryHoldForTest()).held).toBe(true);
+        },
+        { timeout: 15_000, interval: 50 }
+      );
+      // The platform cuts the recovery attempt: reset while the hook runs.
+      await (await agent()).resetIsolateForTest().catch(() => undefined);
+
+      // A tab wakes the agent; its start runs the recovery again.
+      const res = await exports.default.fetch(
+        `http://example.com/agents/think-test-agent/${room}`,
+        { headers: { Upgrade: "websocket" } }
+      );
+      const ws = res.webSocket;
+      if (!ws) throw new Error("no socket");
+      ws.accept();
+      const errors: unknown[] = [];
+      ws.addEventListener("message", (event) => {
+        const frame = JSON.parse(String(event.data)) as {
+          type?: string;
+          error?: boolean;
+        };
+        if (frame.type === "cf_agent_use_chat_response" && frame.error) {
+          errors.push(frame);
+        }
+      });
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await (await agent()).recoveryHoldForTest()).calls
+          ).toBeGreaterThanOrEqual(2);
+          expect(await (await agent()).stableWithinForTest(2_000)).toBe(true);
+        },
+        { timeout: 20_000, interval: 100 }
+      );
+      ws.close();
+
+      expect(exhausted).toEqual([]);
+      expect(errors).toEqual([]);
+      expect(
+        (await (await agent()).lastAssistantTextForTest()).length
+      ).toBeGreaterThan(0);
+    } finally {
+      unsubscribe();
+    }
   }, 60_000);
 });

@@ -1637,6 +1637,10 @@ function ensureReleasedAgentToolTable(sql: SqlStorage): void {
 
 /** Where a test keeps the answer onChatRecovery gives after a reset. */
 const RECOVERY_ANSWER_KEY = "test:recovery-answer";
+/** Holds onChatRecovery once; set while it is held; its calls, across resets. */
+const RECOVERY_GATE_KEY = "test:recovery-gate";
+const RECOVERY_HELD_KEY = "test:recovery-held";
+const RECOVERY_CALLS_KEY = "test:recovery-calls";
 /** Where a test keeps `chatRecovery` across resets. */
 const RECOVERY_CONFIG_KEY = "test:recovery-config";
 /** Where a test keeps a slow model across resets: chunks and delay. */
@@ -1717,6 +1721,16 @@ export class ThinkTestAgent extends Think {
     });
     if (this._recoveryHookForTest === "throw") {
       throw new Error("recovery hook boom");
+    }
+    // Counted in storage, across resets.
+    const calls =
+      (this.ctx.storage.kv.get<number>(RECOVERY_CALLS_KEY) ?? 0) + 1;
+    this.ctx.storage.kv.put(RECOVERY_CALLS_KEY, calls);
+    // A test can hold this hook once, to cut the recovery attempt there.
+    if (this.ctx.storage.kv.get<boolean>(RECOVERY_GATE_KEY)) {
+      this.ctx.storage.kv.delete(RECOVERY_GATE_KEY);
+      this.ctx.storage.kv.put(RECOVERY_HELD_KEY, true);
+      await new Promise<never>(() => {});
     }
     // A test that resets the isolate leaves its answer in storage, where the
     // next isolate's recovery finds it.
@@ -3993,6 +4007,19 @@ export class ThinkTestAgent extends Think {
     return (last?.parts ?? [])
       .map((p) => (p.type === "text" ? p.text : ""))
       .join("");
+  }
+
+  /** The next onChatRecovery waits, until the isolate is reset. */
+  async holdRecoveryOnceForTest(): Promise<void> {
+    this.ctx.storage.kv.put(RECOVERY_GATE_KEY, true);
+  }
+
+  /** Whether an onChatRecovery is (or was) held; and its calls so far. */
+  async recoveryHoldForTest(): Promise<{ held: boolean; calls: number }> {
+    return {
+      held: this.ctx.storage.kv.get<boolean>(RECOVERY_HELD_KEY) === true,
+      calls: this.ctx.storage.kv.get<number>(RECOVERY_CALLS_KEY) ?? 0
+    };
   }
 
   /** What onChatRecovery answers from now on, across resets. */
