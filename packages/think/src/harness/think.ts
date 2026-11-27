@@ -1456,8 +1456,11 @@ export class Think<
   #stopping: Promise<unknown> = Promise.resolve();
   #stopEveryTurn(): void {
     const stopping = this.harness.session().abort();
-    this.#stopping = stopping;
-    void this.keepAliveWhile(() => stopping);
+    // A failed stop is reported, and does not fail the turns after it.
+    this.#stopping = stopping.catch(() => {});
+    void this.keepAliveWhile(() => stopping).catch((error: unknown) =>
+      console.error("[Think] Stopping every turn failed", error)
+    );
   }
 
   async cancelAllChats(): Promise<void> {
