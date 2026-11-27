@@ -14,6 +14,7 @@
  */
 import { jsonSchema, type ModelMessage, type Tool, type ToolSet } from "ai";
 import type { ThinkSessionId } from "../types";
+import { RESOLVES_TO_STREAM } from "../tools";
 import type {
   Drafts,
   ExtensionHandle,
@@ -245,7 +246,9 @@ function toolOf<M extends HookMap>(
           streams ? run.outputs : lastOf(run.outputs)
         );
       }
-    })
+    }),
+    // Its promise resolves to the outputs when they stream.
+    [RESOLVES_TO_STREAM]: true
   } as Tool;
 }
 

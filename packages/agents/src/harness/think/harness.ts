@@ -2892,17 +2892,6 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                     operationId,
                     chunk
                   });
-                  // The host's `onChunk` hears a tool's progress too, as
-                  // it hears the model's chunks.
-                  try {
-                    this.#options.hooks?.onChunk?.({
-                      session,
-                      operationId,
-                      chunk
-                    });
-                  } catch (error) {
-                    console.error("ThinkHarness onChunk hook failed", error);
-                  }
                 }
               });
               // Journaled as JSON: an output's own `toJSON` decides its form.
