@@ -798,17 +798,6 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     ].length;
   }
 
-  /** Deliver a notice out of a turn; returns the transcript's texts. */
-  async deliverNoticeForTest(
-    text: string,
-    options: { channel: string; thread: string; informModel?: boolean }
-  ): Promise<string[]> {
-    await this.deliverNotice(text, options);
-    return (await this.getMessages()).flatMap((message) =>
-      message.parts.flatMap((part) => (part.type === "text" ? [part.text] : []))
-    );
-  }
-
   /** A notice to a messenger with no thread; returns the error's text. */
   async deliverNoticeWithoutThreadForTest(): Promise<string> {
     try {
