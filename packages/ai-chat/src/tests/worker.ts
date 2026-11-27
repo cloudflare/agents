@@ -2683,6 +2683,21 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     return true;
   }
 
+  /**
+   * Wait for idle and report, from inside the agent at the moment it
+   * settled, the turns started so far and whether one is still active.
+   */
+  async waitForIdleStartsForTest(): Promise<{
+    started: string[];
+    active: boolean;
+  }> {
+    await this["_turns"].waitForIdle();
+    return {
+      started: [...this._startedRequestIds],
+      active: this.isChatTurnActiveForTest()
+    };
+  }
+
   waitUntilStableForTest(options?: { timeout?: number }): Promise<boolean> {
     return this.waitUntilStable(options);
   }

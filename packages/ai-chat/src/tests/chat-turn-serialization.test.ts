@@ -197,7 +197,7 @@ describe("AIChatAgent chat turn serialization", () => {
     const savePromise = agentStub.saveSyntheticUserMessage(
       "Scheduled follow-up"
     );
-    const waitForIdlePromise = agentStub.waitForIdleForTest();
+    const waitForIdlePromise = agentStub.waitForIdleStartsForTest();
 
     await queued(agentStub, 2);
 
@@ -218,7 +218,11 @@ describe("AIChatAgent chat turn serialization", () => {
 
     await agentStub.releaseStreamForTest("req-save-1");
     await savePromise;
-    await waitForIdlePromise;
+    // It settled only once both turns had run, not early.
+    expect(await waitForIdlePromise).toEqual({
+      started: [expect.any(String), expect.any(String)],
+      active: false
+    });
 
     const started = await agentStub.getStartedRequestIds();
     expect(started[0]).toBe("req-save-1");
