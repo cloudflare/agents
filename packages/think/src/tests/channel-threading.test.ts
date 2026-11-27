@@ -49,4 +49,17 @@ describe("channel threading (Phase 4a)", () => {
     await agent.runChannelTurnForTest({ continuation: true });
     expect(await agent.getCapturedTurnChannelsForTest()).toContain("voice");
   });
+
+  it("runs an explicit-channel continuation on it, and the next continuation extends it", async () => {
+    const agent = await freshAgent(`ch-explicit-${crypto.randomUUID()}`);
+    await agent.runChannelTurnForTest({ input: "hi", channel: "web" });
+    await agent.resetCapturedTurnChannelsForTest();
+
+    await agent.runChannelTurnForTest({ continuation: true, channel: "voice" });
+    await agent.runChannelTurnForTest({ continuation: true });
+    expect(await agent.getCapturedTurnChannelsForTest()).toEqual([
+      "voice",
+      "voice"
+    ]);
+  });
 });

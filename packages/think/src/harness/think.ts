@@ -992,6 +992,7 @@ export class Think<
           this.#grantSignals.delete(event.status.operationId);
         }
         this.#messengerContexts.delete(event.status.operationId);
+        this.#explicitChannels.delete(event.status.operationId);
         // A call the operation left without an afterToolCall is forgotten.
         for (const [toolCallId, kept] of this.#modelInputs) {
           if (kept.operationId === event.status.operationId) {
@@ -1779,6 +1780,23 @@ export class Think<
   #configuredAtConstruction: ThinkChannels | undefined;
   /** The channel the last turn ran on, for a continuation, as on Think. */
   #lastTurnChannel: string | undefined;
+  /**
+   * Continue the latest reply, as on Think: on `channel` when one is given,
+   * otherwise on the channel the last turn ran on.
+   */
+  async #continue(channel: string | undefined) {
+    const operationId = crypto.randomUUID();
+    if (channel !== undefined) this.#explicitChannels.set(operationId, channel);
+    try {
+      return await this.harness.session().continue({ operationId });
+    } catch (error) {
+      this.#explicitChannels.delete(operationId);
+      throw error;
+    }
+  }
+
+  /** Continuations given their own channel, until they start. */
+  #explicitChannels = new Map<string, string>();
   /** Operations a browser's chat request started: they run on `web`. */
   #webRequests = new Set<string>();
   /** The channel registry, read at start (none on a sub-agent). */
@@ -1910,7 +1928,7 @@ export class Think<
 
   async continueLastTurn(
     body?: Record<string, unknown>,
-    options?: SaveMessagesOptions
+    options?: SaveMessagesOptions & { channel?: string }
   ): Promise<SaveMessagesResult> {
     if (body !== undefined) {
       throw new Error(
@@ -1928,7 +1946,7 @@ export class Think<
     }
     const cut = await this.#cutOffByStop(options?.signal);
     if (cut) return cutOffBeforeStart(cut);
-    const receipt = await this.harness.session().continue();
+    const receipt = await this.#continue(options?.channel);
     return this.#waitForTurn(receipt.operationId, options?.signal);
   }
 
@@ -2257,7 +2275,7 @@ export class Think<
     }
     const session = this.harness.session();
     let receipt;
-    if (wait.continuation) receipt = await session.continue();
+    if (wait.continuation) receipt = await this.#continue(wait.channel);
     else {
       const input = wait.input;
       const messages =
@@ -2872,14 +2890,18 @@ export class Think<
         (message) => message.id !== CONTEXT_REMINDER_MESSAGE_ID
       );
       const web = this.#webRequests.delete(turn.operationId);
+      const explicit = this.#explicitChannels.get(turn.operationId);
+      this.#explicitChannels.delete(turn.operationId);
       const user = [...history].reverse().find((m) => m.role === "user");
       // As in Think: a browser's request runs on `web`; a continuation on
       // the channel the last turn ran on; anything else on its stamp. A
       // messenger's message is stamped once its turn starts.
-      let channel = web
-        ? "web"
-        : ((turn.continuation ? this.#lastTurnChannel : undefined) ??
-          channelFromMessages(history));
+      let channel =
+        explicit ??
+        (web
+          ? "web"
+          : ((turn.continuation ? this.#lastTurnChannel : undefined) ??
+            channelFromMessages(history)));
       // A browser's new user message is stamped `web` here, as Think stamps
       // it at intake: the client's own write cannot carry the key, and the
       // harness writes the message when its turn starts.
