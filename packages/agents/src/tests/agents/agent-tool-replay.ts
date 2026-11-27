@@ -416,6 +416,16 @@ export class TestAgentToolReplayAgent extends Agent {
     await this.waitForOpenRunForTest(runId);
     await this.tasks.cancel(runId, "agent tool run cleared");
     await first.catch(() => {});
+    // The cancel reaches the child on its own: let it land before the id
+    // is dispatched again, so it cannot cancel the new run instead.
+    const child = await this.subAgent(TestAgentToolStubChild, runId);
+    const deadline = Date.now() + 10_000;
+    while (
+      (await child.inspectAgentToolRun(runId))?.status === "running" &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     const again = await this.runAgentTool(TestAgentToolStubChild, {
       runId,
       input: { chunkBodies: [], summary: "again" } satisfies StubRunInput
