@@ -19,7 +19,8 @@ import {
   unexecutedToolNames,
   type ChatRecoveryConfig,
   type ChatRecoveryContext,
-  type ChatRecoveryOptions
+  type ChatRecoveryOptions,
+  classifyProviderError
 } from "agents/chat";
 import type {
   ChatResponseResult,
@@ -925,6 +926,10 @@ export class Think<
           } as unknown as ChunkContext);
         },
         onTurnEnd: async (end) => {
+          // A turn no `chat()` caller waits on has nobody to tell.
+          if (!this.#chatClears.has(end.operationId)) {
+            this.#overflowed.delete(end.operationId);
+          }
           // The extensions' chunk hooks finish inside the turn, as in Think.
           await this.#chunkHooks;
           const continued = this.#continued.get(end.operationId);
@@ -2723,7 +2728,7 @@ export class Think<
             // "aborted" is the harness's reason for a stop, and "withdrawn" for
             // a stop that reached the turn while it waited (see `saveResult`).
             if (error === "aborted" || error === "withdrawn") return;
-            const wrapped = this.#overflowErrors.delete(error)
+            const wrapped = this.#overflowed.delete(operationId)
               ? this.onChatError(new Error(error), {
                   requestId: operationId,
                   stage: "stream",
@@ -2744,6 +2749,7 @@ export class Think<
       }
     } finally {
       this.#chatClears.delete(operationId);
+      this.#overflowed.delete(operationId);
     }
     await this.#sync();
   }
@@ -3429,6 +3435,8 @@ export class Think<
    * overflow ends the turn.
    */
   async #onContextOverflow(operationId: string): Promise<boolean> {
+    // If the turn ends on it, its caller hears an overflow.
+    this.#overflowed.add(operationId);
     if (!this.contextOverflow?.reactive) return false;
     let shortened = false;
     try {
@@ -3453,17 +3461,29 @@ export class Think<
   }
 
   #classify(error: unknown): ThinkErrorClass {
-    const classification = this.classifyChatError(error);
-    if (classification !== "context_overflow") return "fail";
-    // The turn's caller hears it as an overflow, as on Think.
-    this.#overflowErrors.add(
-      error instanceof Error ? error.message : String(error)
-    );
-    return "context-overflow";
+    // As in Think: the app's classifier wins; without a verdict from it,
+    // what the provider's error says.
+    let classification: ChatErrorClassification | void = undefined;
+    if (isMethodOverridden(this, "classifyChatError")) {
+      try {
+        classification = this.classifyChatError(error);
+      } catch (err) {
+        console.warn(
+          `[Think] classifyChatError threw; treating as unclassified: ${err instanceof Error ? err.message : String(err)}`
+        );
+        return "fail";
+      }
+    }
+    classification ??= classifyProviderError(error);
+    return classification === "context_overflow" ? "context-overflow" : "fail";
   }
 
-  /** Error texts classified as a context overflow, until reported. */
-  readonly #overflowErrors = new Set<string>();
+  /**
+   * Operations a context overflow ended, until their caller is told, so
+   * it hears the error as an overflow, as on Think. One entry per running
+   * operation at most, deleted when reported or at the turn's end.
+   */
+  readonly #overflowed = new Set<string>();
 
   /** The root session's Sessions handle, which the harness hands over on first use. */
   async #rootHandle(): Promise<Session> {
