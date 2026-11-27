@@ -1608,6 +1608,31 @@ export class Think<
       throw new TypeError("runTurn: supply either input or continuation: true");
     }
     const session = this.harness.session();
+    // As in Think: an overridden `continueLastTurn` runs the continuation,
+    // and its result's status stands, with the turn's message and output.
+    if (wait.continuation && isMethodOverridden(this, "continueLastTurn")) {
+      const returned = await this.continueLastTurn(undefined, {
+        ...(wait.signal && { signal: wait.signal })
+      });
+      const settled = returned.requestId
+        ? await session.wait(returned.requestId)
+        : undefined;
+      await this.#sync();
+      const message =
+        settled?.status === "done" && settled.messageId !== undefined
+          ? this.#transcript.messages.find((m) => m.id === settled.messageId)
+          : undefined;
+      const output =
+        settled?.status === "done"
+          ? this.harness.operationOutput(session.id, returned.requestId)
+          : undefined;
+      return {
+        ...returned,
+        continuation: true,
+        ...(message && { message: message as unknown as SessionMessage }),
+        ...(output !== undefined && { output })
+      } as TurnResult;
+    }
     let receipt;
     if (wait.continuation) receipt = await session.continue();
     else {
