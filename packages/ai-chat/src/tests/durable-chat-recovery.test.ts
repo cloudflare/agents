@@ -324,21 +324,6 @@ async function getTestAgent(room: string): Promise<ChatRecoveryTestStub> {
  */
 const HELD_BACKOFF = { responseHeaders: { "retry-after": "60" } };
 
-/**
- * Wait until the cut-off turn's run is waiting out its recovery's backoff:
- * the turn's result comes back before its run gets there.
- */
-async function recoveryBacksOff(agentStub: {
-  backingOffChatTurnRunsForTest(): Promise<number>;
-}): Promise<void> {
-  await vi.waitFor(
-    async () => {
-      expect(await agentStub.backingOffChatTurnRunsForTest()).toBe(1);
-    },
-    { timeout: 10_000, interval: 20 }
-  );
-}
-
 describe("onChatRecovery", () => {
   function makeChunks(
     texts: string[],
