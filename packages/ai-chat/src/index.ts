@@ -1,4 +1,3 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   UIMessage,
   GenerateTextOnFinishCallback,
@@ -9,7 +8,6 @@ import {
   Agent,
   isPlatformTransientError,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
-  __DO_NOT_USE_WILL_BREAK__withInvocationScope as withInvocationScope,
   type AgentToolEventDelivery,
   type AgentToolLifecycleResult,
   type AgentToolMilestone,
@@ -48,53 +46,23 @@ import {
   requestContextFromLegacy,
   storableRequestContext,
   interruptedToolPartAsError,
-  type RepairedTranscriptSink,
-  createChatFiberSnapshot,
   unwrapChatFiberSnapshot,
   type OrphanPersistStore
 } from "agents/chat";
 import {
-  aiSdkRecoveryCodec,
-  ResumeHandshake,
-  releaseChatConnection,
   sendIfOpen,
-  ChatTurns,
   AgentToolRuns,
   createAgentToolRunStore,
-  takeReleasedChatAdmissions,
-  newUserMessageIds,
   clientResolvableToolNames,
-  chatRecoveryNames,
-  type ChatAdmissionRecord,
-  type ClientChatRequest,
-  ChatTurnFibers,
-  pinnedOr,
-  prepareTurnMessages,
-  toSaveMessagesResult,
-  type TurnFailureHost,
-  type ToolInteractionOutcome,
-  type ToolPartUpdate,
-  applyToolPartUpdate,
-  applyToolUpdate,
-  type TurnResult,
-  type MessagePart,
-  type ServerChatTurn,
-  type NormalizedMessageConcurrency
+  settleInterruptedReply,
+  type MessagePart
 } from "agents/chat";
 import {
   ChatFrames,
   createChatStreams,
-  mergeQueuedUserMessages,
   truncateProviderToolPayloads
 } from "agents/chat";
-import {
-  pumpReply,
-  ReplyStreams,
-  responseSource,
-  streamErrorText,
-  type ReplyInterruption,
-  type ReplyPumpHost
-} from "agents/chat";
+import { ReplyStreams } from "agents/chat";
 import type { Streams } from "agents/streams";
 import { Sessions, type Session } from "agents/sessions";
 import {
@@ -102,40 +70,21 @@ import {
   broadcastReachesUnlistedSockets,
   type ChatRecoveryAttemptInput,
   type ChatRecoveryTaskHooks,
-  chatRecoveryProgressReader,
-  chatRecoveryStorageAdapter,
   createChatRecoveryTaskDefinition,
   createChatTurnTaskDefinition,
   runAppStart,
   clearRecentChatTerminals,
-  recentChatTerminal,
-  recordRecentChatTerminal,
-  storedAsFacet,
-  type StreamInterruptionOutcome
+  storedAsFacet
 } from "agents/chat";
-import {
-  replyIsEmpty,
-  type ClientToolSchema,
-  type PinnedTurnContext,
-  type RecoveryLeafCheck,
-  type ReplyRemoval
-} from "agents/chat";
+import { type ClientToolSchema } from "agents/chat";
 import {
   resolveChatRecoveryConfig,
-  ChatRecoveryEngine,
-  runChatRecoveryExhaustion,
   isTurnStopped,
-  recordChatTerminal,
   clearChatTerminal,
-  pendingChatTerminal,
   buildChatRecoveringFrame,
   setChatRecovering,
-  AgentToolStreamProgressThrottle,
   isDurableObjectResetError,
-  type ChatRecoveryAdapter,
-  type ResolvedRecoveryStream,
-  type ChatRecoveryAttemptScope,
-  type ChatRecoveryIncident
+  type ResolvedRecoveryStream
 } from "agents/chat";
 import type {
   ChatResponseResult,
@@ -143,7 +92,6 @@ import type {
   ChatRecoveryContext,
   ChatRecoveryOptions,
   MessageConcurrency,
-  ResolvedChatRecoveryConfig,
   SaveMessagesOptions,
   SaveMessagesResult
 } from "agents/chat";
@@ -253,13 +201,6 @@ type ProgrammaticTurnOptions = SaveMessagesOptions & {
   clientTools?: ClientToolSchema[] | null;
 };
 
-type StreamResultStatus = {
-  status: Exclude<SaveMessagesResult["status"], "skipped">;
-  error?: string;
-  /** `"interrupted"` for a reply cut off and handed to recovery. */
-  reason?: SaveMessagesResult["reason"];
-};
-
 export type ChatMessage = UIMessage;
 
 /**
@@ -289,7 +230,6 @@ function isRecoverableStreamReadError(error: unknown): boolean {
  */
 export type { ClientToolSchema } from "agents/chat";
 
-type ChatRequestTrigger = "submit-message" | "regenerate-message";
 /**
  * Options passed to the onChatMessage handler.
  */
@@ -350,64 +290,11 @@ export { createToolsFromClientSchemas } from "agents/chat";
 /** The chat module's turn definition, as AIChatAgent registers it. */
 const CHAT_TURN_DEFINITION = "__cf_ai_chat_turn";
 
-/**
- * What `AIChatAgent` stores with a client request's admission record, to run
- * it again after an isolate reset. See `ChatTurns.resumeAdmissions`.
- */
-type StoredClientChatRequest = {
-  trigger: ChatRequestTrigger;
-  clientTools: ClientToolSchema[] | undefined;
-  body: Record<string, unknown>;
-  originMessageIds: string[] | undefined;
-  /** A regenerate: the messages the client sent. */
-  keepIds?: string[];
-  /** A regenerate: the stored user messages it did not send. */
-  storedUserIds?: string[];
-};
-
 export class AIChatAgent<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
   Props extends object = object
 > extends Agent<Env, State, Props> {
-  /**
-   * Set around every persist a turn makes: a client request's incoming
-   * messages and the turn's reply. Holds the turn's `isCurrent` check,
-   * which `persistMessages` reads before each write: `false` once the chat
-   * was reset since the turn was accepted. An async scope, so an app's
-   * `persistMessages` override need not pass anything along. The scope
-   * closes when that persist returns (`open`), so work it started that
-   * calls `persistMessages` later writes as any other call does.
-   */
-  private _turnPersistScope = new AsyncLocalStorage<{
-    isCurrent: () => boolean;
-    /** The messages are a client's copy (`keepStoredReplies`). */
-    clientCopy: boolean;
-    /**
-     * Messages a waiting request holds: they shape the reconcile (a
-     * client's stale copy is told apart by what follows it) and are left
-     * out of what is stored and broadcast. In the scope, so an override of
-     * `persistMessages` that does not pass its options on still holds them.
-     */
-    hold?: ReadonlySet<string>;
-    open: boolean;
-  }>();
-
-  /** Run a turn's persist inside {@link _turnPersistScope}. */
-  private async _persistForTurn<T>(
-    isCurrent: () => boolean,
-    clientCopy: boolean,
-    persist: () => Promise<T>,
-    hold?: ReadonlySet<string>
-  ): Promise<T> {
-    const scope = { isCurrent, clientCopy, hold, open: true };
-    try {
-      return await this._turnPersistScope.run(scope, persist);
-    } finally {
-      scope.open = false;
-    }
-  }
-
   /**
    * Registry of per-request AbortControllers.
    * Used to propagate cancellation signals for any external calls made by the agent.
@@ -490,6 +377,18 @@ export class AIChatAgent<
    */
   private _pendingResumeConnections: Set<string> = new Set();
 
+  /**
+   * The reply streams a release left (its stream tables, a stream cut off
+   * mid-reply): read only to carry that release's turn onto the chat's lane.
+   * Every turn since writes the chat module's stream.
+   */
+  private readonly _releasedStreams = new ReplyStreams({
+    streamStarted: () => {},
+    streamEnded: () => {},
+    originMessageIds: () => undefined,
+    transaction: (fn) => this.ctx.storage.transactionSync(fn)
+  });
+
   /** Where every chat frame to tabs goes out (the shared `ChatFrames`). */
   private readonly _frames = new ChatFrames({
     broadcast: (message, without) => this.broadcast(message, without),
@@ -500,9 +399,9 @@ export class AIChatAgent<
       this.broadcast !== AIChatAgent.prototype.broadcast,
     kv: this.ctx.storage.kv,
     resuming: this._pendingResumeConnections,
-    storedOriginIds: (requestId) =>
-      this._replyStreams.getOriginMessageIds(requestId),
-    recoveryOriginIds: () => this._chatRecoveryEngine().activeOriginMessageIds,
+    // Turns name their messages on their own frames (the chat module).
+    storedOriginIds: () => undefined,
+    recoveryOriginIds: () => undefined,
     clientView: (messages) => this._clientView(messages)
   });
 
@@ -631,15 +530,6 @@ export class AIChatAgent<
   }
 
   /**
-   * Load the last request context (the session's `transcript:chat:request`
-   * value). An agent from an earlier release kept it in
-   * `cf_ai_chat_request_context`: those rows are carried over once and the
-   * table dropped.
-   */
-  /** The carry-forward of an earlier release's rows, while it runs (tests await it). */
-  private _requestContextCarried: Promise<void> | undefined;
-
-  /**
    * The upgrade from a released version: each step turns rows that version
    * kept into the chat module's own, and drops them. Runs in the
    * constructor, before the Tasks capability starts runs, so a run it
@@ -657,10 +547,7 @@ export class AIChatAgent<
 
   private _restoreRequestContext(): void {
     const stored = this.#session.internal_configNow(CHAT_REQUEST_CONTEXT_KEY);
-    if (stored !== null) {
-      this._turns.restoreRequestContext(stored);
-      return;
-    }
+    if (stored !== null) return;
     let rows: Array<{ key: string; value: string }>;
     try {
       rows = this.ctx.storage.sql
@@ -684,11 +571,9 @@ export class AIChatAgent<
       value("lastClientTools"),
       value("lastBody")
     );
-    this._turns.restoreRequestContext(json);
-    // Written through the session once it is ready (one over the row budget
-    // stays in memory only); the old rows go either way, so a later clear
-    // cannot bring them back.
-    this._requestContextCarried = this.#session
+    // Written through the session once it is ready; the old rows go either
+    // way, so a later clear cannot bring them back.
+    void this.#session
       .internal_setConfig(
         CHAT_REQUEST_CONTEXT_KEY,
         storableRequestContext(json)
@@ -847,6 +732,14 @@ export class AIChatAgent<
 
   /** Deliveries of `onChatResponse` not finished yet: the chat is not stable. */
   private readonly _responseDeliveries = new Set<Promise<void>>();
+
+  /** True while `onChatResponse` runs: a turn the hook starts is delivered after it. */
+  private _insideResponseHook = false;
+
+  /** A stop's work goes on after the call that asked for it returns. */
+  private _holdForStop(settled: Promise<void>): void {
+    void this.keepAliveWhile(() => settled);
+  }
 
   /** `onChatResponse` results waiting for their turn to leave the lane. */
   private readonly _chatResponses: ChatResponseResult[] = [];
@@ -1254,13 +1147,15 @@ export class AIChatAgent<
         snapshotKey: "__cfAIChatFiberSnapshot",
         keepAliveWhile: (fn) => this.keepAliveWhile(fn),
         withStash: (context, fn) => this._withFiberStash(context, fn),
+        // Only a cut-off turn a release left runs here: it is carried onto
+        // the chat's lane. No release queued requests on this definition,
+        // and none of its runs park or back off here.
         recover: (turn) => this._recoverChatTurn(turn),
-        replay: (runId, record) => this._turns.replayInRun(runId, record),
-        parkUntil: (runId, reply) => this._turns.parkUntil(runId, reply),
-        laneHeldForRecovery: () => this._turns.laneHeldForRecovery(),
-        backingOff: (runId, requestId, waiting) =>
-          this._turns.backingOff(runId, requestId, waiting),
-        holdParksUntil: (reply) => this._turns.holdParksUntil(reply),
+        replay: async () => {},
+        parkUntil: () => {},
+        laneHeldForRecovery: () => false,
+        backingOff: () => {},
+        holdParksUntil: () => {},
         attempts
       })
     );
@@ -1329,21 +1224,14 @@ export class AIChatAgent<
         // that release left cut off.
         this._upgradeReleasedRows();
 
-        // Initialize resumable stream manager (creates its own tables + restores state)
-        this._withAgentSpan(
-          "initialize_resumable_stream",
-          "initialization",
-          { "cloudflare.agents.component": "ai_chat" },
-          () => {
-            this._replyStreams.open(this.streams, this.sql.bind(this), () =>
-              storedAsFacet(this.ctx.storage.kv)
-            );
-          }
+        // A reply stream a release left: its legacy tables imported, and a
+        // stream it left in flight found, for the carry of its turn.
+        this._releasedStreams.open(this.streams, this.sql.bind(this), () =>
+          storedAsFacet(this.ctx.storage.kv)
         );
-
         update({
           "cloudflare.agents.chat.active_stream.restored":
-            this._replyStreams.hasActiveStream()
+            this._releasedStreams.hasActiveStream()
         });
       }
     );
@@ -1374,12 +1262,7 @@ export class AIChatAgent<
           });
         }
       );
-      const started = await runAppStart(async () => _onStart(props));
-      // Requests an earlier isolate accepted and never started run again,
-      // once the app has started and no interrupted turn waits for recovery.
-      this._appStartedForAdmissions = true;
-      this._resumeAdmissions();
-      return started;
+      return runAppStart(async () => _onStart(props));
     };
 
     const _onConnect = this.onConnect.bind(this);
@@ -1427,11 +1310,6 @@ export class AIChatAgent<
       reason: string,
       wasClean: boolean
     ) => {
-      releaseChatConnection(
-        this._turns,
-        this._resumeHandshake(),
-        connection.id
-      );
       // The chat module forgets the tab: it waits for no stream.
       forgetTab(this._chatDeps(), connection.id);
       return _onClose(connection, code, reason, wasClean);
@@ -1505,7 +1383,7 @@ export class AIChatAgent<
    * @internal
    */
   protected async _persistOrphanedStream(streamId: string): Promise<void> {
-    await this._replyStreams.persistOrphan(streamId, {
+    await this._releasedStreams.persistOrphan(streamId, {
       store: this._orphanStore(),
       settle: (message) => this._settleInterruptedReply(message),
       // A stream from before #1691 recorded no id: it continued the last
@@ -1520,45 +1398,13 @@ export class AIChatAgent<
    * `settleInterruptedReply`): a call no client is known to own becomes an
    * errored result through {@link repairInterruptedToolPart}.
    */
-  private _settleInterruptedReply(
-    message: UIMessage,
-    requestId?: string
-  ): UIMessage {
-    // A turn that runs with pinned tools (a recovered turn, an agent-tool
-    // run) owns the client calls those tools name, not the stored ones.
-    const live =
-      requestId === undefined
-        ? undefined
-        : this._chatTurnFibers.requestContext(requestId);
-    const pinned =
-      live !== undefined && live.lastClientTools !== this._turns.lastClientTools
-        ? clientResolvableToolNames(live.lastClientTools ?? undefined)
-        : undefined;
-    return this._turns.settleInterruptedReply(
-      message,
-      (part) => this.repairInterruptedToolPart(part),
-      pinned
-    );
-  }
-
-  /**
-   * How a repaired transcript is stored and reported: one write and one
-   * broadcast through `persistMessages`, which also refreshes
-   * `this.messages`, then the `chat:transcript:repaired` event.
-   */
-  private _repairedTranscriptSink(): RepairedTranscriptSink {
-    return {
-      persist: async (_changed, repaired) => {
-        await this.persistMessages(repaired);
-      },
-      // `CF_AGENT_CHAT_MESSAGES` carries the whole list, so every tab
-      // drops what is no longer in it.
-      remove: async (ids) => {
-        await this._deleteMessagesByIds(ids);
-        this._frames.broadcastMessages(this._messagesForClientSync());
-      },
-      emitRepaired: (event) => this._emit("chat:transcript:repaired", event)
-    };
+  private _settleInterruptedReply(message: UIMessage): UIMessage {
+    return settleInterruptedReply(message, {
+      repairPart: (part) => this.repairInterruptedToolPart(part),
+      clientToolNames: clientResolvableToolNames(
+        this._requestContextNow().clientTools
+      )
+    });
   }
 
   /**
@@ -1612,70 +1458,10 @@ export class AIChatAgent<
     part: UIMessage["parts"][number]
   ): UIMessage["parts"][number] {
     return interruptedToolPartAsError(part, {
-      clientToolNames: this._turns.clientToolNames()
+      clientToolNames: clientResolvableToolNames(
+        this._requestContextNow().clientTools
+      )
     });
-  }
-
-  /**
-   * Transcript repair, run before EVERY inference chokepoint (live submit, tool
-   * auto-continuation, `continueLastTurn`, `saveMessages`/retry, and the chat
-   * recovery callbacks). An interrupted server-tool orphan is flipped to a
-   * settled (errored) result — via the shared `agents/chat`
-   * `ChatTurns.settleBeforeTurn`, the SAME logic `@cloudflare/think`
-   * runs before its own inference (`_assembleModelMessages`) — so the app's next
-   * `convertToModelMessages(this.messages)` doesn't 400 with
-   * `AI_MissingToolResultsError`. Because the app owns the inference call, the
-   * framework can't repair "inside" it the way Think does; it repairs
-   * `this.messages` at each point right before handing control to
-   * `onChatMessage` instead. This reaches the cases the recovery-only repair
-   * missed, including a mixed client+server orphan whose client replay drives
-   * an auto-continuation.
-   *
-   * Scope (the shared `repairTranscriptBeforeTurn` rule, one for both hosts):
-   * in a reply the conversation has moved past, every unanswered call is
-   * settled, whoever owns it, because the provider rejects a request that holds
-   * a call with no result. A turn that starts a new reply treats the last
-   * message the same way. A continuation turn keeps, in the message it
-   * continues, what a client is known to still answer: an `input-available`
-   * call for a tool the client sent a schema for, and an `approval-requested`
-   * call. The rule is per part, so a dead server orphan at the leaf is repaired
-   * whatever sits earlier in history.
-   *
-   * Repair only ever reshapes ASSISTANT tool parts; it never touches user
-   * messages, so per-channel policy carried on the user message's
-   * `metadata.channel` (re-resolved on wake) is structurally untouched. It is a
-   * no-op (no write, no broadcast) when nothing needs repair — the common case
-   * for a healthy transcript. When anything changes, the corrected transcript is
-   * persisted and broadcast through the normal `persistMessages` write path (one
-   * write, one broadcast), which also refreshes `this.messages`.
-   *
-   * @throws When a continuation turn kept a call a client still has to
-   *   answer: the turn has nothing to continue yet and must not call
-   *   `onChatMessage`.
-   * @internal
-   */
-  private async _repairInterruptedToolsBeforeTurn(options: {
-    continuation: boolean;
-  }): Promise<void> {
-    const repaired = await this._turns.settleBeforeTurn(
-      this.messages,
-      {
-        continuation: options.continuation,
-        repairPart: (part) => this.repairInterruptedToolPart(part)
-      },
-      this._repairedTranscriptSink()
-    );
-    // The rule holds where the request is built: this runs right before
-    // every `onChatMessage`. A continuation turn whose repair kept a call a
-    // client still has to answer has nothing to continue. Its entry points
-    // end such a turn first (`ChatTurns.continuationWaitsOnClient`). One
-    // that did not must not reach the model: the request would hold a call
-    // with no result.
-    if (repaired.keptToolCallIds.length > 0) {
-      throw new Error(
-        `[AIChatAgent] A continuation turn cannot call the model while its reply waits on a client for tool call(s) ${repaired.keptToolCallIds.join(", ")}.`
-      );
-    }
   }
 
   /**
@@ -1695,30 +1481,6 @@ export class AIChatAgent<
       await this.onError(e);
       throw e;
     }
-  }
-
-  private _messagesForClientSync(): readonly UIMessage[] {
-    const inFlight = this._turns.liveReply?.accumulator.toMessage() ?? null;
-    if (!inFlight || inFlight.parts.length === 0) {
-      return this.messages;
-    }
-
-    const existingIdx = this.messages.findIndex(
-      (message) => message.id === inFlight.id
-    );
-
-    if (existingIdx >= 0) {
-      return this.messages.map((message, idx) =>
-        idx === existingIdx ? inFlight : message
-      );
-    }
-
-    return [...this.messages, inFlight];
-  }
-
-  /** Whether a connection with this id is still attached. */
-  private _isConnectionPresent(connectionId: string): boolean {
-    return this.getConnection(connectionId) !== undefined;
   }
 
   /**
@@ -1827,11 +1589,7 @@ export class AIChatAgent<
     // client reconnects and runs the resume probe.
     await clearChatTerminal(this.ctx.storage);
     clearRecentChatTerminals(this.ctx.storage.kv);
-    this._replyStreams.clearAll();
-    this._pendingResumeConnections.clear();
-    this._preStream.releaseAwaiting();
-    this._preStream.reset();
-    this._turns.clearRequestContext();
+    this._releasedStreams.clearAll();
     // `clearMessages()` above emptied `this.messages` through the
     // change feed.
     this._frames.broadcast({ type: MessageType.CF_AGENT_CHAT_CLEAR }, [
@@ -1860,10 +1618,6 @@ export class AIChatAgent<
    * the built-in handler calls it automatically.
    */
   protected resetTurnState(): void {
-    this._mergeQueuedUserStartIndexByEpoch.delete(this._turnQueue.generation);
-    // Queue generation, abort controllers, submit concurrency, the tool-result
-    // apply chain, the continuation slots and barrier, and parked connections.
-    this._turns.reset();
     // The chat module's turns end as a clear ends them (nothing they stream
     // is kept), and agent-tool runs see a reset (SEAM: the clear count).
     this._chatClears++;
@@ -1871,7 +1625,7 @@ export class AIChatAgent<
       stopAllTurns(this._chatDeps(), this._chatLane(), CHAT_CLEARED)
     );
     this._agentToolRuns.chatReset();
-    this._pendingChatResponseResults.length = 0;
+    this._chatResponses.length = 0;
   }
 
   /**
@@ -1890,14 +1644,11 @@ export class AIChatAgent<
    */
   protected abortRequest(requestId: string, reason?: unknown): void {
     this._holdForStop(
-      Promise.all([
-        this._turns.cancel(requestId, reason),
-        cancelTurn(
-          this._chatDeps(),
-          requestId,
-          reason === undefined ? undefined : String(reason)
-        )
-      ]).then(() => {})
+      cancelTurn(
+        this._chatDeps(),
+        requestId,
+        reason === undefined ? undefined : String(reason)
+      ).then(() => {})
     );
   }
 
@@ -1922,12 +1673,7 @@ export class AIChatAgent<
   protected abortAllRequests(reason?: unknown): void {
     const deps = this._chatDeps();
     const why = reason === undefined ? undefined : String(reason);
-    this._holdForStop(
-      Promise.all([
-        this._turns.stopAll(reason),
-        stopAllTurns(deps, this._chatLane(), why)
-      ]).then(() => {})
-    );
+    this._holdForStop(stopAllTurns(deps, this._chatLane(), why).then(() => {}));
   }
 
   /**
@@ -1942,55 +1688,6 @@ export class AIChatAgent<
    */
   protected hasPendingClientInteraction(): boolean {
     return this.hasPendingInteraction();
-  }
-
-  /**
-   * How a turn that failed before it streamed reaches clients and the app.
-   * The turn core owns the order (`reportTurnFailure`): the event, the
-   * durable terminal record, then the error frame, for a client request and
-   * a continuation alike.
-   */
-  private _turnFailureHost(): TurnFailureHost<ChatMessage> {
-    return {
-      describe: ({ error }) => {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-        this._emit("message:error", { error: errorMessage });
-        return errorMessage;
-      },
-      recordTerminal: (requestId, errorMessage) =>
-        this._recordChatTerminal(requestId, errorMessage),
-      broadcast: (frame) =>
-        this._frames.broadcast({
-          ...frame,
-          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-        }),
-      // Called once the turn has left the queue, so the hook may start a
-      // turn of its own. It goes through the same guarded queue as every
-      // other result. The terminal record is written already.
-      respond: (result) => {
-        this._terminalRecordedResults.add(result);
-        this._pendingChatResponseResults.push(result);
-        return this._drainChatResponseResults();
-      }
-    };
-  }
-
-  /**
-   * Report a chat request whose turn failed before it streamed: a durable
-   * terminal record, so a client that reconnects learns the outcome too,
-   * then an error frame for the request.
-   */
-  private async _reportTurnFailure(
-    requestId: string,
-    error: unknown
-  ): Promise<void> {
-    await this._turns.reportTurnFailure(this._turnFailureHost(), {
-      requestId,
-      error,
-      continuation: false,
-      stage: "turn"
-    });
   }
 
   /**
@@ -2189,22 +1886,22 @@ export class AIChatAgent<
       await inContext();
       return;
     }
-    await this.keepAliveWhile(() =>
-      this._turnQueue.enqueue(
-        `detached-delivery:${crypto.randomUUID()}`,
-        // Mark the slot so `_injectDetachedNotification` knows it owns the active
-        // turn and can run a `react` reply INLINE (vs a foreign active turn,
-        // where inline would interleave and enqueue-await would deadlock).
-        async () => {
-          this._inSerializedDetachedDeliverySlot = true;
-          try {
-            await inContext();
-          } finally {
-            this._inSerializedDetachedDeliverySlot = false;
-          }
-        }
-      )
-    );
+    // Between turns: once the turns on the chat's lane have ended. The
+    // delivery holds no place on the lane, so a `react` reply it starts
+    // is a turn of its own that it may wait for.
+    await this.keepAliveWhile(async () => {
+      for (;;) {
+        const [open] = this._openChatTurns();
+        if (!open) break;
+        await this.tasks.wait(open.runId).catch(() => {});
+      }
+      this._inSerializedDetachedDeliverySlot = true;
+      try {
+        await inContext();
+      } finally {
+        this._inSerializedDetachedDeliverySlot = false;
+      }
+    });
   }
 
   /**
@@ -2253,10 +1950,7 @@ export class AIChatAgent<
         // `activeRequestId === turn requestId` invariant `saveMessages` relies
         // on). The ledger marks the slot delivered only after the reaction
         // completes, making the react turn eviction-safe too.
-        await this._runServerTurn(this._turnQueue.activeRequestId ?? nanoid(), {
-          continuation: false,
-          inline: true
-        });
+        await this._serverTurn({ trigger: "server" });
       } else if (this._openChatTurns().length > 0) {
         // Turns wait or run (perhaps the one this is called from): the
         // reaction is a server turn on the chat's lane, durable once
@@ -2570,27 +2264,6 @@ export class AIChatAgent<
    */
   static readonly CHAT_FIBER_NAME = "__cf_internal_chat_turn";
 
-  /** Per-isolate N9 throttle gate (shared `agents/chat` helper); reset per
-   *  isolate so the first forwarded chunk after a restart always credits. */
-  private _agentToolStreamProgress = new AgentToolStreamProgressThrottle();
-
-  /**
-   * N9: forwarding a sub-agent's chunks IS forward progress for this parent
-   * turn, so credit the parent's recovery progress marker — otherwise a parent
-   * whose turn merely `await`s a child banks no progress of its own and its
-   * no-progress window exhausts while the child is healthily streaming. The
-   * child's output goes to clients, not to this object's stream log, so the
-   * derived marker cannot see it; this is the one explicit credit left. Only
-   * invoked after a child actually produced output (see
-   * `_forwardAgentToolStream`), so a silent child still lets the parent exhaust.
-   * Throttled (and reset per isolate) so we never write storage per token.
-   */
-  protected override async _onAgentToolStreamProgress(): Promise<void> {
-    if (this._agentToolStreamProgress.shouldCredit(Date.now())) {
-      this._replyStreams.creditProgress();
-    }
-  }
-
   /**
    * Build the on-connect "recovering…" replay frame (#1620), or `null` when no
    * (non-stale) recovery is in progress. A client that connects between recovery
@@ -2680,9 +2353,9 @@ export class AIChatAgent<
       turn.persisted,
       "ai-chat-turn"
     );
-    const body = snapshot?.lastBody ?? this._turns.lastBody;
+    const body = snapshot?.lastBody ?? this._requestContextNow().body;
     const clientTools =
-      snapshot?.lastClientTools ?? this._turns.lastClientTools;
+      snapshot?.lastClientTools ?? this._requestContextNow().clientTools;
 
     // What the cut-off reply streamed is stored as the reply, as the
     // release stored an orphaned stream.
@@ -2698,7 +2371,7 @@ export class AIChatAgent<
       this._resolveAIChatRecoveryStream(requestId);
     if (streamId && streamStillActive) {
       await this._persistOrphanedStream(streamId);
-      this._replyStreams.complete(streamId);
+      this._releasedStreams.complete(streamId);
     }
     const leaf = await this.#session.getLatestLeaf();
 
@@ -2823,8 +2496,9 @@ export class AIChatAgent<
       this._frames.endUnstarted(null, requestId, "aborted");
       return;
     }
-    const body = data.lastBody ?? this._turns.lastBody;
-    const clientTools = data.lastClientTools ?? this._turns.lastClientTools;
+    const body = data.lastBody ?? this._requestContextNow().body;
+    const clientTools =
+      data.lastClientTools ?? this._requestContextNow().clientTools;
     const context = {
       ...(body !== undefined && body !== null && { body }),
       ...(clientTools !== undefined &&
@@ -2876,15 +2550,15 @@ export class AIChatAgent<
     let streamId = "";
     if (requestId) {
       streamId =
-        this._replyStreams.latestStreamInfoForRequest(requestId)?.id ?? "";
+        this._releasedStreams.latestStreamInfoForRequest(requestId)?.id ?? "";
     }
-    if (!streamId && this._replyStreams.hasActiveStream()) {
-      streamId = this._replyStreams.activeStreamId ?? "";
+    if (!streamId && this._releasedStreams.hasActiveStream()) {
+      streamId = this._releasedStreams.activeStreamId ?? "";
     }
     const streamStillActive = Boolean(
       streamId &&
-      this._replyStreams.hasActiveStream() &&
-      this._replyStreams.activeStreamId === streamId
+      this._releasedStreams.hasActiveStream() &&
+      this._releasedStreams.activeStreamId === streamId
     );
     return { streamId, streamStillActive };
   }
@@ -2921,20 +2595,6 @@ export class AIChatAgent<
   }
 
   /**
-   * The turn whose finished stream is waiting for its message write: the
-   * cutover rides on the instance, not on an argument, so a subclass that
-   * overrides {@link persistMessages} and calls `super` with only the
-   * messages still lands the message, the stream's settlement and the
-   * deletion of its rows in one transaction. Consumed by the first persist
-   * that carries the turn's message; cleared when the turn ends.
-   */
-  #pendingCutover: {
-    streamId: string;
-    messageId: string;
-    discard: boolean;
-  } | null = null;
-
-  /**
    * Store `messages` as the transcript and broadcast it to every tab except
    * `excludeBroadcastIds`. A message whose stored copy is the same is not
    * written again. Override it to see or change what is stored; call
@@ -2957,63 +2617,17 @@ export class AIChatAgent<
     /** @internal */
     options?: { _deleteStaleRows?: boolean }
   ) {
-    const scope = this._turnPersistScope.getStore();
-    const turn = scope?.open ? scope : undefined;
-    // A turn admitted before the chat was cleared: writing its messages now
-    // would put the cleared history back.
-    const reset = (): boolean => turn?.isCurrent() === false;
-    if (reset()) return;
     // Snapshot the pre-write transcript: `this.messages` is mirrored from the
     // change feed and therefore mutates as the writes below land.
     const priorMessages = [...this.messages];
     const { merged: mergedMessages, toWrite } = planPersist(
       messages,
       priorMessages,
-      (message) => this._sanitizeMessageForPersistence(message),
-      turn
+      (message) => this._sanitizeMessageForPersistence(message)
     );
-    // The cutover: a persist that carries the finished turn's message
-    // lands every changed message in the same transaction that settles the
-    // stream and drops its rows. A persist of other messages (an override
-    // writing its own first) takes the plain path and leaves the cutover
-    // pending. The change feed (and auto-compaction) run once the
-    // transaction has committed.
-    const cutover = this.#pendingCutover;
-    if (
-      cutover &&
-      mergedMessages.some((message) => message.id === cutover.messageId)
-    ) {
-      // One transaction, with no await before it: checked once.
-      if (reset()) return;
-      this.#pendingCutover = null;
-      const sync = this.#session.__DO_NOT_USE_WILL_BREAK__sync();
-      const afters: Array<() => Promise<void>> = [];
-      try {
-        this._replyStreams.cutover(
-          cutover.streamId,
-          () => {
-            for (const message of toWrite)
-              afters.push(sync.upsert(message).after);
-          },
-          { discard: cutover.discard }
-        );
-      } catch (error) {
-        // The settle transaction rolled back: no row landed, but the
-        // session's in-memory caches already counted the writes.
-        sync.abandon();
-        throw error;
-      }
-      for (const after of afters) await after();
-    } else {
-      // Checked before each write: one can await (auto-compaction calls a
-      // model), and a clear can land in that wait.
-      for (const message of toWrite) {
-        if (reset()) return;
-        await this.#session.upsertMessage(message);
-      }
+    for (const message of toWrite) {
+      await this.#session.upsertMessage(message);
     }
-
-    if (reset()) return;
     if (options?._deleteStaleRows) {
       await this._deleteMessagesByIds(
         staleMessageIds(mergedMessages, priorMessages, this.messages)
@@ -3081,101 +2695,10 @@ export class AIChatAgent<
   }
 
   /**
-   * Apply a tool result, approval or replayed server result to its part with
-   * the shared `applyToolPartUpdate`: in the reply in flight (a result can
-   * arrive while the model streams, or while the finished reply is being
-   * stored) and in the stored transcript. A repeat leaves the part as it was
-   * and is neither written nor broadcast.
-   */
-  private _applyToolPartUpdate(
-    update: ToolPartUpdate
-  ): Promise<ToolInteractionOutcome> {
-    const live = this._turns.liveReply;
-    // The stored copy of the reply in flight first, then, for an update
-    // that names its approval, the newest reply whose part it matches (a
-    // provider can reuse a tool-call id across replies), then the newest
-    // reply holding the call.
-    const ownerOf = (
-      toolCallId: string,
-      inFlightId: string | undefined,
-      wanted: ToolPartUpdate
-    ): UIMessage | null => {
-      const holds = (message: UIMessage) =>
-        message.role === "assistant" &&
-        message.parts.some(
-          (part) => "toolCallId" in part && part.toolCallId === toolCallId
-        );
-      const matches = (message: UIMessage) =>
-        holds(message) &&
-        applyToolUpdate(
-          message.parts as unknown as Array<Record<string, unknown>>,
-          wanted
-        ) !== null;
-      if (inFlightId !== undefined) {
-        const own = this.messages.find(
-          (message) => message.id === inFlightId && holds(message)
-        );
-        if (own) return own;
-      }
-      // Search by match only when the update names its approval: a
-      // decision without an approval id (an older client) repeated after it
-      // was stored must not skip the answered request and land on an older
-      // one with the same tool-call id.
-      if (wanted.approvalId !== undefined) {
-        for (let i = this.messages.length - 1; i >= 0; i--) {
-          if (matches(this.messages[i])) return this.messages[i];
-        }
-      }
-      for (let i = this.messages.length - 1; i >= 0; i--) {
-        if (holds(this.messages[i])) return this.messages[i];
-      }
-      return null;
-    };
-    return applyToolPartUpdate<UIMessage>(update, {
-      inFlight: live
-        ? {
-            id: live.accumulator.messageId,
-            // The accumulator's own parts: the apply writes into them.
-            parts: live.accumulator.parts as unknown as Array<
-              Record<string, unknown>
-            >,
-            snapshot: () => live.accumulator.toMessage(),
-            // A reply that is being stored may already have been written
-            // without this change: `pumpReply` stores it again.
-            changed: () => live.changed()
-          }
-        : null,
-      storedOwner: async (toolCallId, inFlightId, wanted) =>
-        ownerOf(toolCallId, inFlightId, wanted),
-      write: async (message) => {
-        const sanitized = this._sanitizeMessageForPersistence(message);
-        // The change feed patches `this.messages`. A `null` result means the
-        // row is not in storage (nothing to mirror), so patch the live view
-        // directly to keep the in-memory transcript consistent.
-        const stored = await this.#session.updateMessage(sanitized);
-        const index = this.messages.findIndex(
-          (candidate) => candidate.id === sanitized.id
-        );
-        if (!stored && index !== -1) {
-          this.messages[index] = autoTransformMessages([sanitized])[0];
-        }
-        return index !== -1 ? this.messages[index] : sanitized;
-      },
-      broadcast: (message) =>
-        this._frames.broadcast({
-          type: MessageType.CF_AGENT_MESSAGE_UPDATED,
-          message
-        })
-    });
-  }
-
-  /**
    * When the DO is destroyed, cancel all pending requests and clean up resources
    */
   async destroy() {
-    for (const controller of this._turns.aborts.values()) controller.abort();
-    this._turns.aborts.clear();
-    this._replyStreams.destroy();
+    this._releasedStreams.destroy();
     await super.destroy();
   }
 }
