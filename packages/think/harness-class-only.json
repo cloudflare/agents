@@ -43,5 +43,86 @@
       "file": "hooks.test.ts",
       "test": "Think — host bridge methods > sends a client the transcript addMessages changes outside a turn, before and after one"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — dynamic configuration > should not let legacy config overwrite newer think_config values on rerun",
+    "reason": "Reruns the legacy config lift through Think's private _migrateLegacyConfigToThinkTable seam.",
+    "successor": {
+      "file": "think-session.test.ts",
+      "test": "Think — dynamic configuration > keeps newer config when a restart lifts the legacy row again"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — context blocks > should use context blocks in system prompt assembly even when called directly",
+    "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
+    "successor": {
+      "file": "think-session.test.ts",
+      "test": "Think — the system prompt a turn sends > sends the context blocks, loaded on their own"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — context blocks > should render empty writable blocks in system prompt",
+    "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
+    "successor": {
+      "file": "think-session.test.ts",
+      "test": "Think — the system prompt a turn sends > sends an empty writable block"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — context blocks > keeps Think's default prompt out when a skills agent does not override getSystemPrompt",
+    "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
+    "successor": {
+      "file": "think-session.test.ts",
+      "test": "Think — the system prompt a turn sends > sends the skill catalog without Think's default prompt when getSystemPrompt is not overridden"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — context blocks > puts an overridden getSystemPrompt above the skills block",
+    "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
+    "successor": {
+      "file": "think-session.test.ts",
+      "test": "Think — the system prompt a turn sends > sends an overridden getSystemPrompt above the skill catalog"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — context blocks > keeps an inherited or class-field getSystemPrompt alongside skills",
+    "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
+    "successor": {
+      "file": "think-session.test.ts",
+      "test": "Think — the system prompt a turn sends > sends an inherited or class-field getSystemPrompt above the skill catalog"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — context blocks > loads skills from files in the Workspace and follows edits without rebuilding the prompt",
+    "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
+    "successor": {
+      "file": "think-session.test.ts",
+      "test": "Think — the system prompt a turn sends > keeps the system prompt the same while Workspace skills change"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — context blocks > folds a changed skills catalog into the prompt when history is cleared",
+    "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
+    "successor": {
+      "file": "think-session.test.ts",
+      "test": "Think — the system prompt a turn sends > folds a changed skill catalog into the system prompt once history is cleared"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — async configureSession > should have working context blocks from async config",
+    "reason": "Reads the base prompt through Think's private _buildBaseSystemPrompt seam, without a turn.",
+    "successor": {
+      "file": "think-session.test.ts",
+      "test": "Think — the system prompt a turn sends > sends the context blocks of an async configureSession"
+    }
   }
 ]
