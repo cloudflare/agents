@@ -214,14 +214,15 @@ export function messengerChannels(options: {
       turn.outcome === "failed" ? "interrupted" : "completed",
       text
     );
+    // A new delivery: its first attempt runs now, so the webhook that
+    // waits on it holds the thread until the reply is posted.
     await sendDelivery(
       options.tasks,
       RECOVERED_REPLY_SINK,
       recoveredReplyId(`retried:${turn.startedBy}`),
       claim,
+      undefined,
       {
-        sentAt: Date.now(),
-        attempts: 0,
         progress: {
           outcome: outcome.outcome,
           ...(outcome.text !== undefined && { text: outcome.text })
@@ -441,18 +442,21 @@ export function messengerChannels(options: {
       event && definitions.find((d) => d.id === event.messengerId);
     if (snapshot && event && definition) {
       const mode = messengerReplyRecoveryMode(snapshot.stage);
-      if (mode === "answer") await answer(definition, event);
-      if (mode === "apologize") {
-        await chat().initialize();
-        await definition.adapter.postMessage(event.thread.id, {
-          markdown:
-            definition.delivery?.interruptedResponseText ??
-            INTERRUPTED_MESSENGER_RESPONSE
-        });
+      try {
+        if (mode === "answer") await answer(definition, event);
+        if (mode === "apologize") {
+          await chat().initialize();
+          await definition.adapter.postMessage(event.thread.id, {
+            markdown:
+              definition.delivery?.interruptedResponseText ??
+              INTERRUPTED_MESSENGER_RESPONSE
+          });
+        }
+      } finally {
+        // As Think does after recovering a reply, even one that failed:
+        // what queued behind it is answered, whatever the reply's stage.
+        drainThread(definition, event.thread.id);
       }
-      // As Think does after recovering a reply: what queued behind it is
-      // answered, whatever the reply's stage.
-      drainThread(definition, event.thread.id);
     }
     await options.storage.delete(key);
   });
@@ -468,10 +472,11 @@ export function messengerChannels(options: {
     }
   });
 
-  // TEMPORARY: remove in the next minor. A recovered reply think@0.24.0
-  // kept is posted as Think posts it: the rest of a settled one, from its
-  // cursor, and the apology for one left unsettled, since the previous
-  // engine's recovery that would settle it does not run after the move.
+  // A recovered reply is posted as Think posts it: the rest of the answer,
+  // from its cursor, the apology, or the empty-response text. A reply whose
+  // model call was tried again posts through it (`postRetried`), and so do
+  // the replies think@0.24.0 kept (TEMPORARY: that import goes in the next
+  // minor; this sink stays).
   registerDeliverySink(
     options.tasks,
     RECOVERED_REPLY_SINK,

@@ -903,6 +903,10 @@ export class Think<
           // A turn that never ran has no response: one stopped while it
           // waited, or input the harness turned away before a model call (a
           // tool result no call waits for, an empty or unknown operation).
+          // Its messenger context, for its response hook; forgotten here,
+          // whichever way the hook ends.
+          const responding = this.#responseContexts.get(end.operationId);
+          this.#responseContexts.delete(end.operationId);
           const stoppedByCaller = this.#callerStops.delete(end.operationId);
           // As on Think, a turn the chat was cleared under, running or
           // waiting, gets no response hook. Its `chat()` caller is told of
@@ -940,9 +944,7 @@ export class Think<
               error
             });
           }
-          this.#respondingContext = this.#messengers
-            ? await this.#latestMessengerContext()
-            : undefined;
+          this.#respondingContext = responding;
           try {
             await this.onChatResponse({
               // As on Think, a turn that ended before it wrote anything still
@@ -2151,28 +2153,20 @@ export class Think<
   /** The messenger context of the turn whose `onChatResponse` runs. */
   #respondingContext: MessengerContext | undefined;
 
-  /** A message's messenger context, if a messenger's channel is stamped on it. */
+  /**
+   * A message's messenger context, trusted only when the server stamped its
+   * messenger's channel on it (a client's write cannot set the channel).
+   */
   #trustedMessengerOf(
     message: UIMessage | undefined
   ): MessengerContext | undefined {
+    const context = messengerOf(message);
     const channel = message ? channelFromMessages([message]) : undefined;
-    if (channel === undefined) return undefined;
-    const kind = this.#channels?.get(channel)?.kind;
-    const messenger =
-      kind === "messenger" || this.#messengers?.ids.includes(channel);
-    return messenger ? messengerOf(message) : undefined;
+    return context && channel === context.messengerId ? context : undefined;
   }
 
-  /** The latest user message's trusted messenger context, as stored. */
-  async #latestMessengerContext(): Promise<MessengerContext | undefined> {
-    const user = [...this.#transcript.messages]
-      .reverse()
-      .find((message) => message.role === "user");
-    if (!user) return undefined;
-    // Read again: a stamp written at the turn's start may be newer.
-    const stored = await (await this.#rootHandle()).getMessage(user.id);
-    return this.#trustedMessengerOf((stored as UIMessage | null) ?? user);
-  }
+  /** Each turn's messenger context, kept for its response hook. */
+  #responseContexts = new Map<string, MessengerContext>();
 
   /**
    * Run a turn for a messenger event, as on Think: the context is kept on
@@ -3105,7 +3099,10 @@ export class Think<
       // A message's own context is trusted only on a messenger's channel,
       // which only the server stamps: a browser cannot claim a sender.
       const context = this.#trustedMessengerOf(user) ?? webhook;
-      if (context) this.#messengerContexts.set(turn.operationId, context);
+      if (context) {
+        this.#messengerContexts.set(turn.operationId, context);
+        this.#responseContexts.set(turn.operationId, context);
+      }
       if (messenger !== undefined && user) {
         channel = messenger;
         await this.#stamp(
