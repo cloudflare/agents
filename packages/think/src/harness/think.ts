@@ -1859,6 +1859,18 @@ export class Think<
     });
   }
 
+  /**
+   * As on Think: a turn that waits for its own reply cannot be asked for
+   * from inside this agent's running turn, which it would wait behind.
+   */
+  #assertNotInsideTurn(trigger: TurnTrigger): void {
+    if (this.harness.insideOperation(this.harness.session().id) === undefined)
+      return;
+    throw new Error(
+      `Think turn admission (${trigger}) cannot be called from inside an active turn; use runTurn({ mode: "submit" }) or addMessages() instead, and do not waitForSubmission() on it from inside the turn`
+    );
+  }
+
   /** A new operation id for a turn a method call asks for (`programmatic`). */
   #programmaticTurn(): string {
     const operationId = crypto.randomUUID();
@@ -2057,6 +2069,7 @@ export class Think<
       | ((current: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>),
     options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
+    this.#assertNotInsideTurn("programmatic");
     // As on Think: a turn stopped before it starts builds and stores nothing.
     const cut = await this.#cutOffByStop(options?.signal);
     if (cut) return cutOffBeforeStart(cut);
@@ -2110,6 +2123,7 @@ export class Think<
         "Think.continueLastTurn with a body is not supported by the harness-backed Think yet"
       );
     }
+    this.#assertNotInsideTurn("programmatic");
     // As on Think: with no assistant message to continue, nothing runs.
     await this.#sync();
     if (this.#transcript.messages.at(-1)?.role !== "assistant") {
@@ -2550,6 +2564,7 @@ export class Think<
     ) {
       return { requestId: "", status: "skipped", continuation: false };
     }
+    this.#assertNotInsideTurn("programmatic");
     // As saveMessages: a turn stopped before it starts builds nothing.
     const cut = await this.#cutOffByStop(wait.signal);
     if (cut) {
@@ -2870,6 +2885,7 @@ export class Think<
     callback: StreamCallback,
     options?: ChatOptions
   ): Promise<void> {
+    this.#assertNotInsideTurn("rpc");
     const cut = await this.#cutOffByStop(options?.signal);
     const operationId = crypto.randomUUID();
     if (cut) {
