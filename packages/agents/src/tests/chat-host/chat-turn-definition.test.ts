@@ -9,6 +9,7 @@ import {
   runningChatTurn
 } from "../../chat/chat-host";
 import type { TaskStep } from "../../tasks/types";
+import { stashCurrentFiber } from "../../fiber-runs";
 import { TaskSettlement } from "../../tasks/settlement";
 import { TaskCancellation } from "../../tasks/replay";
 import type { ChatHost } from "../../chat/chat-host";
@@ -1183,6 +1184,119 @@ describe("chatTurnDefinition", () => {
         laterAttempt("g-1", 1)
       );
       expect(instance.calls[0].messages.map((m) => m.id)).toEqual(["u1"]);
+    });
+  });
+
+  it("keeps what the turn stashed in its run and hands it to the recovery of a later attempt", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      expect(() => stashCurrentFiber("outside")).toThrow(/outside a fiber/);
+      // The first attempt stashes from respond, as a hook in it would.
+      const checkpoint = new Map<string, unknown>();
+      let kept: Map<string, unknown> | undefined;
+      await definitionOf(instance, {
+        ...instance.host,
+        respond: async (call) => {
+          stashCurrentFiber({ notes: "the turn's own notes" });
+          // As the run's checkpoint holds it, should the attempt be cut off.
+          kept = new Map(checkpoint);
+          return instance.host.respond(call);
+        }
+      })(
+        { trigger: "submit-message" },
+        laterAttempt("run-s", 1, undefined, checkpoint)
+      );
+      // The turn completed: nothing will recover it, so its stash is gone.
+      expect(checkpoint.get("chat:stash")).toBeNull();
+      // While it ran, the run's checkpoint held it: a later attempt of a
+      // turn cut off there finds it.
+      expect(kept?.get("chat:stash")).toEqual({
+        notes: "the turn's own notes"
+      });
+      await cutOff(instance, "run-s2");
+      const seen: unknown[] = [];
+      await definitionOf(instance, {
+        ...instance.host,
+        hooks: {
+          onRecovery: (context) => void seen.push(context.recoveryData)
+        }
+      })(
+        { trigger: "submit-message" },
+        laterAttempt("run-s2", 2, undefined, kept ?? new Map())
+      );
+      expect(seen).toEqual([{ notes: "the turn's own notes" }]);
+    });
+  });
+
+  it("keeps what the chunk hook stashes, as the reply streams", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const checkpoint = new Map<string, unknown>();
+      const seen: unknown[] = [];
+      await definitionOf(instance, {
+        ...instance.host,
+        hooks: {
+          transformChunk: (chunk) => {
+            if (chunk.type === "text-delta") {
+              stashCurrentFiber(chunk.delta);
+              seen.push(checkpoint.get("chat:stash"));
+            }
+            return chunk;
+          }
+        }
+      })(
+        { trigger: "submit-message" },
+        laterAttempt("run-c", 1, undefined, checkpoint)
+      );
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen).toEqual(seen.map(() => expect.any(String)));
+    });
+  });
+
+  it("hands a recovery null for a turn that stashed nothing", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await cutOff(instance, "run-n");
+      const seen: unknown[] = [];
+      await definitionOf(instance, {
+        ...instance.host,
+        hooks: {
+          onRecovery: (context) => void seen.push(context.recoveryData)
+        }
+      })({ trigger: "submit-message" }, laterAttempt("run-n", 2));
+      expect(seen).toEqual([null]);
+    });
+  });
+
+  it("keeps a partial that holds a settled tool result although onRecovery says not to keep it", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      // Cut off after a tool ran: its result is work that must not run again.
+      const cut = await instance.streams.open(chatTurnStreamId("run-t"), {
+        tag: "run-t"
+      });
+      for (const chunk of [
+        { type: "start", messageId: "a1" },
+        {
+          type: "tool-input-available",
+          toolCallId: "t1",
+          toolName: "charge",
+          input: {}
+        },
+        { type: "tool-output-available", toolCallId: "t1", output: "charged" }
+      ]) {
+        cut.append(chunk as never);
+      }
+      await definitionOf(instance, {
+        ...instance.host,
+        hooks: { onRecovery: () => ({ continue: true, persist: false }) }
+      })({ trigger: "submit-message" }, laterAttempt("run-t", 2));
+      // The model is asked to continue the reply that holds the result.
+      expect(instance.calls[0]).toMatchObject({ mode: "continue" });
+      expect(JSON.stringify(instance.calls[0].messages)).toContain("charged");
     });
   });
 

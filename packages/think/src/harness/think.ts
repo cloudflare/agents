@@ -12,13 +12,15 @@ import {
   type Connection,
   type ConnectionContext,
   type WSMessage,
-  callable
+  callable,
+  isPlatformTransientError
 } from "agents";
 import {
   DEFAULT_CHAT_RECOVERY_MAX_ATTEMPTS,
   unexecutedToolNames,
   type ChatRecoveryConfig,
   type ChatRecoveryContext,
+  type ChatRecoveryExhaustedContext,
   type ChatRecoveryOptions
 } from "agents/chat";
 import type {
@@ -2433,6 +2435,14 @@ export class Think<
     if (wait.input === undefined && !wait.continuation) {
       throw new TypeError("runTurn: supply either input or continuation: true");
     }
+    // As saveMessages: a turn stopped before it starts builds nothing.
+    const cut = await this.#cutOffByStop(wait.signal);
+    if (cut) {
+      return {
+        ...cutOffBeforeStart(cut),
+        continuation: wait.continuation === true
+      };
+    }
     const session = this.harness.session();
     let receipt;
     if (wait.continuation) receipt = await this.#continue(wait.channel);
@@ -2971,8 +2981,19 @@ export class Think<
       this.#turnStallTimeoutMs ?? this.chatStreamStallTimeoutMs;
     // Think's released config, as it is: the turn definition's recovery
     // budget honours its fields.
-    if (config === true) return { stallTimeoutMs };
-    const { onExhausted, shouldKeepRecovering } = config;
+    const onExhausted = config === true ? undefined : config.onExhausted;
+    // A give-up is announced, then the app is told, as on Think. The
+    // definition names a turn by its run; an app knows it by its request
+    // (the operation) id.
+    const exhausted = (ctx: ChatRecoveryExhaustedContext) => {
+      const event = withOperationIds(ctx);
+      this._emit("chat:recovery:exhausted", event);
+      return onExhausted?.(event);
+    };
+    if (config === true) {
+      return { stallTimeoutMs, chatRecovery: { onExhausted: exhausted } };
+    }
+    const { shouldKeepRecovering } = config;
     return {
       ...(config.maxAttempts !== undefined && {
         maxAttempts: config.maxAttempts
@@ -2980,11 +3001,7 @@ export class Think<
       stallTimeoutMs,
       chatRecovery: {
         ...config,
-        // The definition names a turn by its run; an app knows it by its
-        // request (the operation) id, as on Think.
-        ...(onExhausted && {
-          onExhausted: (ctx) => onExhausted(withOperationIds(ctx))
-        }),
+        onExhausted: exhausted,
         ...(shouldKeepRecovering && {
           shouldKeepRecovering: (ctx) =>
             shouldKeepRecovering(withOperationIds(ctx))
@@ -2997,7 +3014,8 @@ export class Think<
     readonly operationId: string;
     readonly attempt: number;
     readonly partial: UIMessage | undefined;
-  }): Promise<"continue" | "abandon"> {
+    readonly recoveryData?: unknown;
+  }): Promise<"continue" | "abandon" | ChatRecoveryOptions> {
     // As on Think: a submission cut off by a reset whose turn started
     // longer ago than the stale window is not recovered. It ends `error`.
     // An attempt that already asked the model in this isolate is a live
@@ -3034,13 +3052,18 @@ export class Think<
         .flatMap((part) => (part.type === "text" ? [part.text] : []))
         .join(""),
       partialParts: parts,
-      recoveryData: null,
+      recoveryData: context.recoveryData ?? null,
       messages: [...this.messages],
       // When the turn started, as Think gives it (not its time in the
       // queue), so an app can refuse stale work.
       createdAt: await this.#turnStartedAt(context.operationId)
     });
-    return decision?.continue === false ? "abandon" : "continue";
+    // The app's answer goes to the turn definition as given: it drops the
+    // partial for `persist: false`, as Think's recovery does.
+    if (decision?.continue !== false && decision?.persist !== false) {
+      return "continue";
+    }
+    return { continue: decision.continue, persist: decision.persist };
   }
 
   async #turnStartedAt(operationId: string): Promise<number> {
@@ -3525,11 +3548,17 @@ export class Think<
 
   #classify(error: unknown): ThinkErrorClass {
     const classification = this.classifyChatError(error);
-    return classification === "context_overflow"
-      ? "context-overflow"
-      : classification === "transient"
-        ? "retry"
-        : "fail";
+    if (classification === "context_overflow") return "context-overflow";
+    // As on Think: a transient or rate-limited error is tried again within
+    // chatRecovery's budget. An app's own classification wins; without one,
+    // a platform transient (a lost connection) is tried again too.
+    if (classification === "transient" || classification === "rate_limit") {
+      return "retry";
+    }
+    if (classification === undefined && isPlatformTransientError(error)) {
+      return "retry";
+    }
+    return "fail";
   }
 
   /** The root session's Sessions handle, which the harness hands over on first use. */
@@ -3808,8 +3837,12 @@ export class Think<
   ): Promise<AgentToolStoredChunk[]> {
     const session = this.harness.session().id;
     const operationId = agentToolOperationId(runId);
-    let chunks = await this.harness.operationChunks(session, operationId);
-    if (chunks.length === 0) {
+    const stored = await this.harness.operationChunks(session, operationId);
+    // Numbered by stream position: what recovery discarded is left out, and
+    // the rest keep their places.
+    let first = stored.first;
+    let chunks = stored.chunks;
+    if (chunks.length === 0 && first === 0) {
       // Settled: the reply is stored and its stream gone. A replay from the
       // start gets the reply; a reader with a position saw it live.
       if (afterSequence >= 0) return [];
@@ -3822,7 +3855,10 @@ export class Think<
       chunks = message ? chunksOfMessage(message) : [];
     }
     return chunks
-      .map((chunk, sequence) => ({ sequence, body: JSON.stringify(chunk) }))
+      .map((chunk, at) => ({
+        sequence: first + at,
+        body: JSON.stringify(chunk)
+      }))
       .filter((chunk) => chunk.sequence > afterSequence);
   }
 
@@ -3889,6 +3925,8 @@ export class Think<
           }
         );
         follow = followed;
+        // Positions recovery discarded are skipped, not renumbered.
+        next = followed.first;
         for (const chunk of followed.chunks) emit(chunk);
         onAbort = close;
         if (signal?.aborted) return close();

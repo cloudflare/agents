@@ -37,6 +37,13 @@ const MULTIPLY_RUNS_KEY = "test:multiply:runs";
 const TOOL_ATTEMPTS_KEY = "test:tool-attempts";
 const THROW_AFTER_KEY = "test:throw-after";
 const RECOVERY_PARTIAL_KEY = "test:recovery:partial";
+/** What `onRecovery` answers, once a test sets it. */
+const RECOVERY_ANSWER_KEY = "test:recovery:answer";
+/** The `beforeTurn` call (1-based) that throws, once a test sets it. */
+const THROW_AT_KEY = "test:before-turn:throw-at";
+const BEFORE_TURN_CALLS_KEY = "test:before-turn:calls";
+/** `operationChunks` and `followOperation` lengths at each `beforeTurn`. */
+const OPERATION_CHUNKS_KEY = "test:before-turn:operation-chunks";
 const SYSTEM_KEY = "test:system";
 const NOTE_IN_BEFORE_TURN_KEY = "test:note-in-before-turn";
 const ACTIVE_TOOLS_KEY = "test:active-tools";
@@ -299,12 +306,58 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       this.ctx.storage.kv.put(SUBMISSION_STATUS_KEY, seen);
     },
     hooks: {
-      classifyError: classifyContextOverflow,
+      // An app's own classifier that ends a lost connection, when asked.
+      classifyError: (error) =>
+        this.ctx.storage.kv.get<boolean>(FATAL_CLASSIFIER_KEY)
+          ? "fail"
+          : classifyContextOverflow(error),
       onRecovery: ({ partial }) => {
         this.ctx.storage.kv.put(RECOVERY_PARTIAL_KEY, partial?.id ?? null);
-        return "continue";
+        if (this.ctx.storage.kv.get<boolean>(ABANDON_KEY)) return "abandon";
+        // What a test set, first.
+        const answer = this.ctx.storage.kv.get<{ persist?: boolean }>(
+          RECOVERY_ANSWER_KEY
+        );
+        if (answer) return answer;
+        // Given up at the n-th interruption, when asked.
+        const left = this.ctx.storage.kv.get<number>(ABANDON_AT_KEY);
+        if (left === undefined) return "continue";
+        this.ctx.storage.kv.put(ABANDON_AT_KEY, left - 1);
+        return left <= 1 ? "abandon" : "continue";
       },
-      beforeTurn: async ({ toolSet, session, system: built, signal }) => {
+      beforeTurn: async ({
+        toolSet,
+        session,
+        operationId,
+        system: built,
+        signal
+      }) => {
+        // A platform blip while the call is prepared, once.
+        if (this.ctx.storage.kv.get<boolean>(PREPARE_BLIP_KEY)) {
+          this.ctx.storage.kv.put(PREPARE_BLIP_KEY, false);
+          throw new Error("Network connection lost.");
+        }
+        const calls =
+          (this.ctx.storage.kv.get<number>(BEFORE_TURN_CALLS_KEY) ?? 0) + 1;
+        this.ctx.storage.kv.put(BEFORE_TURN_CALLS_KEY, calls);
+        // What an agent-tool reader of this operation is handed as each
+        // call begins: the position of its first chunk, and how many.
+        const stored = await this.harness.operationChunks(session, operationId);
+        const followed = this.harness.followOperation(
+          session,
+          operationId,
+          () => {}
+        );
+        followed.stop();
+        this.ctx.storage.kv.put(`${OPERATION_CHUNKS_KEY}:${calls}`, [
+          stored.first,
+          stored.chunks.length,
+          followed.first,
+          followed.chunks.length
+        ]);
+        if (this.ctx.storage.kv.get<number>(THROW_AT_KEY) === calls) {
+          throw new Error("beforeTurn failed");
+        }
         // A hook that waits on I/O, given the operation's signal.
         if (this.ctx.storage.kv.get<boolean>(WAIT_ON_SIGNAL_KEY)) {
           this.ctx.storage.kv.put(SIGNAL_SEEN_KEY, "waiting");
@@ -440,6 +493,9 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     .use(this.webSockets)
     .use(this.chat);
 
+  #transientThrown = false;
+  #stalledEmpty = false;
+
   #reply(prompt: PromptMessage[]): ReadableStream<StreamPart> {
     const last = prompt.filter((m) => m.role !== "system").at(-1);
     let parts: StreamPart[];
@@ -543,7 +599,21 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         parts = callReply([
           { name: "ask", input: { question: "again?" }, id: "reused-call" }
         ]);
-      } else if (text === "stall in safe input") {
+      } else if (text === "stall empty, then in input" && !this.#stalledEmpty) {
+        // The first attempt stalls before it streams anything.
+        this.#stalledEmpty = true;
+        const held = this.#slowHeld;
+        return new ReadableStream({
+          async start(controller) {
+            controller.enqueue({ type: "stream-start", warnings: [] });
+            await held;
+            controller.close();
+          }
+        });
+      } else if (
+        text === "stall in safe input" ||
+        text === "stall empty, then in input"
+      ) {
         const held = this.#slowHeld;
         return new ReadableStream({
           async start(controller) {
@@ -568,6 +638,13 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         return this.#slow(12);
       } else if (text === "slow-short") {
         return this.#slow(2);
+      } else if (text === "transient once" && !this.#transientThrown) {
+        // A platform blip on the first call only: the turn is tried again.
+        this.#transientThrown = true;
+        parts = [
+          { type: "stream-start", warnings: [] },
+          { type: "error", error: new Error("Network connection lost.") }
+        ];
       } else if (text === "fail and stay open") {
         // A provider that reports an in-band error and never closes.
         return new ReadableStream({
@@ -1199,6 +1276,53 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   /** The partial reply's id `onRecovery` last saw, or null for none. */
   recoveryPartial(): string | null | undefined {
     return this.ctx.storage.kv.get<string | null>(RECOVERY_PARTIAL_KEY);
+  }
+
+  /** From now on, the app's classifier calls every model error `fail`. */
+  classifyEveryErrorAsFail(): void {
+    this.ctx.storage.kv.put(FATAL_CLASSIFIER_KEY, true);
+  }
+
+  /** The next model call's preparation hits a platform transient once. */
+  blipNextPreparation(): void {
+    this.ctx.storage.kv.put(PREPARE_BLIP_KEY, true);
+  }
+
+  /** `onRecovery` gives the turn up at its `n`-th interruption. */
+  abandonRecoveryAt(n: number): void {
+    this.ctx.storage.kv.put(ABANDON_AT_KEY, n);
+  }
+
+  /** From now on, `onRecovery` gives every interrupted turn up. */
+  abandonRecovery(): void {
+    this.ctx.storage.kv.put(ABANDON_KEY, true);
+  }
+
+  /** Ids of the streams left in the harness's own Streams tables. */
+  harnessStreamIds(): string[] {
+    return this.ctx.storage.sql
+      .exec<{ stream_id: string }>(
+        `SELECT stream_id FROM cf_agents_streams${HARNESS_SUFFIX}`
+      )
+      .toArray()
+      .map((row) => row.stream_id);
+  }
+
+  /** Make `onRecovery` answer `answer`. */
+  answerRecovery(answer: { continue?: boolean; persist?: boolean }): void {
+    this.ctx.storage.kv.put(RECOVERY_ANSWER_KEY, answer);
+  }
+
+  /** What `operationChunks` and `followOperation` held at `beforeTurn` `call`. */
+  operationChunksAt(
+    call: number
+  ): [number, number, number, number] | undefined {
+    return this.ctx.storage.kv.get(`${OPERATION_CHUNKS_KEY}:${call}`);
+  }
+
+  /** Make the `call`-th `beforeTurn` throw. */
+  throwInBeforeTurn(call: number): void {
+    this.ctx.storage.kv.put(THROW_AT_KEY, call);
   }
 
   /** Treat a model stream silent this long as stalled. */
@@ -2030,6 +2154,10 @@ function downgradeToStore(
   }
 }
 /** The table suffix of the instances the harness composes. */
+const ABANDON_KEY = "test:abandon-recovery";
+const ABANDON_AT_KEY = "test:abandon-at";
+const PREPARE_BLIP_KEY = "test:prepare-blip";
+const FATAL_CLASSIFIER_KEY = "test:fatal-classifier";
 const HARNESS_SUFFIX = "__c_think_2dharness";
 
 /** The table prefix ThinkHarness keeps its records under in the shared store. */

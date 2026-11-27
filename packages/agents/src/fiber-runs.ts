@@ -94,10 +94,7 @@ const fiberStash = new AsyncLocalStorage<FiberStashContext>();
  *
  * @internal
  */
-export function withFiberStash<T>(
-  context: FiberStashContext,
-  fn: () => Promise<T>
-): Promise<T> {
+export function withFiberStash<T>(context: FiberStashContext, fn: () => T): T {
   return fiberStash.run(context, fn);
 }
 

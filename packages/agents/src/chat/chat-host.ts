@@ -14,7 +14,8 @@ import type { UIMessage, UIMessageChunk } from "ai";
 import type { Sessions } from "../sessions/sessions";
 import type { Streams } from "../streams/streams";
 import type { Tasks } from "../tasks/tasks";
-import type { TaskStep, TaskValue } from "../tasks/types";
+import type { TaskJson, TaskStep, TaskValue } from "../tasks/types";
+import { withFiberStash } from "../fiber-runs";
 import type { StreamWriter } from "../streams/types";
 import type { WebSockets } from "../websockets/websockets";
 import type { ClientToolSchema } from "./client-tools";
@@ -35,6 +36,7 @@ import type { ChatRecoveryIncident } from "./recovery-incident";
 import { TaskSettlement } from "../tasks/settlement";
 import { TaskCancellation } from "../tasks/replay";
 import { frameText } from "./chat-frames";
+import { partialHasSettledToolResults } from "./recovery-codec";
 import { sendIfOpen } from "./connection";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
 import { responseSource } from "./reply-source";
@@ -197,6 +199,8 @@ const DISCARDED_CHECKPOINT = "chat:discarded";
  * next attempt that finds this one cut off.
  */
 const INCIDENT_CHECKPOINT = "chat:incident";
+/** The run's checkpoint key holding the app's latest `stash()` data. */
+const STASH_CHECKPOINT = "chat:stash";
 
 /**
  * Whether the turn of `step` ended because its recovery gave up: the budget
@@ -216,8 +220,21 @@ export function chatRecoveryGaveUp(step: TaskStep): boolean {
  * recovery attempts have ended that way.
  */
 const FAILED_CHECKPOINT = "chat:failed";
-/** Names this isolate among a turn's attempts; made on first use. */
-let isolateId: string | undefined;
+/**
+ * Names this object's instance among a turn's attempts, by its Tasks: a
+ * reset makes a new instance, whose attempts count the old one's as
+ * interrupted, even when the isolate lives on.
+ */
+const instanceIds = new WeakMap<Tasks, string>();
+
+function instanceId(tasks: Tasks): string {
+  let id = instanceIds.get(tasks);
+  if (id === undefined) {
+    id = crypto.randomUUID();
+    instanceIds.set(tasks, id);
+  }
+  return id;
+}
 
 /** The run's checkpoint key holding the id of the reply it stored. */
 const REPLY_CHECKPOINT = "chat:reply";
@@ -481,23 +498,51 @@ function chunksOf(
 const runningTurn = new AsyncLocalStorage<string>();
 
 /**
+ * Run `fn` as part of the turn of `step`: `runningChatTurn()` names it, and
+ * the app's `stash()` keeps its data in the run's checkpoint, for the
+ * recovery of an attempt that is cut off. Data that cannot be kept is
+ * skipped, and never fails the turn.
+ */
+function inTurn<T>(requestId: string, step: TaskStep, fn: () => T): T {
+  return runningTurn.run(requestId, () =>
+    withFiberStash(
+      {
+        id: requestId,
+        signal: step.signal,
+        stash: (data) => {
+          try {
+            // SAFETY: stash data is JSON, as it always was; the write throws
+            // on anything else. `stash(undefined)` clears it.
+            step.checkpoint.set(STASH_CHECKPOINT, (data ?? null) as TaskJson);
+          } catch (error) {
+            console.warn("[chat] turn stash data not kept:", error);
+          }
+        }
+      },
+      fn
+    )
+  );
+}
+
+/**
  * `chunks`, read inside the turn's context: a host that produces its reply
  * as it is read (its hooks and tools run then) runs that code there too.
  */
 function insideTurn(
   requestId: string,
+  step: TaskStep,
   chunks: ReadableStream<UIMessageChunk>
 ): ReadableStream<UIMessageChunk> {
   const reader = chunks.getReader();
   return new ReadableStream<UIMessageChunk>({
     async pull(controller) {
-      const next = await runningTurn.run(requestId, () => reader.read());
+      const next = await inTurn(requestId, step, () => reader.read());
       if (!next.done) return controller.enqueue(next.value);
       // Read to its end: the host's stream is not left locked.
       reader.releaseLock();
       controller.close();
     },
-    cancel: (reason) => runningTurn.run(requestId, () => reader.cancel(reason))
+    cancel: (reason) => inTurn(requestId, step, () => reader.cancel(reason))
   });
 }
 
@@ -557,6 +602,10 @@ export function chatTurnDefinition(
         ? { parentId: run.questionId }
         : {};
     const report = async (result: ChatTurnResult) => {
+      // A settled turn is not recovered: what it stashed for that goes.
+      if (step.checkpoint.get(STASH_CHECKPOINT) != null) {
+        step.checkpoint.set(STASH_CHECKPOINT, null);
+      }
       if (result.status !== "completed" && result.status !== "skipped") {
         send({
           body: result.error ?? "",
@@ -726,7 +775,7 @@ export function chatTurnDefinition(
         live?: boolean;
       }>(FAILED_CHECKPOINT);
       const thisAttempt = {
-        isolate: (isolateId ??= crypto.randomUUID()),
+        isolate: instanceId(deps.tasks),
         token: crypto.randomUUID()
       };
       const evaluated =
@@ -810,14 +859,24 @@ export function chatTurnDefinition(
           requestId,
           partialText,
           partialParts,
-          recoveryData: null,
+          recoveryData: step.checkpoint.get(STASH_CHECKPOINT) ?? null,
           messages: (await session.getHistory()) as unknown as UIMessage[],
           createdAt: step.createdAt
         });
       }
+      // `persist: false` drops what this run streamed unless it holds
+      // settled tool results: work that is not idempotent and must not run
+      // again. A reply it continues keeps its base either way.
+      const drop =
+        decision?.persist === false &&
+        !partialHasSettledToolResults(
+          (partial?.parts ?? []).slice(
+            baseMessage && base ? base.parts : 0
+          ) as never
+        );
       if (exhausted || decision?.continue === false) {
         // falls through below
-      } else if (decision?.persist === false) {
+      } else if (drop) {
         // Continue without what was streamed: the question is answered
         // again.
         await dropPartial();
@@ -826,7 +885,7 @@ export function chatTurnDefinition(
       if (exhausted || decision?.continue === false) {
         // Given up: what was streamed stays stored (unless the app said
         // not to keep it), and the turn ends as an error.
-        if (decision?.persist === false) await dropPartial();
+        if (drop) await dropPartial();
         const writer = await deps.streams.open(streamId, { tag: requestId });
         writer.error("interrupted");
         if (!evaluated?.exhausted) {
@@ -920,7 +979,7 @@ export function chatTurnDefinition(
     let reply: UIMessage | undefined;
     let overflowTried = false;
     for (;;) {
-      const source = await runningTurn.run(requestId, () => host.respond(call));
+      const source = await inTurn(requestId, step, () => host.respond(call));
       if (!source) {
         writer?.close({ discard: true });
         return report({ requestId, status: "skipped" });
@@ -988,7 +1047,8 @@ export function chatTurnDefinition(
         // inside the turn's context.
         insideTurn(
           requestId,
-          runningTurn.run(requestId, () => chunksOf(source, requestId))
+          step,
+          inTurn(requestId, step, () => chunksOf(source, requestId))
         ),
         recovery === false ? undefined : recovery?.stallTimeoutMs,
         // An approved call of the reply continued runs with no new input.
@@ -1019,7 +1079,9 @@ export function chatTurnDefinition(
               // that mirrors the reply (ThinkHarness's live partial) holds
               // what the stream stores, in the same order.
               const start =
-                host.hooks?.transformChunk?.(synthetic, parts) ?? synthetic;
+                inTurn(requestId, step, () =>
+                  host.hooks?.transformChunk?.(synthetic, parts)
+                ) ?? synthetic;
               record(start);
               seen.push(start);
               send({
@@ -1037,7 +1099,12 @@ export function chatTurnDefinition(
                     messageId: continuing?.id ?? fallbackId
                   } as UIMessageChunk)
                 : chunk;
-            const next = host.hooks?.transformChunk?.(own, parts) ?? own;
+            // In the turn's context, as the reply's other hooks run: a
+            // chunk hook may stash.
+            const next =
+              inTurn(requestId, step, () =>
+                host.hooks?.transformChunk?.(own, parts)
+              ) ?? own;
             // An in-band error is stored only if it ends the turn.
             if (next.type !== "error") {
               record(next);

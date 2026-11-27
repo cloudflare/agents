@@ -20,7 +20,7 @@ import { capabilitySchema } from "../../lifecycle/schema";
 import { REPLAY_ITEM_BYTES } from "../../internal/platform-limits";
 import { Sessions } from "../../sessions/sessions";
 import { Streams } from "../../streams/streams";
-import { isPlatformFailure } from "../../retries";
+import { isPlatformFailure, isPlatformTransientError } from "../../retries";
 import {
   AttemptSupersededError,
   isTaskCancellation,
@@ -193,6 +193,12 @@ function callerAbortReason(record: TaskRecord): string | undefined {
 }
 const DEFINITIONS = [OPERATION_DEFINITION, SUBMISSION_DEFINITION] as const;
 /**
+ * The run metadata key under which the harness records the reply a
+ * cancelled operation kept (`{ messageId }`). Not part of the caller's
+ * metadata.
+ */
+const KEPT_REPLY_KEY = "think:kept-reply";
+/**
  * The session value (Sessions config) that records a session the harness
  * knows of: `{ parent?, createdAt }`. Not a `transcript:` key, so a reset
  * keeps it.
@@ -212,6 +218,8 @@ const PLACED_KEY = "think:placed";
  * read to rebuild what a turn streamed outside its attempt.
  */
 const CHAT_BASE_CHECKPOINT = "chat:base";
+/** The turn definition's count of stream chunks recovery discarded. */
+const CHAT_DISCARDED_CHECKPOINT = "chat:discarded";
 /** The turn definition's error for a turn it did not continue. */
 const TURN_NOT_CONTINUED = "The turn was interrupted and not continued.";
 const DEFAULT_MAX_STEPS = 10;
@@ -247,6 +255,11 @@ type LiveRun = {
   readonly operationId: string;
   /** What the turn's stream holds, earlier attempts' chunks included. */
   partial: UIMessageChunk[];
+  /**
+   * How many of `partial`'s first chunks recovery discarded (`persist:
+   * false`): not part of the reply, but still at their stream positions.
+   */
+  discarded: number;
   /** Whether the turn continues a reply stored before it began. */
   continues: boolean;
   /** The tools this run resolved, which decide which calls are a client's. */
@@ -1180,13 +1193,19 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   /**
    * @internal The chunks an operation's reply has streamed so far, while it
    * runs: none once its reply is stored, or for an operation that never ran.
+   * Chunks recovery discarded (`persist: false`) are left out but keep
+   * their stream positions: `first` is the position of `chunks[0]`, so an
+   * agent-tool reader's cursor stays valid.
    */
   async operationChunks(
     session: ThinkSessionId,
     operationId: string
-  ): Promise<UIMessageChunk[]> {
+  ): Promise<{ first: number; chunks: UIMessageChunk[] }> {
     await this.lifecycle.ready();
-    return this.#streamChunks(chatTurnStreamId(runIdOf(session, operationId)));
+    const runId = runIdOf(session, operationId);
+    const all = this.#streamChunks(chatTurnStreamId(runId));
+    const first = Math.min(this.#discardedOf(runId), all.length);
+    return { first, chunks: all.slice(first) };
   }
 
   /**
@@ -1206,7 +1225,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     listener: (
       event: { type: "chunk"; chunk: UIMessageChunk } | { type: "end" }
     ) => void
-  ): { chunks: UIMessageChunk[]; stop(): void } {
+  ): { first: number; chunks: UIMessageChunk[]; stop(): void } {
     const stop = this.#events.subscribe(session, (event) => {
       if (event.type === "chunk" && event.operationId === operationId) {
         listener({ type: "chunk", chunk: event.chunk });
@@ -1222,11 +1241,18 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     // attempts' chunks back yet (its partial is empty): the stored stream
     // has them then. A live partial with chunks already holds them.
     const live = this.#live.get(session);
-    const chunks =
+    const runId = runIdOf(session, operationId);
+    const [all, discarded] =
       live?.operationId === operationId && live.partial.length > 0
-        ? [...live.partial]
-        : this.#streamChunks(chatTurnStreamId(runIdOf(session, operationId)));
-    return { chunks, stop };
+        ? [live.partial, live.discarded]
+        : [
+            this.#streamChunks(chatTurnStreamId(runId)),
+            this.#discardedOf(runId)
+          ];
+    // As `operationChunks`: what recovery discarded is left out, at its
+    // positions.
+    const first = Math.min(discarded, all.length);
+    return { first, chunks: all.slice(first), stop };
   }
 
   /**
@@ -1270,15 +1296,24 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
   /** A run's status, with its times, key and metadata. */
   #inspection(record: TaskRecord): ThinkOperationInspection {
+    const { [KEPT_REPLY_KEY]: kept, ...metadata } = record.metadata ?? {};
+    const keptId =
+      kept && typeof kept === "object" && !Array.isArray(kept)
+        ? (kept as { messageId?: unknown }).messageId
+        : undefined;
+    const status = this.#status(record);
     return {
-      ...this.#status(record),
+      ...status,
+      ...(typeof keptId === "string" &&
+        !("messageId" in status && status.messageId) && { messageId: keptId }),
       createdAt: record.createdAt,
       ...(record.startedAt !== undefined && { startedAt: record.startedAt }),
       ...(record.settledAt !== undefined && { settledAt: record.settledAt }),
       ...(record.idempotencyKey !== undefined && {
         idempotencyKey: callerKeyOf(record.idempotencyKey)
       }),
-      ...(record.metadata !== undefined && { metadata: record.metadata }),
+      ...(record.metadata !== undefined &&
+        Object.keys(metadata).length > 0 && { metadata }),
       ...(callerAbortReason(record) !== undefined && {
         abortReason: callerAbortReason(record)
       })
@@ -1437,9 +1472,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const running = open.find((record) => !isQueued(record));
     const live = this.#live.get(session);
     const partial = live
-      ? [...live.partial]
+      ? live.partial.slice(live.discarded)
       : running
-        ? this.#streamChunks(chatTurnStreamId(running.runId))
+        ? this.#turnChunks(running.runId)
         : [];
     // The call in progress started with its owner.
     const started = partial.find((chunk) => chunk.type === "start");
@@ -1482,7 +1517,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       return {
         operationId,
         continuation: live.continues,
-        chunks: [...live.partial]
+        chunks: live.partial.slice(live.discarded)
       };
     }
     // Left by an eviction: the turn's stream holds what was durable.
@@ -1491,7 +1526,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       operationId,
       continuation:
         placed !== undefined && "continues" in placed && placed.continues,
-      chunks: this.#streamChunks(chatTurnStreamId(running.runId))
+      chunks: this.#turnChunks(running.runId)
     };
   }
 
@@ -1579,6 +1614,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const live: LiveRun = {
       operationId,
       partial: [],
+      discarded: 0,
       continues: false,
       done: new Promise<void>((resolve) => {
         finish = resolve;
@@ -1601,11 +1637,14 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       // What earlier attempts streamed, which this one continues.
       if (run.attempt > 1) {
         live.partial = this.#streamChunks(chatTurnStreamId(run.id));
+        live.discarded =
+          this.#tasks.checkpointOf<number>(run.id, CHAT_DISCARDED_CHECKPOINT) ??
+          0;
       }
       this.#events.emit(session, {
         type: "run-start",
         operationId,
-        continuation: placed.continues || live.partial.length > 0
+        continuation: placed.continues || live.partial.length > live.discarded
       });
       try {
         const turn = chatTurnDefinition(
@@ -1636,6 +1675,34 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       console.error(`ThinkHarness operation ${operationId} failed`, error);
       return this.#giveUp(run, session, errorText(error), live);
     } finally {
+      // A cancelled attempt keeps the reply it streamed; its run has no
+      // result to name it, so the inspection reads it from here.
+      const keptId =
+        live.reply?.id ??
+        replyIdOf(
+          live.partial.slice(
+            Math.max(live.discarded, this.#discardedOf(run.id))
+          )
+        );
+      // Only a reply that was stored: a `start` names one before it has
+      // any parts, and a stop then stores nothing.
+      const stored =
+        run.signal.aborted && keptId !== undefined
+          ? await this.#handle(session)
+              .getMessage(keptId)
+              .catch(() => null)
+          : null;
+      if (stored) {
+        // Best-effort: a failed write must not keep the attempt from
+        // finishing, or the operations queued behind it would wait.
+        try {
+          this.#tasks.patchMetadata(run.id, KEPT_REPLY_KEY, {
+            messageId: stored.id
+          });
+        } catch (error) {
+          console.warn("ThinkHarness could not record a kept reply", error);
+        }
+      }
       if (this.#live.get(session) === live) this.#live.delete(session);
       finish();
     }
@@ -1655,12 +1722,50 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       return outcomeOf({}, stored ? asUIMessage(stored) : undefined);
     }
     // The definition gave up on an interrupted turn, past the budget or as
-    // `onRecovery` chose: its partial is stored already.
+    // `onRecovery` chose. It stored the partial itself, with its cut-off
+    // tool calls repaired: that reply is kept as it is, and only the turn's
+    // stream, which nothing will resume, is dropped.
     if (result.error === TURN_NOT_CONTINUED || chatRecoveryGaveUp(run)) {
+      const streams = this.#streams.__DO_NOT_USE_WILL_BREAK__sync();
+      const streamId = chatTurnStreamId(run.id);
+      // The stored partial is named by its stream (the loop may never have
+      // run in this attempt). A call left for a rerun nobody will make is
+      // failed as interrupted, as any given-up reply's open calls are.
+      // Every attempt starts its reply in the same stream, and an empty
+      // one stores nothing: the newest start whose reply is stored names it.
+      const handle = this.#handle(session);
+      const candidates = [
+        result.messageId,
+        ...this.#streamChunks(streamId)
+          .flatMap((chunk) =>
+            chunk.type === "start" && chunk.messageId !== undefined
+              ? [chunk.messageId]
+              : []
+          )
+          .reverse(),
+        live.reply?.id
+      ];
+      let stored: Awaited<ReturnType<typeof handle.getMessage>> = null;
+      for (const id of new Set(candidates)) {
+        if (id === undefined) continue;
+        stored = await handle.getMessage(id);
+        if (stored) break;
+      }
+      if (stored) {
+        const message = asUIMessage(stored);
+        const settled = settleOpenCalls(message, "interrupted");
+        if (settled !== message) {
+          await this.#commit(run, session, undefined, (put) =>
+            put(settled, {})
+          );
+          this.#events.emit(session, { type: "message", message: settled });
+        }
+      }
+      if (streams.getStream(streamId)) streams.deleteUnchecked(streamId);
       return {
         status: "unanswered",
         reason: "interrupted",
-        ...(live.reply && { messageId: live.reply.id })
+        ...(stored && { messageId: stored.id })
       };
     }
     return this.#giveUp(run, session, result.error ?? result.status, live);
@@ -1700,15 +1805,19 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const recovery = this.#options.recovery;
     const hooks = this.#options.hooks;
     return {
-      respond: async (call) =>
-        this.#respond(call, {
+      respond: async (call) => {
+        // What the definition dropped before asking again (`persist:
+        // false`) is not part of the reply.
+        live.discarded = this.#discardedOf(run.id);
+        return this.#respond(call, {
           run,
           session,
           operationId,
           built,
           placed,
           live
-        }),
+        });
+      },
       options: {
         recovery: {
           ...recovery?.chatRecovery,
@@ -1750,7 +1859,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           return true;
         },
         onRecovery: async (context) => {
-          const replyId = replyIdOf(live.partial);
+          const replyId = replyIdOf(live.partial.slice(live.discarded));
           const partial =
             context.partialParts.length > 0 && replyId !== undefined
               ? ({
@@ -1763,9 +1872,16 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             session,
             operationId,
             attempt: context.attempt,
-            partial
+            partial,
+            recoveryData: context.recoveryData
           });
-          return decision === "abandon" ? { continue: false } : undefined;
+          // What was streamed is dropped: the reply is not rebuilt from it.
+          // An options object is the definition's own answer, as given.
+          return decision === "abandon"
+            ? { continue: false }
+            : typeof decision === "object"
+              ? decision
+              : undefined;
         },
         // A server tool call an interruption cut off is reported to the
         // model as interrupted, unless its tool is safe to run again.
@@ -2129,7 +2245,21 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             steps,
             AbortSignal.any([signal, stall.signal]),
             call.signal
-          );
+          ).catch(async (error: unknown) => {
+            // A platform transient (a storage blip, a lost connection) while
+            // preparing the call is not the app's error: the turn is tried
+            // again within its budget, as Think does, unless the app's
+            // classifier says otherwise, as for a model call's failure.
+            if (isPlatformTransientError(error)) {
+              const kind = await this.#extensions.hook("classifyError", {
+                error
+              });
+              if (kind === undefined || kind === "retry") {
+                throw new ModelCallError("retry", error);
+              }
+            }
+            throw error;
+          });
           // An error the model streamed in band, if it sent one.
           let inBand: Error | undefined;
           const stallTimeoutMs =
@@ -2186,10 +2316,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             } catch (error) {
               console.error("ThinkHarness onError hook failed", error);
             }
+            // The app's classifier decides first; without one, a platform
+            // transient (a lost connection) is tried again.
             const kind =
               (await this.#extensions.hook("classifyError", {
                 error: failure
-              })) ?? "fail";
+              })) ?? (isPlatformTransientError(failure) ? "retry" : "fail");
             if (kind === "context-overflow" && progressed) {
               // This attempt ran model calls or tools the transcript does
               // not hold yet: make room, then continue from what it
@@ -2757,9 +2889,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const chunks =
       streamId === undefined
         ? []
-        : this.#streamChunks(streamId).filter(
-            (chunk) => chunk.type !== "error"
-          );
+        : (legacy
+            ? this.#streamChunks(streamId)
+            : this.#turnChunks(runId)
+          ).filter((chunk) => chunk.type !== "error");
     const open =
       streamId !== undefined && streams.getStream(streamId) !== undefined;
     // The loop's own reply, without the reasoning the turn didn't send.
@@ -2877,6 +3010,17 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           ? (result.reason ?? "unanswered")
           : "unanswered"
       );
+      // A cancelled run has no result to carry the reply it left: its
+      // inspection reads it from here.
+      if (message && record.status === "aborted") {
+        try {
+          this.#tasks.patchMetadata(record.runId, KEPT_REPLY_KEY, {
+            messageId: message.id
+          });
+        } catch (error) {
+          console.warn("ThinkHarness could not record a kept reply", error);
+        }
+      }
     }
     this.#events.emit(session, {
       type: "operation",
@@ -2926,7 +3070,13 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                 messageId: outcome.messageId
               })
             }
-          : unanswered(outcome.reason);
+          : {
+              ...unanswered(outcome.reason),
+              // The partial it kept, as the type says: what it wrote.
+              ...(outcome.messageId !== undefined && {
+                messageId: outcome.messageId
+              })
+            };
       }
       case "error":
         return unanswered(
@@ -3333,6 +3483,23 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
    * where earlier versions kept it (and still do after a rollback): it is
    * moved here first.
    */
+  /**
+   * The chunks of run `runId`'s reply stream, without those an earlier
+   * attempt streamed and recovery discarded (`persist: false`).
+   */
+  #turnChunks(runId: string): UIMessageChunk[] {
+    const chunks = this.#streamChunks(chatTurnStreamId(runId));
+    const discarded = this.#discardedOf(runId);
+    return discarded > 0 ? chunks.slice(discarded) : chunks;
+  }
+
+  /** How many of run `runId`'s first stream chunks recovery discarded. */
+  #discardedOf(runId: string): number {
+    return (
+      this.#tasks.checkpointOf<number>(runId, CHAT_DISCARDED_CHECKPOINT) ?? 0
+    );
+  }
+
   #streamChunks(streamId: string | null | undefined): UIMessageChunk[] {
     if (streamId == null) return [];
     const streams = this.#streams.__DO_NOT_USE_WILL_BREAK__sync();
@@ -3424,11 +3591,13 @@ async function* untilAborted<T>(
 /**
  * Classify the context-window overflow errors of common providers
  * (Anthropic, OpenAI, Google, Bedrock, Mistral and others) as
- * `"context-overflow"`, and everything else as `"fail"`. Pass it as
+ * `"context-overflow"`, a platform transient error (a lost connection, a
+ * storage reset, an error marked retryable) as `"retry"`, and everything
+ * else as `"fail"`. Pass it as
  * `hooks.classifyError`, or call it from your own classifier.
  *
  * @param error - The model call's error.
- * @returns `"context-overflow"` or `"fail"`.
+ * @returns `"context-overflow"`, `"retry"` or `"fail"`.
  * @experimental
  */
 export function classifyContextOverflow(error: unknown): ThinkErrorClass {
@@ -3442,7 +3611,8 @@ export function classifyContextOverflow(error: unknown): ThinkErrorClass {
       text = String(error);
     }
   }
-  return CONTEXT_OVERFLOW_PATTERN.test(text) ? "context-overflow" : "fail";
+  if (CONTEXT_OVERFLOW_PATTERN.test(text)) return "context-overflow";
+  return isPlatformTransientError(error) ? "retry" : "fail";
 }
 
 const CONTEXT_OVERFLOW_PATTERN =

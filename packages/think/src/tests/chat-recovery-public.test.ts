@@ -607,6 +607,25 @@ describe("chat recovery, through public behaviour", () => {
       ).toBe(true);
     }, 30_000);
 
+    it("drops the partial and answers the question again when onChatRecovery says persist: false", async () => {
+      const { agent } = await resetDuringTurn("answer-persist-false", 2, {
+        persist: false
+      });
+      const messages = await settle(agent);
+
+      expect(messages.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+      const text = messages[1]?.parts
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .join("");
+      // A new answer, with nothing of what the reset cut off.
+      expect(text).not.toMatch(/one /);
+      expect(text?.length).toBeGreaterThan(0);
+      expect(await (await agent()).modelCallsForTest()).toBe(1);
+    }, 30_000);
+
     it("keeps nothing and runs nothing when onChatRecovery says persist: false, continue: false", async () => {
       const { agent } = await resetDuringTurn("answer-drop", 2, {
         persist: false,
@@ -644,10 +663,20 @@ describe("chat recovery, through public behaviour", () => {
       ws.addEventListener("message", (event) => {
         const frame = JSON.parse(String(event.data)) as {
           type?: string;
+          id?: string;
           body?: string;
+          replay?: boolean;
         };
+        // As a chat client does: take up a stream it is offered.
+        if (frame.type === "cf_agent_stream_resuming") {
+          ws.send(
+            JSON.stringify({ type: "cf_agent_stream_resume_ack", id: frame.id })
+          );
+        }
+        // New text only: a replay of what was streamed is not progress.
         if (
           frame.type === "cf_agent_use_chat_response" &&
+          !frame.replay &&
           frame.body?.includes("text-delta")
         ) {
           tab.chunks++;

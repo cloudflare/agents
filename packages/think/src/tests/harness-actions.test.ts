@@ -5,6 +5,11 @@ import type { PendingApproval } from "../think";
 
 type ActionsStub = {
   say(text: string): Promise<void>;
+  loseConnectionsForTest(count: number): Promise<void>;
+  modelCallsForTest(): Promise<number>;
+  classifyErrorsAsForTest(
+    as: "fatal" | "transient" | "rate_limit"
+  ): Promise<void>;
   charged(): Promise<number>;
   toolStates(): Promise<string[]>;
   lastText(): Promise<string>;
@@ -346,5 +351,39 @@ describe("harness-backed Think: actions that need a human", () => {
       { type: "receipt", amount: 5 }
     ]);
     expect(await think.attachmentsForTest("another-turn")).toEqual([]);
+  });
+});
+
+describe("harness-backed Think: a lost connection to the model", () => {
+  it("tries the turn again when classifyChatError says nothing", async () => {
+    const stub = await agent();
+    await stub.loseConnectionsForTest(1);
+    const before = await stub.modelCallsForTest();
+    await stub.say("send a receipt");
+    expect(await stub.lastText()).toMatch(/^got /);
+    // The lost call, then the receipt call and the reply after it.
+    expect((await stub.modelCallsForTest()) - before).toBe(3);
+  });
+
+  for (const as of ["transient", "rate_limit"] as const) {
+    it(`tries the turn again when classifyChatError says ${as}`, async () => {
+      const stub = await agent();
+      await stub.classifyErrorsAsForTest(as);
+      await stub.loseConnectionsForTest(1);
+      const before = await stub.modelCallsForTest();
+      await stub.say("send a receipt");
+      expect(await stub.lastText()).toMatch(/^got /);
+      expect((await stub.modelCallsForTest()) - before).toBe(3);
+    });
+  }
+
+  it("ends the turn when classifyChatError says fatal", async () => {
+    const stub = await agent();
+    await stub.classifyErrorsAsForTest("fatal");
+    await stub.loseConnectionsForTest(1);
+    const before = await stub.modelCallsForTest();
+    await stub.say("send a receipt");
+    expect((await stub.modelCallsForTest()) - before).toBe(1);
+    expect(await stub.toolStates()).toEqual([]);
   });
 });

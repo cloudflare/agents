@@ -270,6 +270,46 @@ describe("ThinkHarness turns", () => {
     ).toHaveLength(1024);
   });
 
+  it("names the reply an aborted operation kept on its inspection", async () => {
+    const stub = fresh();
+    await stub.submit("slow", { operationId: "cut" });
+    await vi.waitFor(async () =>
+      expect(await stub.inFlightChunks()).toBeGreaterThan(0)
+    );
+    expect(await stub.abortWithReason("cut", "enough")).toBe(true);
+    await stub.releaseSlow();
+    await stub.wait("cut");
+
+    const ids = await stub.messageIds();
+    // Recorded when the operation's end is reported, just after it settles.
+    const inspection = await vi.waitFor(async () => {
+      const found = JSON.parse(await stub.inspectRecord("cut"));
+      expect(found.messageId).toBeDefined();
+      return found;
+    });
+    expect(inspection.messageId).toBe(ids.at(-1));
+    // The harness's own record is not part of the caller's metadata.
+    expect(inspection.metadata).toBeUndefined();
+  });
+
+  it("names no reply on an aborted operation's inspection when it stored none", async () => {
+    const stub = fresh();
+    // The reply announces itself and then waits before any content.
+    await stub.submit("stall empty, then in input", { operationId: "cut" });
+    await vi.waitFor(async () =>
+      expect(await stub.inFlightChunks()).toBeGreaterThan(0)
+    );
+    expect(await stub.abortWithReason("cut", "enough")).toBe(true);
+    await stub.releaseSlow();
+    await stub.wait("cut");
+    expect(await stub.messages()).toEqual(["user: stall empty, then in input"]);
+    const inspection = JSON.parse(await stub.inspectRecord("cut")) as {
+      status: string;
+      messageId?: string;
+    };
+    expect(inspection.messageId).toBeUndefined();
+  });
+
   it("tells withdrawn from aborted by the run, also when the caller's reason is one of those words", async () => {
     const stub = fresh();
     await stub.submit("gate", { operationId: "running" });
@@ -433,6 +473,40 @@ describe("ThinkHarness turns", () => {
     expect(failed.status).toBe("unanswered");
     expect(reason(failed)).toMatch(/in-band, left open/);
     expect(text(await stub.prompt("after"))).toBe("echo: after");
+  });
+
+  it("tries a turn again after a platform transient instead of failing it", async () => {
+    const stub = fresh();
+    const result = await stub.prompt("transient once");
+    expect(result.status).toBe("done");
+    expect(text(result)).toBe("echo: transient once");
+  });
+
+  it("ends a turn on a platform transient when the app's classifier says fail", async () => {
+    const stub = fresh();
+    await stub.classifyEveryErrorAsFail();
+    const result = await stub.prompt("transient once");
+    expect(result.status).toBe("unanswered");
+    expect(reason(result)).toMatch(/Network connection lost/);
+    expect(await stub.modelCalls()).toBe(1);
+  });
+
+  it("tries a turn again after a platform transient while its model call is prepared", async () => {
+    const stub = fresh();
+    await stub.blipNextPreparation();
+    const result = await stub.prompt("hello");
+    expect(result.status).toBe("done");
+    expect(text(result)).toBe("echo: hello");
+  });
+
+  it("lets the app's classifier end a turn whose preparation hits a platform transient", async () => {
+    const stub = fresh();
+    await stub.classifyEveryErrorAsFail();
+    await stub.blipNextPreparation();
+    const result = await stub.prompt("hello");
+    expect(result.status).toBe("unanswered");
+    expect(reason(result)).toMatch(/Network connection lost/);
+    expect(await stub.modelCalls()).toBe(0);
   });
 
   it("takes a client tool declaration that is not a list as none", async () => {
@@ -680,6 +754,30 @@ describe("ThinkHarness durability", () => {
     expect(result.status).toBe("done");
     expect(text(result)).toMatch(
       /^tool said: error: The tool call was interrupted/
+    );
+    expect(await stub.gateRuns()).toBe(1);
+  });
+
+  it("fails a call left for a rerun when recovery gives the turn up after an eviction", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    await stub.abandonRecovery();
+    const receipt = await stub.submit("gate-safe");
+    await stub.gateStarted(1);
+
+    stub = await crash(name);
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    const result = await stub.wait(receipt.operationId);
+    expect(result).toMatchObject({
+      status: "unanswered",
+      reason: "interrupted"
+    });
+    // The stored partial is named, and its call is failed, not left open.
+    expect((result as { messageId?: string }).messageId).toBe(
+      (await stub.messageIds()).at(-1)
+    );
+    expect((await stub.messages()).at(-1)).toMatch(
+      /^assistant: \[gate_safe output-error\]/
     );
     expect(await stub.gateRuns()).toBe(1);
   });
@@ -1196,6 +1294,82 @@ describe("ThinkHarness durability", () => {
     const result = await stub.wait(receipt.operationId);
     expect(result.status).toBe("done");
     expect((await stub.messages())[1]).toMatch(/^assistant: x+ continued$/);
+  });
+
+  it("finishes a turn whose recovery gave up: its partial reply kept, its stream gone", async () => {
+    const stub = fresh();
+    await stub.setStallTimeout(50);
+    await stub.abandonRecovery();
+    const receipt = await stub.submit("slow");
+    const result = await stub.wait(receipt.operationId);
+    expect(result).toMatchObject({
+      status: "unanswered",
+      reason: "interrupted"
+    });
+    expect((await stub.messages())[1]).toMatch(/^assistant: x+/);
+    expect(await stub.harnessStreamIds()).toEqual([]);
+  });
+
+  it("keeps the repaired reply of a turn whose recovery gave up, not a replay of its stream", async () => {
+    const stub = fresh();
+    await stub.setStallTimeout(50);
+    await stub.abandonRecovery();
+    const receipt = await stub.submit("stall in safe input");
+    expect((await stub.wait(receipt.operationId)).status).toBe("unanswered");
+    // The definition repaired the cut-off call; giving up keeps that.
+    const reply = (await stub.messages())[1];
+    expect(reply).toBe("assistant: [gate_safe output-error]");
+  });
+
+  it("names the reply a later attempt kept when recovery gives up after an empty attempt", async () => {
+    const stub = fresh();
+    await stub.setStallTimeout(50);
+    await stub.abandonRecoveryAt(2);
+    const receipt = await stub.submit("stall empty, then in input");
+    const result = await stub.wait(receipt.operationId);
+    expect(result).toMatchObject({
+      status: "unanswered",
+      reason: "interrupted"
+    });
+    // The second attempt's reply is the one kept, its call failed.
+    expect((await stub.messages()).at(-1)).toBe(
+      "assistant: [gate_safe output-error]"
+    );
+    expect((result as { messageId?: string }).messageId).toBe(
+      (await stub.messageIds()).at(-1)
+    );
+  });
+
+  it("leaves out what recovery dropped for an agent-tool reader, at its stream positions", async () => {
+    const stub = fresh();
+    await stub.setStallTimeout(50);
+    await stub.answerRecovery({ persist: false });
+    // Each attempt answers again and stalls again: the third ends it.
+    await stub.throwInBeforeTurn(3);
+    const receipt = await stub.submit("slow");
+    expect((await stub.wait(receipt.operationId)).status).toBe("unanswered");
+    // Each attempt's readers are handed none of what recovery dropped, and
+    // the chunks still to come are numbered after it: positions only grow,
+    // so a cursor into a dropped attempt stays valid and nothing is seen
+    // twice.
+    const second = await stub.operationChunksAt(2);
+    const third = await stub.operationChunksAt(3);
+    expect(second?.[0]).toBeGreaterThan(0);
+    expect(second).toEqual([second?.[0], 0, second?.[0], 0]);
+    expect(third?.[0]).toBeGreaterThan(second?.[0] ?? 0);
+    expect(third).toEqual([third?.[0], 0, third?.[0], 0]);
+  });
+
+  it("keeps a reply recovery dropped out of the transcript when the next attempt fails", async () => {
+    const stub = fresh();
+    await stub.setStallTimeout(50);
+    await stub.answerRecovery({ persist: false });
+    // The first call stalls; the recovery attempt's beforeTurn fails.
+    await stub.throwInBeforeTurn(2);
+    const receipt = await stub.submit("slow");
+    const result = await stub.wait(receipt.operationId);
+    expect(result.status).toBe("unanswered");
+    expect(await stub.messages()).toEqual(["user: slow"]);
   });
 
   it("tells the model a call whose input a stall cut off did not run, even for a tool safe to rerun", async () => {

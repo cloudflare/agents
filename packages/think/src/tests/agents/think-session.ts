@@ -5186,6 +5186,26 @@ export class ThinkTestAgent extends Think {
    * Two chats, the second waiting behind the first, and a clear. With
    * `cancelFirst`, the first's caller cancels it just before the clear.
    */
+  /**
+   * Ask for a turn with `runTurn` (wait mode) between two stops of all
+   * requests: the second stop comes while the turn waits for the first.
+   */
+  async runTurnBetweenStopsForTest(): Promise<{
+    status: string;
+    modelCalls: number;
+  }> {
+    const callsBefore = this._modelPromptsForTest.length;
+    const first = this.abortAllRequests();
+    const turn = this.runTurn({ input: "between the stops" });
+    const second = this.abortAllRequests();
+    await Promise.all([first, second]);
+    const result = await turn;
+    return {
+      status: result.status,
+      modelCalls: this._modelPromptsForTest.length - callsBefore
+    };
+  }
+
   async clearWithQueuedChatForTest(cancelFirst: boolean): Promise<{
     responses: string[];
     first: { done: boolean; error: string | null };
@@ -6514,6 +6534,16 @@ export class ThinkTestAgent extends Think {
     textChunks: string[] = []
   ): Promise<void> {
     this._inBandErrorResponse = { errorText, textChunks };
+  }
+
+  /** From now on, the app's classifyChatError names every error `fatal`. */
+  async classifyChatErrorsAsFatal(): Promise<void> {
+    this.classifyChatError = () => "fatal";
+  }
+
+  /** The mock models' calls so far, in this isolate. */
+  async mockModelCallsForTest(): Promise<number> {
+    return _mockCallCount;
   }
 
   async clearInBandErrorResponse(): Promise<void> {
