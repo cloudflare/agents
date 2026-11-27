@@ -1809,27 +1809,6 @@ export class AIChatAgent<
   }
 
   /**
-   * What a regenerate needs to know about when it arrived: the messages it
-   * keeps, and the stored user messages it did not send. A question another
-   * tab sends later is in neither, and makes the regenerate skip.
-   */
-  private _regenerateAdmission(messages: UIMessage[]): {
-    keepIds: string[];
-    storedUserIds: Set<string>;
-  } {
-    const keepIds = messages.map((message) => message.id);
-    const keep = new Set(keepIds);
-    return {
-      keepIds,
-      storedUserIds: new Set(
-        this.messages
-          .filter((message) => message.role === "user" && !keep.has(message.id))
-          .map((message) => message.id)
-      )
-    };
-  }
-
-  /**
    * A request an earlier isolate accepted and never gave a turn with a
    * fiber, to run again (`ChatTurns.resumeAdmissions`).
    */
@@ -4525,24 +4504,6 @@ export class AIChatAgent<
           message
         })
     });
-  }
-
-  /**
-   * Serialize a client-tool result/approval apply behind any in-flight apply
-   * (#1649, defensive). Each apply is a read-modify-write of the message and
-   * parallel tool results arrive as independent WebSocket messages. The
-   * queue makes each read-modify-write commit atomically, in arrival order.
-   *
-   * `ChatTurns.pendingInteraction` is set to the newest link so the barrier's
-   * single-slot wake-up observes the latest apply; because the chain is serial,
-   * awaiting it transitively waits for every predecessor.
-   *
-   * @internal
-   */
-  protected _enqueueInteractionApply(
-    apply: () => Promise<boolean>
-  ): Promise<boolean> {
-    return this._turns.enqueueInteraction(apply);
   }
 
   private async _reply(

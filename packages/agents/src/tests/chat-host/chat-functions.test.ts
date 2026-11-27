@@ -3075,4 +3075,47 @@ describe("chat functions over a minimal host", () => {
       await instance.resultFor("r1");
     });
   });
+
+  it("every tab is sent the message a tool answer updated, and a repeated answer sends nothing", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const session = instance.sessions.session("s1");
+      await session.appendMessage({
+        id: "u1",
+        role: "user",
+        parts: []
+      } as never);
+      await session.appendMessage({
+        id: "a1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-pick",
+            toolCallId: "c1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      } as never);
+      const sent: Array<Record<string, unknown>> = [];
+      instance.tabs.push(recordingTab("tab-w", sent));
+      const answer = {
+        kind: "result" as const,
+        toolCallId: "c1",
+        output: { ok: true }
+      };
+      expect(await answerTool(instance.deps, instance.lane, answer)).toBe(true);
+      expect(sent).toEqual([
+        expect.objectContaining({
+          type: "cf_agent_message_updated",
+          message: expect.objectContaining({ id: "a1" })
+        })
+      ]);
+      expect(await answerTool(instance.deps, instance.lane, answer)).toBe(
+        false
+      );
+      expect(sent).toHaveLength(1);
+    });
+  });
 });

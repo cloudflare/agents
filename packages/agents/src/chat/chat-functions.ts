@@ -591,6 +591,16 @@ async function applyAnswer(
     };
     await session.upsertMessage(next as never);
     await storeTools();
+    // Every tab sees the call answered.
+    const updated = frameText({
+      type: CHAT_MESSAGE_TYPES.MESSAGE_UPDATED,
+      message: next
+    } as { type: string });
+    if (updated !== undefined && deps.webSockets) {
+      for (const connection of deps.webSockets.getConnections()) {
+        sendIfOpen(connection, updated);
+      }
+    }
     // Only the latest reply continues: once a later message moved the chat
     // on, an answer for an older call is stored and nothing more.
     if (i !== history.length - 1) {

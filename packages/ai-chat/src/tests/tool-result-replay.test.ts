@@ -128,7 +128,8 @@ describe("Tool result idempotency (issue #1404)", () => {
       "changeBackgroundColor",
       output
     );
-    expect(secondApplied).toBe(true);
+    // It changes nothing, and says so.
+    expect(secondApplied).toBe(false);
 
     // Give any spurious broadcast a chance to arrive.
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -201,7 +202,7 @@ describe("Tool result idempotency (issue #1404)", () => {
         "output-error",
         errorText
       )
-    ).toBe(true);
+    ).toBe(false);
 
     await new Promise((resolve) => setTimeout(resolve, 250));
     const updatedBroadcasts = broadcasts.filter(
