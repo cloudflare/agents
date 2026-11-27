@@ -48,7 +48,7 @@ async function until(
     if (pred(p)) return p;
     if (Date.now() - start > timeoutMs) {
       throw new Error(
-        `timeout waiting for ${label}: ${JSON.stringify(summary(p)).slice(0, 400)}`
+        `timeout waiting for ${label}: ${JSON.stringify(summary(p)).slice(0, 4000)}`
       );
     }
     await sleep(1000);
@@ -80,7 +80,8 @@ const text = (m: UIMessage) =>
 const summary = (p: Probe) => ({
   roles: roles(p),
   runs: p.runs,
-  submissions: p.submissions
+  submissions: p.submissions,
+  log: p.log
 });
 const awaitsApproval = (p: Probe) =>
   p.messages.some((m) =>
@@ -328,17 +329,23 @@ describe("an upgrade from the latest release, mid-turn", () => {
     ).toBe(true);
     let freshIsolate = false;
     let extraContinue = false;
+    let continueLines = 0;
     for (const line of p.log ?? []) {
       if (line.includes(" main start")) freshIsolate = true;
       else if (
         line.includes("main model call") &&
         line.includes("Continue your previous response")
       ) {
+        continueLines++;
         if (!freshIsolate) extraContinue = true;
         freshIsolate = false;
       }
     }
     expect(extraContinue, breakdown).toBe(false);
+    // The log is best effort: it must hold every continue call counted.
+    expect(continueLines, breakdown).toBe(
+      turns.find((r) => isContinue(r.id))?.n ?? 0
+    );
     for (const n of [1, 2, 3]) {
       expect(
         turns.some((r) => r.id.endsWith(`|submission ${n}`)),
