@@ -19,7 +19,6 @@ import type {
 import { StreamNotFoundError } from "../streams/errors";
 import type { TaskJson } from "../tasks/types";
 import { cancelTurn, submitTurn, type ChatLane } from "./chat-functions";
-import { applyChunkToParts } from "./message-builder";
 import {
   chatTurnStreamId,
   type ChatDeps,
@@ -57,6 +56,15 @@ export async function startAgentToolTurn(
     body?: Record<string, unknown>;
   }
 ): Promise<void> {
+  // The streams earlier agent-tool turns kept are reclaimed now.
+  for (const kept of await deps.streams.list({ state: "completed" })) {
+    if (
+      kept.streamId.startsWith(chatTurnStreamId(agentToolTurnId(""))) &&
+      kept.streamId !== chatTurnStreamId(agentToolTurnId(runId))
+    ) {
+      await deps.streams.delete(kept.streamId);
+    }
+  }
   const agentTool: AgentToolTurnMeta = {
     runId,
     ...(options.terminalOnly ? { terminalOnly: true as const } : {}),
@@ -75,7 +83,14 @@ export async function startAgentToolTurn(
     {
       requestId: agentToolTurnId(runId),
       retain: true,
-      metadata: { agentTool: agentTool as unknown as TaskJson }
+      metadata: {
+        agentTool: agentTool as unknown as TaskJson,
+        // The turn's stream is kept, completed, once its reply is stored,
+        // as the release kept an agent-tool child's: a parent tails, re-
+        // attaches or replays it by position. Reclaimed when the child's
+        // next agent-tool turn starts.
+        chat: { keepStream: true }
+      }
     }
   );
 }
@@ -193,148 +208,6 @@ export function inspectAgentToolTurn(
 }
 
 /**
- * The chunks a model call sends for one stored part, as `id`: a settled
- * part's start, its whole text or input and output, and its end.
- */
-export function chunksOfPart(
-  part: UIMessage["parts"][number],
-  id: string
-): UIMessageChunk[] {
-  const meta = (part as { providerMetadata?: unknown }).providerMetadata;
-  const withMeta = <T extends object>(chunk: T) =>
-    (meta !== undefined
-      ? { ...chunk, providerMetadata: meta }
-      : chunk) as unknown as UIMessageChunk;
-  if (part.type === "text" || part.type === "reasoning") {
-    const kind = part.type;
-    return [
-      withMeta({ type: `${kind}-start`, id }),
-      { type: `${kind}-delta`, id, delta: part.text } as UIMessageChunk,
-      withMeta({ type: `${kind}-end`, id })
-    ];
-  }
-  if (part.type === "dynamic-tool" || part.type.startsWith("tool-")) {
-    const tool = part as {
-      type: string;
-      toolName?: string;
-      toolCallId: string;
-      state: string;
-      input?: unknown;
-      output?: unknown;
-      errorText?: string;
-      providerExecuted?: boolean;
-      title?: string;
-      approval?: { id: string; approved?: boolean; reason?: string };
-      callProviderMetadata?: unknown;
-    };
-    const dynamic = tool.type === "dynamic-tool";
-    const toolName = dynamic
-      ? (tool.toolName ?? "")
-      : tool.type.slice("tool-".length);
-    const chunks: UIMessageChunk[] = [];
-    if (tool.state === "input-streaming") {
-      chunks.push({
-        type: "tool-input-start",
-        toolCallId: tool.toolCallId,
-        toolName,
-        ...(dynamic && { dynamic: true }),
-        ...(tool.title !== undefined && { title: tool.title })
-      } as UIMessageChunk);
-      return chunks;
-    }
-    chunks.push({
-      type: "tool-input-available",
-      toolCallId: tool.toolCallId,
-      toolName,
-      input: tool.input,
-      ...(dynamic && { dynamic: true }),
-      ...(tool.providerExecuted !== undefined && {
-        providerExecuted: tool.providerExecuted
-      }),
-      ...(tool.title !== undefined && { title: tool.title }),
-      ...(tool.callProviderMetadata !== undefined && {
-        providerMetadata: tool.callProviderMetadata
-      })
-    } as UIMessageChunk);
-    if (tool.approval) {
-      chunks.push({
-        type: "tool-approval-request",
-        approvalId: tool.approval.id,
-        toolCallId: tool.toolCallId
-      } as UIMessageChunk);
-    }
-    if (tool.state === "output-available") {
-      chunks.push({
-        type: "tool-output-available",
-        toolCallId: tool.toolCallId,
-        output: tool.output,
-        ...(dynamic && { dynamic: true }),
-        ...(tool.providerExecuted !== undefined && {
-          providerExecuted: tool.providerExecuted
-        })
-      } as UIMessageChunk);
-    } else if (tool.state === "output-error") {
-      chunks.push({
-        type: "tool-output-error",
-        toolCallId: tool.toolCallId,
-        errorText: tool.errorText ?? "",
-        ...(dynamic && { dynamic: true }),
-        ...(tool.providerExecuted !== undefined && {
-          providerExecuted: tool.providerExecuted
-        })
-      } as UIMessageChunk);
-    } else if (tool.state === "output-denied") {
-      chunks.push({
-        type: "tool-output-denied",
-        toolCallId: tool.toolCallId
-      } as UIMessageChunk);
-    }
-    return chunks;
-  }
-  if (part.type.startsWith("data-")) return [part as UIMessageChunk];
-  if (part.type === "file") {
-    return [
-      withMeta({ type: "file", url: part.url, mediaType: part.mediaType })
-    ];
-  }
-  if (part.type === "source-url") {
-    return [{ ...part, type: "source-url" } as UIMessageChunk];
-  }
-  if (part.type === "source-document") {
-    return [{ ...part, type: "source-document" } as UIMessageChunk];
-  }
-  return [];
-}
-
-/**
- * The chunks that build `message` again, so a tab's accumulator makes the
- * stored message: a start, each part as a model call sends it (settled),
- * each step opened and closed, and the finish with the message's metadata.
- * What a parent replays of a turn that settled.
- */
-export function chunksOfMessage(message: UIMessage): UIMessageChunk[] {
-  const chunks: UIMessageChunk[] = [{ type: "start", messageId: message.id }];
-  let inStep = false;
-  message.parts.forEach((part, index) => {
-    if (part.type === "step-start") {
-      if (inStep) chunks.push({ type: "finish-step" });
-      chunks.push({ type: "start-step" });
-      inStep = true;
-      return;
-    }
-    chunks.push(...chunksOfPart(part, `${message.id}-${index}`));
-  });
-  if (inStep) chunks.push({ type: "finish-step" });
-  chunks.push({
-    type: "finish",
-    ...(message.metadata !== undefined && {
-      messageMetadata: message.metadata
-    })
-  } as UIMessageChunk);
-  return chunks;
-}
-
-/**
  * Run `runId`'s chunks after `afterSequence`. While the run is live they
  * are its stream's, numbered by their place in it. Once it settled the
  * cutover dropped the stream: the stored reply's chunks, numbered from 0.
@@ -346,20 +219,9 @@ export async function agentToolTurnChunks(
 ): Promise<AgentToolStoredChunk[]> {
   const id = agentToolTurnId(runId);
   const streamId = chatTurnStreamId(id);
-  if ((await deps.streams.status(streamId)) === null) {
-    const result = deps.tasks.peek(id)?.result as ChatTurnResult | undefined;
-    if (!result?.messageId) return [];
-    const input = deps.tasks.inputOf<{ session?: string }>(id);
-    const message = await deps.sessions
-      .session(input?.session ?? deps.session ?? "")
-      .getMessage(result.messageId);
-    if (!message) return [];
-    // Numbered from 0 as the replay's own: a reader pages through it.
-    const after = options?.afterSequence ?? -1;
-    return chunksOfMessage(message as unknown as UIMessage)
-      .map((chunk, sequence) => ({ sequence, body: JSON.stringify(chunk) }))
-      .filter((chunk) => chunk.sequence > after);
-  }
+  // Its stream is kept once the reply is stored (until the child's next
+  // agent-tool turn starts): none, nothing to read.
+  if ((await deps.streams.status(streamId)) === null) return [];
   // What this isolate buffered is written first.
   deps.streams.__DO_NOT_USE_WILL_BREAK__sync().flush(streamId);
   const from = (options?.afterSequence ?? -1) + 1;
@@ -380,85 +242,6 @@ export async function agentToolTurnChunks(
     if (!stop.signal.aborted) throw error;
   }
   return chunks;
-}
-
-/**
- * @internal The chunks that take what `sent` built to the stored `message`: the rest
- * of a text or reasoning part it left open (under its id), a tool's
- * output it lacks, the parts it never started, the steps, and the finish.
- * The turn writes its last chunks in the step that drops its stream, so a
- * tail that read the stream can miss them.
- */
-export function remainingChunks(
-  sent: readonly UIMessageChunk[],
-  message: UIMessage
-): UIMessageChunk[] {
-  const live: UIMessage["parts"] = [];
-  const open = new Map<string, string>();
-  let inStep = false;
-  for (const chunk of sent) {
-    applyChunkToParts(live as never, chunk as never);
-    const { type, id } = chunk as { type: string; id?: string };
-    if (type === "text-start" || type === "reasoning-start") {
-      open.set(type.slice(0, -"-start".length), id ?? "");
-    } else if (type === "text-end" || type === "reasoning-end") {
-      open.delete(type.slice(0, -"-end".length));
-    } else if (type === "start-step") inStep = true;
-    else if (type === "finish-step") inStep = false;
-  }
-  const out: UIMessageChunk[] = [];
-  message.parts.forEach((part, index) => {
-    const had = live[index] as (typeof live)[number] | undefined;
-    if (part.type === "step-start") {
-      if (had) return;
-      if (inStep) out.push({ type: "finish-step" });
-      out.push({ type: "start-step" });
-      inStep = true;
-      return;
-    }
-    if (!had) {
-      out.push(...chunksOfPart(part, `${message.id}-${index}`));
-      return;
-    }
-    if (part.type === "text" || part.type === "reasoning") {
-      const id = open.get(part.type);
-      if (id === undefined) return;
-      const so = (had as { text?: string }).text ?? "";
-      const delta = part.text.startsWith(so) ? part.text.slice(so.length) : "";
-      if (delta) {
-        out.push({
-          type: `${part.type}-delta`,
-          id,
-          delta
-        } as UIMessageChunk);
-      }
-      out.push({ type: `${part.type}-end`, id } as UIMessageChunk);
-      return;
-    }
-    const state = (had as { state?: string }).state;
-    if (
-      (part.type === "dynamic-tool" || part.type.startsWith("tool-")) &&
-      state !== (part as { state?: string }).state
-    ) {
-      // The tool's settled chunks after what the tail sent of it.
-      out.push(
-        ...chunksOfPart(part, `${message.id}-${index}`).filter(
-          (chunk) =>
-            chunk.type.startsWith("tool-output") ||
-            (chunk.type === "tool-input-available" &&
-              state === "input-streaming")
-        )
-      );
-    }
-  });
-  if (inStep) out.push({ type: "finish-step" });
-  out.push({
-    type: "finish",
-    ...(message.metadata !== undefined && {
-      messageMetadata: message.metadata
-    })
-  } as UIMessageChunk);
-  return out;
 }
 
 /**
@@ -484,38 +267,6 @@ export async function tailAgentToolTurn(
   const line = (sequence: number, chunk: unknown) =>
     `${JSON.stringify({ sequence, body: JSON.stringify(chunk) })}\n`;
   let reader: AsyncGenerator<{ seq: number; chunk: unknown }[]> | undefined;
-  let last: { sequence: number; type: unknown } | undefined;
-  // What this tail sent, to finish the message from where it stopped.
-  const sent: UIMessageChunk[] = [];
-  // The turn writes its last chunks as it stores the reply and drops the
-  // stream, in one step a reader cannot see: when the stream ended before
-  // the reply's finish, the stored reply's finish closes the message.
-  const end = async (
-    controller: ReadableStreamDefaultController<Uint8Array>
-  ) => {
-    if (!signal.aborted && last?.type !== "finish") {
-      const id = agentToolTurnId(runId);
-      const record = await deps.tasks.wait(id, { signal }).catch(() => null);
-      const messageId = (record?.result as ChatTurnResult | undefined)
-        ?.messageId;
-      if (record?.status === "completed" && messageId) {
-        const input = deps.tasks.inputOf<{ session?: string }>(id);
-        const message = await deps.sessions
-          .session(input?.session ?? deps.session ?? "")
-          .getMessage(messageId);
-        if (message) {
-          let sequence = last?.sequence ?? options.afterSequence ?? -1;
-          const rest = remainingChunks(sent, message as unknown as UIMessage);
-          controller.enqueue(
-            encoder.encode(
-              rest.map((chunk) => line(++sequence, chunk)).join("")
-            )
-          );
-        }
-      }
-    }
-    controller.close();
-  };
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       reader ??= deps.streams.readBatches(streamId, {
@@ -524,14 +275,11 @@ export async function tailAgentToolTurn(
       }) as AsyncGenerator<{ seq: number; chunk: unknown }[]>;
       try {
         const next = await reader.next();
-        if (next.done) return await end(controller);
+        if (next.done) {
+          controller.close();
+          return;
+        }
         const batch = next.value;
-        const tip = batch[batch.length - 1];
-        last = {
-          sequence: tip.seq,
-          type: (tip.chunk as { type?: unknown } | null)?.type
-        };
-        for (const item of batch) sent.push(item.chunk as UIMessageChunk);
         controller.enqueue(
           encoder.encode(
             batch.map((item) => line(item.seq, item.chunk)).join("")
@@ -540,9 +288,9 @@ export async function tailAgentToolTurn(
       } catch (error) {
         // A stop of the read ends the tail; a stream deleted as the turn
         // settled ends it as a settled stream does.
-        if (signal.aborted) controller.close();
-        else if (error instanceof StreamNotFoundError) await end(controller);
-        else controller.error(error);
+        if (signal.aborted || error instanceof StreamNotFoundError) {
+          controller.close();
+        } else controller.error(error);
       }
     },
     cancel() {
@@ -624,7 +372,14 @@ export async function carryForwardAgentToolRuns(
    * carried: its run stays in the table until that step keys it under the
    * run's id (and calls this again).
    */
-  pendingTurn: (requestId: string) => boolean = () => false
+  pendingTurn: (requestId: string) => boolean = () => false,
+  /**
+   * Whether the tables may be dropped, asked once Tasks has started. A
+   * facet must not drop a table an
+   * earlier version made (it can reset its tree's storage): it deletes the
+   * rows and leaves the empty table, which the next start skips.
+   */
+  mayDrop: () => boolean = () => true
 ): Promise<void> {
   const exists = (name: string) =>
     sql
@@ -634,6 +389,9 @@ export async function carryForwardAgentToolRuns(
       )
       .toArray().length > 0;
   if (!exists(tables.runs)) return;
+  if (sql.exec(`SELECT 1 FROM ${tables.runs} LIMIT 1`).toArray().length === 0) {
+    return;
+  }
   // Tasks' own reads below need it started (its tables migrated): this
   // runs from a constructor.
   await deps.tasks.get(agentToolTurnId(""));
@@ -781,6 +539,11 @@ export async function carryForwardAgentToolRuns(
         ...waiting
       );
     }
+    return;
+  }
+  if (!mayDrop()) {
+    sql.exec(`DELETE FROM ${tables.runs}`);
+    if (exists(tables.milestones)) sql.exec(`DELETE FROM ${tables.milestones}`);
     return;
   }
   sql.exec(`DROP TABLE IF EXISTS ${tables.milestones}`);

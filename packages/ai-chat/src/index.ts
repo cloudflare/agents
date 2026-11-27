@@ -545,7 +545,9 @@ export class AIChatAgent<
         milestones: "cf_ai_chat_agent_tool_milestones"
       },
       CHAT_TURN_DEFINITION,
-      (requestId) => this._releasedTurnWaits(requestId)
+      (requestId) => this._releasedTurnWaits(requestId),
+      // A sub-agent (a facet) empties them; only a root drops them.
+      () => !this._isFacetForCarry()
     );
   }
 
@@ -561,6 +563,11 @@ export class AIChatAgent<
       ...(last.messageIds && { messageIds: last.messageIds })
     });
     kv.delete(CHAT_LAST_TERMINAL_KEY);
+  }
+
+  /** Whether this agent runs as a facet (a sub-agent). */
+  private _isFacetForCarry(): boolean {
+    return (this as unknown as { _isFacet?: boolean })._isFacet === true;
   }
 
   /** Whether a released turn of `requestId` is still to be carried. */

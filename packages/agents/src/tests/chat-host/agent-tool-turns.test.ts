@@ -1,7 +1,11 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { ChatTurnHostObject } from "../capabilities/chat-turn";
-import type { ChatHost, ChatModelCall } from "../../chat/chat-host";
+import {
+  chatTurnStreamId,
+  type ChatHost,
+  type ChatModelCall
+} from "../../chat/chat-host";
 import { submitTurn } from "../../chat/chat-functions";
 import { applyChunkToParts } from "../../chat/message-builder";
 import type { UIMessage } from "ai";
@@ -9,13 +13,11 @@ import {
   agentToolTurnChunks,
   agentToolTurnId,
   agentToolTurnOf,
-  chunksOfMessage,
   cancelAgentToolTurn,
   carryForwardAgentToolRuns,
   inspectAgentToolTurn,
   recordAgentToolProgress,
   releasedAgentToolRunOfRequest,
-  remainingChunks,
   startAgentToolTurn
 } from "../../chat/agent-tool-turns";
 
@@ -32,101 +34,6 @@ const collect = (messageId: string | undefined) => ({
 });
 
 describe("agent-tool runs as chat turns", () => {
-  it("turns a stored reply into chunks that build the same parts", () => {
-    const message = {
-      id: "m1",
-      role: "assistant",
-      parts: [
-        { type: "step-start" },
-        { type: "reasoning", text: "thinking", state: "done" },
-        { type: "text", text: "Looking.", state: "done" },
-        {
-          type: "tool-search",
-          toolName: "search",
-          toolCallId: "c1",
-          state: "output-available",
-          input: { q: "x" },
-          output: { hits: 2 }
-        },
-        {
-          type: "tool-fetch",
-          toolName: "fetch",
-          toolCallId: "c2",
-          state: "output-error",
-          input: { url: "u" },
-          errorText: "404"
-        },
-        {
-          type: "data-agent-milestone",
-          data: { name: "found", sequence: 0, at: 1 }
-        },
-        { type: "step-start" },
-        { type: "text", text: "Done.", state: "done" }
-      ],
-      metadata: { model: "m" }
-    } as unknown as UIMessage;
-    const chunks = chunksOfMessage(message);
-    const parts: UIMessage["parts"] = [];
-    for (const chunk of chunks) {
-      applyChunkToParts(parts, chunk as never);
-    }
-    // The accumulator a tab uses makes the stored parts, exactly.
-    expect(parts).toEqual(message.parts);
-    // Each step opened and closed, the milestone once in its place, and
-    // the finish carries the message's metadata.
-    const types = chunks.map((chunk) => chunk.type);
-    expect(types.filter((type) => type === "start-step")).toHaveLength(2);
-    expect(types.filter((type) => type === "finish-step")).toHaveLength(2);
-    expect(
-      types.filter((type) => type === "data-agent-milestone")
-    ).toHaveLength(1);
-    expect(chunks.at(-1)).toEqual({
-      type: "finish",
-      messageMetadata: { model: "m" }
-    });
-  });
-
-  it("finishes a tail cut short as the turn ended, from the stored reply", () => {
-    const stored = {
-      id: "m2",
-      role: "assistant",
-      parts: [
-        { type: "step-start" },
-        { type: "text", text: "One two", state: "done" },
-        {
-          type: "tool-search",
-          toolName: "search",
-          toolCallId: "c1",
-          state: "output-available",
-          input: { q: "x" },
-          output: { hits: 2 }
-        },
-        { type: "step-start" },
-        { type: "text", text: "Three", state: "done" }
-      ],
-      metadata: { model: "m" }
-    } as unknown as UIMessage;
-    // What a tail had read when the stream went: mid-text, mid-tool.
-    const sent = [
-      { type: "start", messageId: "m2" },
-      { type: "start-step" },
-      { type: "text-start", id: "t1" },
-      { type: "text-delta", id: "t1", delta: "One" }
-    ] as never[];
-    const rest = remainingChunks(sent, stored);
-    const parts: UIMessage["parts"] = [];
-    for (const chunk of [...sent, ...rest]) {
-      applyChunkToParts(parts, chunk as never);
-    }
-    expect(parts).toEqual(stored.parts);
-    // The open text part goes on under its own id; the finish closes it.
-    expect(rest[0]).toEqual({ type: "text-delta", id: "t1", delta: " two" });
-    expect(rest.at(-1)).toEqual({
-      type: "finish",
-      messageMetadata: { model: "m" }
-    });
-  });
-
   it("runs under its own turn id and is read off that run when it settles", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
@@ -153,7 +60,7 @@ describe("agent-tool runs as chat turns", () => {
     });
   });
 
-  it("replays a settled turn from its stored reply", async () => {
+  it("keeps a settled turn's stream until the next agent-tool turn starts", async () => {
     const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
     await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
       await instance.lifecycle.start();
@@ -167,20 +74,33 @@ describe("agent-tool runs as chat turns", () => {
         }
       );
       await instance.tasks.wait(agentToolTurnId("run-done"));
-      const chunks = await agentToolTurnChunks(instance.deps, "run-done");
-      expect(chunks.map((chunk) => JSON.parse(chunk.body))).toEqual([
-        { type: "start", messageId: "reply-1" },
-        { type: "text-start", id: "reply-1-0" },
-        { type: "text-delta", id: "reply-1-0", delta: "Hello" },
-        { type: "text-end", id: "reply-1-0" },
-        { type: "finish" }
-      ]);
-      // A reader with a position pages through the replay.
+      // The turn kept its stream: a later reader gets the live chunks, by
+      // the same positions.
+      const streamId = chatTurnStreamId(agentToolTurnId("run-done"));
+      expect(await instance.streams.status(streamId)).toMatchObject({
+        state: "completed"
+      });
+      const kept = await agentToolTurnChunks(instance.deps, "run-done");
+      expect(kept.length).toBeGreaterThan(0);
+      expect(kept.map((chunk) => chunk.sequence)).toEqual(
+        kept.map((_, index) => index)
+      );
       expect(
         await agentToolTurnChunks(instance.deps, "run-done", {
-          afterSequence: 3
+          afterSequence: kept.length - 2
         })
-      ).toEqual([{ sequence: 4, body: JSON.stringify({ type: "finish" }) }]);
+      ).toEqual([kept[kept.length - 1]]);
+      // The child's next agent-tool turn reclaims it.
+      await startAgentToolTurn(
+        instance.deps,
+        instance.lane,
+        "run-next",
+        input,
+        {
+          startMessageId: null
+        }
+      );
+      expect(await instance.streams.status(streamId)).toBeNull();
     });
   });
 
@@ -427,6 +347,48 @@ describe("agent-tool runs as chat turns", () => {
         expect(
           releasedAgentToolRunOfRequest(sql, "released_runs", "released-req")
         ).toBeNull();
+      }
+    );
+  });
+
+  it("in a facet, empties the released tables instead of dropping them", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(
+      stub,
+      async (instance: ChatTurnHostObject, state) => {
+        await instance.lifecycle.start();
+        const sql = state.storage.sql;
+        sql.exec(
+          "CREATE TABLE released_runs (run_id TEXT PRIMARY KEY, request_id TEXT, status TEXT NOT NULL, input_json TEXT, output_json TEXT, summary TEXT, error_message TEXT, started_at INTEGER NOT NULL, completed_at INTEGER, progress_json TEXT, last_signal_at INTEGER, event_delivery TEXT)"
+        );
+        sql.exec(
+          "CREATE INDEX idx_released_request ON released_runs(request_id)"
+        );
+        sql.exec(
+          "INSERT INTO released_runs (run_id, request_id, status, summary, started_at, completed_at) VALUES ('done-run', 'r1', 'completed', 'done', 1, 2)"
+        );
+        const carry = () =>
+          carryForwardAgentToolRuns(
+            instance.deps,
+            sql,
+            { runs: "released_runs", milestones: "released_milestones" },
+            "chat",
+            () => false,
+            () => false
+          );
+        await carry();
+        expect(
+          inspectAgentToolTurn(instance.deps, "done-run", collect)
+        ).toMatchObject({ status: "completed", summary: "done" });
+        // The table stays, empty; the next start finds nothing to carry.
+        const left = sql
+          .exec(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'released_runs'"
+          )
+          .toArray();
+        expect(left).toHaveLength(1);
+        expect(sql.exec("SELECT * FROM released_runs").toArray()).toEqual([]);
+        await carry();
       }
     );
   });
