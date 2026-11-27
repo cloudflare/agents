@@ -1879,4 +1879,119 @@ describe("chat functions over a minimal host", () => {
       expect(await instance.sessions.session("s1").getHistory()).toEqual([]);
     });
   });
+
+  it("a tab that comes back after its request ended is offered it, and its ack replays how it ended", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      // r1 ends while no tab is connected.
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequest("r1", "Hi")
+      );
+      await instance.resultFor("r1");
+      const sent: Array<Record<string, unknown>> = [];
+      const back = recordingTab("tab-b", sent);
+      await resumeChat(instance.deps, instance.lane, back, "p1", ["r1"]);
+      expect(sent).toEqual([
+        { type: "cf_agent_stream_resuming", id: "r1", probeId: "p1" }
+      ]);
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        back,
+        JSON.stringify({ type: "cf_agent_stream_resume_ack", id: "r1" })
+      );
+      expect(sent[1]).toMatchObject({
+        type: "cf_agent_use_chat_response",
+        id: "r1",
+        done: true,
+        replay: true,
+        outcome: "completed"
+      });
+    });
+  });
+
+  it("a tab waiting on several requests that ended is told how each ended, the newest after its ack", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequest("r1", "Hi")
+      );
+      await instance.resultFor("r1");
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequestWith("r2", "u2", "Again")
+      );
+      await instance.resultFor("r2");
+      const sent: Array<Record<string, unknown>> = [];
+      await resumeChat(
+        instance.deps,
+        instance.lane,
+        recordingTab("tab-m", sent),
+        undefined,
+        ["r1", "r2"]
+      );
+      expect(sent[0]).toMatchObject({ id: "r1", done: true, replay: true });
+      expect(sent[1]).toEqual({ type: "cf_agent_stream_resuming", id: "r2" });
+    });
+  });
+
+  it("a chat clear forgets how earlier requests ended", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      await chatDispatch(
+        instance.deps,
+        instance.lane,
+        tab,
+        chatRequest("r1", "Hi")
+      );
+      await instance.resultFor("r1");
+      await clearChat(instance.deps, instance.lane);
+      const sent: Array<Record<string, unknown>> = [];
+      await resumeChat(
+        instance.deps,
+        instance.lane,
+        recordingTab("tab-c", sent),
+        undefined,
+        ["r1"]
+      );
+      expect(sent).toEqual([{ type: "cf_agent_stream_resume_none" }]);
+    });
+  });
+
+  it("a request dropped while no tab listened is offered to a tab that comes back for it", async () => {
+    const stub = env.ChatTurnHostObject.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (instance: ChatTurnHostObject) => {
+      await instance.lifecycle.start();
+      const lane = { ...instance.lane, arrival: "drop" as const };
+      const finish = await holdFirstTurn(instance, lane);
+      await chatDispatch(
+        instance.deps,
+        lane,
+        tab,
+        chatRequestWith("r2", "u2", "two")
+      );
+      await finish();
+      const sent: Array<Record<string, unknown>> = [];
+      const back = recordingTab("tab-d2", sent);
+      await resumeChat(instance.deps, instance.lane, back, undefined, ["r2"]);
+      expect(sent[0]).toEqual({ type: "cf_agent_stream_resuming", id: "r2" });
+      await replayTurn(instance.deps, back, "r2");
+      expect(sent[1]).toMatchObject({
+        id: "r2",
+        done: true,
+        outcome: "skipped"
+      });
+    });
+  });
 });

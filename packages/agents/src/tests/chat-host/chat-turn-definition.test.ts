@@ -150,6 +150,7 @@ describe("chatTurnDefinition", () => {
           tasks: instance.tasks,
           streams: instance.streams,
           sessions: instance.sessions,
+          kv: instance.kv,
           session: "s1"
         },
         instance.host
@@ -223,6 +224,7 @@ describe("chatTurnDefinition", () => {
         tasks: instance.tasks,
         streams: instance.streams,
         sessions: instance.sessions,
+        kv: instance.kv,
         session: "s1"
       },
       host
@@ -343,6 +345,7 @@ describe("chatTurnDefinition", () => {
           tasks: instance.tasks,
           streams: instance.streams,
           sessions: instance.sessions,
+          kv: instance.kv,
           session: "s1",
           webSockets: { getConnections: () => [tab] } as never
         },
@@ -1014,6 +1017,7 @@ describe("chatTurnDefinition", () => {
           tasks: instance.tasks,
           streams: instance.streams,
           sessions: instance.sessions,
+          kv: instance.kv,
           session: "s1",
           webSockets: { getConnections: () => [tab] } as never
         },

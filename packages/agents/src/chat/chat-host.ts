@@ -29,6 +29,10 @@ import { sendIfOpen } from "./connection";
 import { CHAT_MESSAGE_TYPES } from "./protocol";
 import { responseSource } from "./reply-source";
 import { ROW_VALUE_BYTES, utf8Length } from "../internal/platform-limits";
+import {
+  recordRecentChatTerminal,
+  type RecentTerminalsKv
+} from "./recent-terminals";
 
 /** The capabilities the chat functions are given. They own every row and job. */
 export interface ChatDeps {
@@ -39,6 +43,12 @@ export interface ChatDeps {
   readonly webSockets?: WebSockets;
   /** The Sessions session the chat's transcript is in. */
   readonly session?: string;
+  /**
+   * The object's synchronous key-value storage (`ctx.storage.kv`). The chat
+   * keeps the ends of its last requests there, so a tab that was away when
+   * its request ended learns how it ended.
+   */
+  readonly kv: RecentTerminalsKv;
 }
 
 /**
@@ -670,17 +680,20 @@ export function chatTurnDefinition(
     const streamId = chatTurnStreamId(requestId);
     // Every tab sees the reply as it streams, and how it ended.
     const send = (fields: Record<string, unknown>) => {
-      if (!deps.webSockets) return;
       const frame = {
         type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
         id: requestId,
         ...fields
       };
-      const text = frameText(frame);
-      if (text === undefined) return;
-      for (const connection of deps.webSockets.getConnections()) {
-        sendIfOpen(connection, text);
+      const sockets = deps.webSockets;
+      const text = sockets ? frameText(frame) : undefined;
+      if (sockets && text !== undefined) {
+        for (const connection of sockets.getConnections()) {
+          sendIfOpen(connection, text);
+        }
       }
+      // An end is kept, after it is sent, for a tab that is away now.
+      if (fields.done === true) recordRecentChatTerminal(deps.kv, frame);
     };
     // A regenerated reply is a new branch under its question.
     const placement =
