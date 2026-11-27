@@ -233,7 +233,12 @@ function saveResult(result: ThinkOperationResult): SaveMessagesResult {
   }
   return {
     requestId: result.operationId,
-    status: result.reason === "aborted" ? "aborted" : "error",
+    // A stopped turn ends "aborted"; one stopped while it waited, before it
+    // started, ends "withdrawn". Think reports both as aborted.
+    status:
+      result.reason === "aborted" || result.reason === "withdrawn"
+        ? "aborted"
+        : "error",
     ...(result.reason !== undefined && { error: result.reason })
   };
 }
