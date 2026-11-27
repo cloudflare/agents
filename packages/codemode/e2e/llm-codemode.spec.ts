@@ -29,8 +29,9 @@ async function runChat(
     },
     timeout: 45_000
   });
-  expect(res.ok()).toBe(true);
-  return res.text();
+  const text = await res.text();
+  expect(res.ok(), `${res.status()}: ${text.slice(0, 2000)}`).toBe(true);
+  return text;
 }
 
 // ── Multi-provider with LLM ───────────────────────────────────────
@@ -49,7 +50,7 @@ test.describe("Multi-provider LLM e2e", () => {
       "/run-multi"
     );
 
-    expect(response).toContain("42");
+    expect(response, response.slice(0, 2000)).toContain("42");
   });
 
   test("LLM combines tools from both namespaces", async ({
@@ -65,8 +66,12 @@ test.describe("Multi-provider LLM e2e", () => {
 
     // 10 + 5 = 15, 15 * 3 = 45
     const lower = response.toLowerCase();
+    // The reply, in the failure, says whether the model or the tools went wrong.
     expect(
-      lower.includes("45") || lower.includes("15") || lower.includes("multiply")
+      lower.includes("45") ||
+        lower.includes("15") ||
+        lower.includes("multiply"),
+      response.slice(0, 2000)
     ).toBe(true);
   });
 });
