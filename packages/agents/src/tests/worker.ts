@@ -51,6 +51,7 @@ export {
   TaskStreamComposeObject
 } from "./capabilities/streams.ts";
 export { StreamBenchObject } from "./capabilities/streams-bench.ts";
+export { ChatTurnHostObject } from "./capabilities/chat-turn.ts";
 export { ThinkChannelsObject } from "./capabilities/think-channels.ts";
 import type { ThinkChannelsObject } from "./capabilities/think-channels.ts";
 export {
@@ -73,6 +74,7 @@ import type {
   TaskStreamComposeObject
 } from "./capabilities/streams.ts";
 import type { StreamBenchObject } from "./capabilities/streams-bench.ts";
+import type { ChatTurnHostObject } from "./capabilities/chat-turn.ts";
 import type { SqliteStrategiesBench } from "./capabilities/sqlite-strategies-bench.ts";
 import type {
   SessionBenchObject,
@@ -295,6 +297,7 @@ export type Env = {
   STREAMS_R2: R2Bucket;
   TaskStreamComposeObject: DurableObjectNamespace<TaskStreamComposeObject>;
   StreamBenchObject: DurableObjectNamespace<StreamBenchObject>;
+  ChatTurnHostObject: DurableObjectNamespace<ChatTurnHostObject>;
   SessionHarnessObject: DurableObjectNamespace<SessionHarnessObject>;
   SessionSearchHarnessObject: DurableObjectNamespace<SessionSearchHarnessObject>;
   SessionBenchObject: DurableObjectNamespace<SessionBenchObject>;
