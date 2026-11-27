@@ -298,6 +298,7 @@ interface ChatRecoveryTestStub {
     }
   ): Promise<string>;
   startedFailingTurnStatusForTest(): Promise<string>;
+  endRetryWaitsForTest(): Promise<number>;
   openChatLaneRunsForTest(): Promise<number>;
   setStashData(data: unknown): Promise<void>;
   trackRecoveryTaskKeysForTest(): Promise<void>;
@@ -4215,26 +4216,22 @@ describe("platform-transient reader errors (#1964)", () => {
     ["once", 1],
     ["again while it recovers", 2]
   ])(
-    "answers a question sent during a recovery's backoff after the recovered reply, cut off %s",
+    "answers a question sent while a turn waits for its next attempt after that turn's reply, cut off %s",
     async (_, cuts) => {
       const room = `transient-newer-question-${crypto.randomUUID()}`;
       const agentStub = await getTestAgent(room);
 
-      // Turn 1 is cut off and its recovery is scheduled, with its backoff
-      // held. With two cuts, the recovered reply is cut off too and recovers
-      // again, after a second held backoff.
-      expect(
-        await agentStub.driveFailingReaderTurnForTest(
-          "Network connection lost.",
-          cuts,
-          HELD_BACKOFF
-        )
-      ).toBe("aborted");
-      await recoveryBacksOff(agentStub);
+      // The first turn is cut off and waits a minute for its next attempt.
+      // With two cuts, that attempt is cut off too and waits again.
+      await agentStub.startFailingReaderTurnForTest(
+        "Network connection lost.",
+        cuts,
+        HELD_BACKOFF
+      );
       const stored = (await agentStub.getPersistedMessages()) as ChatMessage[];
 
-      // A tab sends a second question during the backoff. It waits in the
-      // lane behind the recovery, which holds it (ChatOrder).
+      // A tab sends a second question during the wait. It waits in the lane
+      // behind the first turn, which holds it (ChatOrder).
       const { ws } = await connectChatWS(
         `/agents/chat-recovery-test-agent/${room}`
       );
@@ -4258,10 +4255,6 @@ describe("platform-transient reader errors (#1964)", () => {
           answered = true;
         }
       });
-      // Still in the first backoff: the recovered reply has not started.
-      expect(await agentStub.getChatRecoveryIncidentsForTest()).toEqual([
-        expect.objectContaining({ status: "scheduled", attempt: 1 })
-      ]);
       ws.send(
         JSON.stringify({
           type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
@@ -4276,18 +4269,18 @@ describe("platform-transient reader errors (#1964)", () => {
       // off: its lane run is open beside that turn's, and nothing ran.
       await vi.waitFor(
         async () => {
-          expect(await agentStub.openChatTurnRunsForTest()).toBe(2);
+          expect(await agentStub.openChatLaneRunsForTest()).toBe(2);
         },
         { timeout: 10_000, interval: 20 }
       );
       expect(answered).toBe(false);
       expect(await agentStub.getOnChatMessageCallCount()).toBe(1);
 
-      // Now the backoffs end, one for each cut: the recovery runs, and the
-      // question after it.
+      // Now the waits end, one for each cut: the first turn is finished,
+      // and the question is answered after it.
       await vi.waitFor(
         async () => {
-          await agentStub.endRecoveryBackoffsForTest();
+          await agentStub.endRetryWaitsForTest();
           expect(answered).toBe(true);
         },
         { timeout: 10_000, interval: 50 }
@@ -4311,16 +4304,4 @@ describe("platform-transient reader errors (#1964)", () => {
     // Above the three bounded waits (10 s each) taken together.
     60_000
   );
-
-  it("delivers a terminal error when routing into recovery throws", async () => {
-    const agentStub = await getTestAgent(
-      `transient-route-throws-${crypto.randomUUID()}`
-    );
-    await agentStub.failNextIncidentBeginForTest();
-
-    expect(
-      await agentStub.driveFailingReaderTurnForTest("Network connection lost.")
-    ).toBe("error");
-    expect(await agentStub.getChatRecoveryIncidentsForTest()).toHaveLength(0);
-  });
 });

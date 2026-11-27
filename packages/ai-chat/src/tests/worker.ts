@@ -4611,6 +4611,31 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
     return this._startedFailingTurn;
   }
 
+  /**
+   * End the wait of every chat turn that waits for its next attempt: the
+   * attempt is made due and the alarm run. Returns how many waited.
+   */
+  async endRetryWaitsForTest(): Promise<number> {
+    const past = Date.now() - 1_000;
+    const waiting = this.sql<{ run_id: string }>`
+      SELECT run_id FROM cf_agents_task_runs
+      WHERE lane = 'chat' AND status IN ('pending', 'running')
+        AND next_at > ${Date.now() + 1_000}
+    `;
+    for (const { run_id } of waiting) {
+      this.sql`
+        UPDATE cf_agents_task_runs SET next_at = ${past}
+        WHERE run_id = ${run_id}
+      `;
+      this.sql`
+        UPDATE cf_agents_jobs SET time = ${past}
+        WHERE id = ${`task:${run_id}`}
+      `;
+    }
+    if (waiting.length > 0) await this.alarm();
+    return waiting.length;
+  }
+
   /** Chat turn runs of the chat lane that have not ended. */
   openChatLaneRunsForTest(): number {
     return (
