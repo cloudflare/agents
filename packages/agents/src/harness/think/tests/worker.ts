@@ -45,6 +45,7 @@ const BEFORE_TURN_CALLS_KEY = "test:before-turn:calls";
 /** `operationChunks` and `followOperation` lengths at each `beforeTurn`. */
 const OPERATION_CHUNKS_KEY = "test:before-turn:operation-chunks";
 const SYSTEM_KEY = "test:system";
+const STALL_NEXT_KEY = "test:stall-next";
 const NOTE_IN_BEFORE_TURN_KEY = "test:note-in-before-turn";
 const ACTIVE_TOOLS_KEY = "test:active-tools";
 const LATE_EXAMPLES_KEY = "test:late-examples";
@@ -497,6 +498,21 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   #stalledEmpty = false;
 
   #reply(prompt: PromptMessage[]): ReadableStream<StreamPart> {
+    if (this.ctx.storage.kv.get<boolean>(STALL_NEXT_KEY)) {
+      // The next call streams a little, then stalls: its retry waits.
+      this.ctx.storage.kv.put(STALL_NEXT_KEY, false);
+      return new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "text-start", id: "partial" });
+          controller.enqueue({
+            type: "text-delta",
+            id: "partial",
+            delta: "half an answer"
+          });
+        }
+      });
+    }
     const last = prompt.filter((m) => m.role !== "system").at(-1);
     let parts: StreamPart[];
     const first = prompt.find((m) => m.role === "user");
@@ -1326,6 +1342,28 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   /** Treat a model stream silent this long as stalled. */
+  /** The next model call streams a little, then stalls. */
+  stallNextCall(): void {
+    this.ctx.storage.kv.put(STALL_NEXT_KEY, true);
+  }
+
+  /** Whether an operation's run waits out a retry's backoff now. */
+  waitsToRetry(operationId: string, session = ""): boolean {
+    return (
+      this.tasks.peek(JSON.stringify([session, operationId]))?.waitReason ===
+      "retry"
+    );
+  }
+
+  /** Each message's text, along the latest path. */
+  async messageTexts(): Promise<string[]> {
+    return (await this.harness.session().messages()).map((message) =>
+      message.parts
+        .flatMap((part) => (part.type === "text" ? [part.text] : []))
+        .join("")
+    );
+  }
+
   setStallTimeout(ms: number): void {
     this.#recovery.stallTimeoutMs = ms;
   }

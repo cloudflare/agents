@@ -2193,6 +2193,24 @@ describe("ThinkHarness sessions", () => {
     expect(listed.find((s) => s.id === fork)?.parent).toBe("");
   });
 
+  it("keeps a regeneration's partial on its own branch when it is stopped while it waits to retry", async () => {
+    const stub = fresh();
+    await stub.prompt("hello");
+    const before = await stub.messageIds();
+    await stub.setStallTimeout(50);
+    await stub.stallNextCall();
+    const receipt = await stub.regenerate();
+    await vi.waitUntil(() => stub.waitsToRetry(receipt.operationId), {
+      timeout: 5000
+    });
+    await stub.abort(receipt.operationId);
+    expect((await stub.wait(receipt.operationId)).status).toBe("unanswered");
+    // The partial is the user message's second answer, not a reply to the
+    // first answer.
+    expect(await stub.branches(before[0] ?? "")).toBe(2);
+    expect(await stub.messageTexts()).toEqual(["hello", "half an answer"]);
+  });
+
   it("regenerates an answer as a new branch", async () => {
     const stub = fresh();
     await stub.prompt("hello");

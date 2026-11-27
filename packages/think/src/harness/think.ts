@@ -29,6 +29,12 @@ import type {
   SaveMessagesResult
 } from "agents/chat";
 import {
+  chatDispatch,
+  resumeChat,
+  type ChatArrival,
+  type MessageConcurrency
+} from "agents/chat";
+import {
   ThinkChat,
   ThinkHarness,
   type ThinkErrorClass,
@@ -369,6 +375,47 @@ function saveResult(result: ThinkOperationResult): SaveMessagesResult {
     status: "error",
     ...(result.reason !== undefined && { error: result.reason })
   };
+}
+
+/** The request a tab's stop frame names, if `message` is one. */
+function cancelledRequestOf(message: WSMessage): string | undefined {
+  if (typeof message !== "string" || !message.includes("_cancel")) {
+    return undefined;
+  }
+  try {
+    const frame = JSON.parse(message) as { type?: unknown; id?: unknown };
+    return frame.type === "cf_agent_chat_request_cancel" &&
+      typeof frame.id === "string"
+      ? frame.id
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Frames a turn and the shared chat dispatch send themselves (H2c). */
+const TURN_FRAMES = new Set<string>([
+  "cf_agent_use_chat_response",
+  "cf_agent_stream_resuming",
+  "cf_agent_stream_resume_none",
+  "cf_agent_stream_pending"
+]);
+
+/** `connection`, with the frames turns send themselves left out. */
+function withoutTurnFrames(connection: Connection): Connection {
+  return new Proxy(connection, {
+    get(target, key) {
+      if (key === "send") {
+        return (text: string) => {
+          const type = /^\{"type":"([^"]+)"/.exec(text)?.[1];
+          if (type !== undefined && TURN_FRAMES.has(type)) return;
+          target.send(text);
+        };
+      }
+      const value = Reflect.get(target, key) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
 }
 
 export class Think<
@@ -990,10 +1037,16 @@ export class Think<
         classifyError: (error) => this.#classify(error)
       }
     });
+    // Turns frame their replies to the tabs themselves (H2c): the harness
+    // hands them this host from the start, so an RPC turn frames too.
+    this.harness.chatDeps("", this.#chatHostDeps());
     this.#chat = new ThinkChat({
       harness: this.harness,
       webSockets: {
-        getConnections: () => this.getConnections(),
+        // Turns frame their own replies and the shared dispatch answers
+        // resumes (H2c): ThinkChat keeps the transcript, clear and connect
+        // frames, and its turn frames are left out.
+        getConnections: () => [...this.getConnections()].map(withoutTurnFrames),
         use: (handlers) => {
           this.#handlers.push(handlers);
         }
@@ -1957,6 +2010,30 @@ export class Think<
 
   #wakeStableWaiters(): void {
     for (const wake of this.#stableWaiters.splice(0)) wake();
+  }
+
+  /**
+   * Controls how overlapping user submit requests behave while another
+   * chat turn is already active or queued, as on Think.
+   *
+   * @default "queue"
+   */
+  messageConcurrency: MessageConcurrency = "queue";
+
+  /** How a tab's request joins the lane, as `messageConcurrency` says. */
+  #arrival(): ChatArrival {
+    const concurrency = this.messageConcurrency;
+    if (typeof concurrency !== "object") return concurrency;
+    // A missing or invalid window falls back to Think's default.
+    const { debounceMs } = concurrency;
+    return {
+      debounceMs:
+        typeof debounceMs === "number" &&
+        Number.isFinite(debounceMs) &&
+        debounceMs >= 0
+          ? debounceMs
+          : 750
+    };
   }
 
   async getMessages(): Promise<UIMessage[]> {
@@ -3582,12 +3659,37 @@ export class Think<
     await this.#transcript.sync();
   }
 
+  /** The host side of the shared chat dispatch: storage, sockets, events. */
+  #chatHostDeps() {
+    return {
+      kv: this.ctx.storage.kv,
+      webSockets: { getConnections: () => this.getConnections() },
+      emit: (type: string, payload: Record<string, unknown>) =>
+        (
+          this._emit as unknown as (
+            type: string,
+            payload: Record<string, unknown>
+          ) => void
+        ).call(this, type, payload)
+    };
+  }
+
   /** Route this Agent's connections through ThinkChat's handlers. */
   #installProtocol(): void {
     const onConnect = this.onConnect.bind(this);
     this.onConnect = async (connection: Connection, ctx: ConnectionContext) => {
       for (const handlers of this.#handlers) {
         await handlers.onConnect?.(connection, ctx);
+      }
+      // A turn streams or waits to: the tab is offered its stream through
+      // the shared dispatch, the one resume path (H2c), as AIChatAgent's is.
+      const session = this.harness.session().id;
+      if ((await this.harness.session().pending()).length > 0) {
+        await resumeChat(
+          this.harness.chatDeps(session, this.#chatHostDeps()),
+          { ...this.harness.chatLane(session), arrival: this.#arrival() },
+          connection
+        );
       }
       return onConnect(connection, ctx);
     };
@@ -3596,6 +3698,34 @@ export class Think<
       // As in Think: a browser's chat request runs on the `web` channel.
       const request = chatRequestId(message);
       if (request !== undefined) this.#webRequests.add(request);
+      // A tab's chat frames go through the shared chat dispatch (H2c), onto
+      // the harness's root session.
+      const session = this.harness.session().id;
+      // A stop of a turn that has started goes to the harness, the one
+      // keeper of what it streamed (its reply's branch, client tools and
+      // events); a request still waiting keeps its place on the dispatch.
+      const stopped = cancelledRequestOf(message);
+      if (stopped !== undefined) {
+        const status = await this.harness.session().inspect(stopped);
+        if (status?.status === "running") {
+          await this.harness.session().abort(stopped);
+          return;
+        }
+      }
+      if (
+        await chatDispatch(
+          this.harness.chatDeps(session, this.#chatHostDeps()),
+          { ...this.harness.chatLane(session), arrival: this.#arrival() },
+          connection,
+          message
+        )
+      ) {
+        // A clear drops the client tools the tabs declared, with the chat.
+        if (typeof message === "string" && message.includes("chat_clear")) {
+          await this.harness.forgetClientTools(session);
+        }
+        return;
+      }
       for (const handlers of this.#handlers) {
         if ((await handlers.onMessage?.(connection, message)) === true) {
           // A request that started nothing (refused, or a resend of one

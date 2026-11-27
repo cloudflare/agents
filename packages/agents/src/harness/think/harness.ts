@@ -44,12 +44,22 @@ import {
   chatTurnDefinition,
   chatTurnStreamId,
   runningChatTurn,
+  CHAT_REQUEST_CONTEXT_KEY,
+  messageIdsOf,
   type ChatHost,
   type ChatModelCall,
   type ChatTurnInput,
   type ChatTurnResult,
-  type InterruptedToolPart
+  type InterruptedToolPart,
+  type ChatDeps
 } from "../../chat/chat-host";
+import type { ChatLane } from "../../chat/chat-functions";
+import { frameText } from "../../chat/chat-frames";
+import { reconcileMessages } from "../../chat/message-reconciler";
+import { keepStoredReplies } from "../../chat/stored-replies";
+import { sendIfOpen } from "../../chat/connection";
+import { CHAT_MESSAGE_TYPES } from "../../chat/protocol";
+import { recordRecentChatTerminal } from "../../chat/recent-terminals";
 import { TaskSettlement } from "../../tasks/settlement";
 import {
   ChatStreamStalledError,
@@ -248,6 +258,8 @@ type SessionBuild = {
   readonly system: string | undefined;
   readonly remind: readonly RemindSection[];
   readonly allSections: string | undefined;
+  /** The client tools the session's client declared, as it declared them. */
+  readonly clientTools: readonly ClientToolSchema[];
 };
 
 /** The operation a session is running in this isolate. */
@@ -323,6 +335,8 @@ class ModelCallError extends Error {
 type OperationRunInput = {
   readonly input: OperationInput;
   readonly source: "client" | "server";
+  /** A tab's request body, past its messages (the shared dispatch's). */
+  readonly body?: Record<string, unknown>;
 };
 
 /**
@@ -400,9 +414,55 @@ function callerKeyOf(stored: string): string {
   return (JSON.parse(stored) as [string, string])[1];
 }
 
-function operationOf(runId: string): [ThinkSessionId, string] {
-  // SAFETY: every run of the operation definition is named by runIdOf.
-  return JSON.parse(runId) as [ThinkSessionId, string];
+/**
+ * Whether a stored input is the harness's own operation input, rather than
+ * the chat-turn input the shared chat dispatch submitted (H2c).
+ */
+function isOperationRunInput(input: unknown): input is OperationRunInput {
+  return (
+    input !== null &&
+    typeof input === "object" &&
+    (input as { readonly input?: unknown }).input !== undefined
+  );
+}
+
+/**
+ * An operation's stored input. A run the shared chat dispatch submitted
+ * carries the chat-turn definition's input (a tab's request): its messages
+ * are placed as a client's (H2c).
+ */
+function operationInputOf(input: unknown): OperationRunInput {
+  const value = input as Partial<OperationRunInput> & {
+    readonly messages?: readonly UIMessage[];
+    readonly trigger?: string;
+  };
+  if (isOperationRunInput(value)) return value;
+  const chat = input as {
+    readonly body?: unknown;
+    readonly trigger?: string;
+    readonly mode?: string;
+    readonly replyId?: string;
+  };
+  const body = chat.body;
+  // What the tab asked for, as the harness's own operation kinds: a
+  // regeneration, a continuation (after a tool answer the dispatch has
+  // applied, or of a cut-off reply), or new messages.
+  const operation: OperationInput =
+    chat.trigger === "regenerate-message"
+      ? { kind: "regenerate" }
+      : chat.mode === "continue" ||
+          chat.trigger === "tool-answer" ||
+          (value.messages ?? []).length === 0
+        ? { kind: "continue" }
+        : { kind: "messages", messages: value.messages ?? [] };
+  return {
+    input: operation,
+    // A turn the host started itself is the server's, as on the harness.
+    source: chat.trigger === "server" ? "server" : "client",
+    ...(body !== null &&
+      typeof body === "object" &&
+      !Array.isArray(body) && { body: body as Record<string, unknown> })
+  };
 }
 
 /** A session's lane: its operations run one at a time, in order. */
@@ -625,13 +685,6 @@ function asJson(value: unknown): unknown {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
 
-/** The client's tools in a build: the ones the harness does not run. */
-function clientToolsOf(tools: ToolSet): ClientToolSchema[] {
-  return Object.keys(tools)
-    .filter((name) => !isServerTool(tools, name))
-    .map((name) => ({ name }));
-}
-
 function asUIMessages(messages: readonly SessionMessage[]): UIMessage[] {
   // SAFETY: every message in a ThinkHarness session was written by the
   // harness from a UIMessage, and Sessions returns what was written.
@@ -780,7 +833,95 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         definition,
         // SAFETY: every run of these definitions was accepted by `enqueue`
         // or carried forward by `onStart`, both with an OperationRunInput.
-        (input, run) => this.#operate(input as OperationRunInput, run),
+        async (input, run) => {
+          // A tab's request through the shared chat dispatch declares its
+          // client tools in the request, as `enqueue`'s option does.
+          const clientTools = (input as { readonly clientTools?: unknown })
+            .clientTools;
+          if (isOperationRunInput(input)) {
+            // A server turn takes the tools the chat's request context
+            // holds, as a host turn does: the ones the last taken answer
+            // or request declared (H2c). None is kept after a clear.
+            if (
+              input.source === "server" &&
+              run.checkpoint.get(PLACED_KEY) === undefined
+            ) {
+              const handle = this.#handle(this.#operationOf(run.id)[0]);
+              const context = await handle.internal_config(
+                CHAT_REQUEST_CONTEXT_KEY
+              );
+              const tools = context
+                ? (JSON.parse(context) as { readonly clientTools?: unknown })
+                    .clientTools
+                : undefined;
+              if (Array.isArray(tools)) {
+                await handle.internal_setConfig(
+                  CLIENT_TOOLS_KEY,
+                  JSON.stringify(tools)
+                );
+              }
+            }
+            return this.#operate(input, run);
+          }
+          const session = this.#operationOf(run.id)[0];
+          // Once, when the request is placed (a later attempt has them):
+          // a tab's request runs with exactly the tools it sent; a
+          // continuation or a server turn with the ones the chat's request
+          // context holds, which a taken answer updates and a clear drops.
+          if (run.checkpoint.get(PLACED_KEY) === undefined) {
+            const handle = this.#handle(session);
+            const trigger = (input as { readonly trigger?: unknown }).trigger;
+            const fromTab =
+              trigger === "submit-message" || trigger === "regenerate-message";
+            let tools: unknown = fromTab ? (clientTools ?? []) : undefined;
+            if (!fromTab) {
+              const context = await handle.internal_config(
+                CHAT_REQUEST_CONTEXT_KEY
+              );
+              tools = context
+                ? (JSON.parse(context) as { readonly clientTools?: unknown })
+                    .clientTools
+                : undefined;
+            }
+            // A continuation whose answer declared none keeps the ones the
+            // session has.
+            if (Array.isArray(tools)) {
+              await handle.internal_setConfig(
+                CLIENT_TOOLS_KEY,
+                JSON.stringify(tools)
+              );
+            }
+          }
+          const stored = operationInputOf(input);
+          if (stored.input.kind !== "messages") {
+            return this.#operate(stored, run);
+          }
+          // A tab's list is reconciled against the stored transcript, as
+          // Think's and AIChatAgent's are: a reply it holds under another id
+          // (an optimistic copy) or a stale copy beside its echoed row is
+          // the stored one, and only what the session lacks is placed.
+          const history = asUIMessages(
+            await this.#handle(session).getHistory()
+          );
+          const reconciled = keepStoredReplies(
+            reconcileMessages([...stored.input.messages], history),
+            history
+          );
+          const known = await this.storedIds(
+            session,
+            reconciled.map((message) => message.id)
+          );
+          return this.#operate(
+            {
+              ...stored,
+              input: {
+                ...stored.input,
+                messages: reconciled.filter((message) => !known.has(message.id))
+              }
+            },
+            run
+          );
+        },
         {
           onStatus: (record) => this.#onStatus(record),
           // The terminal report of a run that ended outside its handler (an
@@ -937,7 +1078,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   async pending(session?: ThinkSessionId): Promise<ThinkPendingOperation[]> {
     await this.lifecycle.ready();
     return this.#open(session).map((record) => {
-      const [id, operationId] = operationOf(record.runId);
+      const [id, operationId] = this.#operationOf(record.runId);
       return {
         operationId,
         session: id,
@@ -1010,7 +1151,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     // Two first submissions of one key can race past the checks above;
     // Tasks dedupes them, and its receipt names the operation that won.
     return {
-      operationId: operationOf(receipt.runId)[1],
+      operationId: this.#operationOf(receipt.runId)[1],
       session,
       accepted: receipt.accepted
     };
@@ -1025,7 +1166,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const record = this.#tasks.peekByIdempotencyKey(
       keyOf(session, idempotencyKey)
     );
-    return record && operationOf(record.runId)[1];
+    return record && this.#operationOf(record.runId)[1];
   }
 
   /**
@@ -1136,7 +1277,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   insideOperation(session: ThinkSessionId): string | undefined {
     const runId = runningChatTurn();
     if (runId === undefined) return undefined;
-    const [id, operationId] = operationOf(runId);
+    const [id, operationId] = this.#operationOf(runId);
     return id === session &&
       this.#live.get(session)?.operationId === operationId
       ? operationId
@@ -1283,8 +1424,37 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   }
 
   /** A run's status. */
+  /**
+   * The session and operation id a run names. The harness's own runs are
+   * named by runIdOf; a run the shared chat dispatch submitted is named by
+   * its request id, and its input names the session (the root when none).
+   */
+  #operationOf(runId: string): [ThinkSessionId, string] {
+    const input = this.#tasks.inputOf(runId);
+    if (input !== undefined && !isOperationRunInput(input)) {
+      const session = (input as { readonly session?: unknown }).session;
+      return [typeof session === "string" ? session : "", runId];
+    }
+    // The harness names its own runs with runIdOf, a JSON pair. A run whose
+    // row is gone is read by its name: a dispatch run's is its request id.
+    try {
+      const pair: unknown = JSON.parse(runId);
+      if (
+        Array.isArray(pair) &&
+        pair.length === 2 &&
+        typeof pair[0] === "string" &&
+        typeof pair[1] === "string"
+      ) {
+        return [pair[0], pair[1]];
+      }
+    } catch {
+      // Not a pair: a request id.
+    }
+    return ["", runId];
+  }
+
   #status(record: TaskRecord): ThinkOperationStatus {
-    const [session, operationId] = operationOf(record.runId);
+    const [session, operationId] = this.#operationOf(record.runId);
     return TERMINAL.includes(record.status)
       ? this.#result(record)
       : {
@@ -1337,6 +1507,90 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     return stored?.input.kind === "messages"
       ? stored.input.messages.map((message) => message.id)
       : [];
+  }
+
+  /**
+   * A tab's request through the shared chat dispatch that placing ended
+   * (its turn never runs, so it frames nothing): its tab is told it ended,
+   * as the turn's own end would tell it, and the end is kept for a resume.
+   */
+  #endUnrunChatTurn(runId: string, ended: OperationOutcome): void {
+    const webSockets = this.#chatHostDeps?.webSockets;
+    if (!webSockets || isOperationRunInput(this.#tasks.inputOf(runId))) {
+      return;
+    }
+    const metadata = this.#tasks.peek(runId)?.metadata;
+    const origin = (metadata?.chat as { origin?: unknown } | undefined)?.origin;
+    const messageIds = messageIdsOf(metadata);
+    const reason = ended.status === "unanswered" ? ended.reason : undefined;
+    const outcome =
+      ended.status === "done"
+        ? "completed"
+        : reason === "aborted"
+          ? "aborted"
+          : reason === "withdrawn" ||
+              reason === "not_waiting" ||
+              reason === "not_found" ||
+              reason === "empty"
+            ? "skipped"
+            : "error";
+    const frame = {
+      type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+      id: runId,
+      body: outcome === "error" ? (reason ?? "") : "",
+      done: true,
+      outcome,
+      ...(outcome === "error" && { error: true }),
+      ...(messageIds && { messageIds })
+    };
+    recordRecentChatTerminal(this.lifecycle.storage.kv, frame);
+    const text = frameText(frame as { type: string });
+    if (text === undefined) return;
+    for (const connection of webSockets.getConnections()) {
+      if (origin === undefined || connection.id === origin) {
+        sendIfOpen(connection, text);
+      }
+    }
+  }
+
+  /** The host the shared chat dispatch runs for, once it has (H2c). */
+  #chatHostDeps: Pick<ChatDeps, "kv" | "webSockets" | "emit"> | undefined;
+
+  /**
+   * @internal The shared chat dispatch's lane for a session's operations
+   * (H2c): a tab's request runs as one of them, in the session's lane.
+   */
+  chatLane(session: ThinkSessionId): ChatLane {
+    return { definition: OPERATION_DEFINITION, lane: laneOf(session) };
+  }
+
+  /**
+   * @internal What the shared chat dispatch reads and writes for a session
+   * (H2c): the harness's own Tasks, Streams and Sessions, with the host's
+   * key-value store, sockets and observability.
+   */
+  chatDeps(
+    session: ThinkSessionId,
+    host: Pick<ChatDeps, "kv" | "webSockets" | "emit">
+  ): ChatDeps {
+    // The host that dispatches tabs' frames is the one the turns frame to.
+    this.#chatHostDeps = host;
+    return {
+      tasks: this.#tasks,
+      streams: this.#streams,
+      sessions: this.#sessions,
+      session,
+      ...host
+    };
+  }
+
+  /**
+   * @internal A chat clear through the shared dispatch (H2c): the client
+   * tools a tab declared go with the transcript, as the chat's request
+   * context does.
+   */
+  async forgetClientTools(session: ThinkSessionId): Promise<void> {
+    await this.#handle(session).internal_setConfig(CLIENT_TOOLS_KEY, "[]");
   }
 
   /** @internal Which of `ids` a session already stores (key probes). */
@@ -1483,12 +1737,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const state: SessionState = {
       messages: messages.map((message) => transcriptOf(message, tools)),
       pending: open.map((record) => ({
-        operationId: operationOf(record.runId)[1],
+        operationId: this.#operationOf(record.runId)[1],
         status: isQueued(record) ? "queued" : "placed"
       })),
       ...(running && {
         run: {
-          operations: [operationOf(running.runId)[1]],
+          operations: [this.#operationOf(running.runId)[1]],
           ...(partial.length > 0 && {
             partial: partial.flatMap((chunk) => {
               const converted = toResponseChunk(chunk, {
@@ -1511,7 +1765,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     await this.lifecycle.ready();
     const running = this.#open(session).find((record) => !isQueued(record));
     if (!running) return undefined;
-    const operationId = operationOf(running.runId)[1];
+    const operationId = this.#operationOf(running.runId)[1];
     const live = this.#live.get(session);
     if (live?.operationId === operationId) {
       return {
@@ -1579,7 +1833,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   async listSessions(): Promise<ThinkSessionInfo[]> {
     await this.lifecycle.ready();
     const busy = new Set(
-      this.#open().map((record) => operationOf(record.runId)[0])
+      this.#open().map((record) => this.#operationOf(record.runId)[0])
     );
     return (await this.#sessions.internal_configs(SESSION_KEY))
       .map(({ sessionId, value }) => ({
@@ -1609,7 +1863,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     stored: OperationRunInput,
     run: TaskStep
   ): Promise<OperationOutcome | TaskSettlement> {
-    const [session, operationId] = operationOf(run.id);
+    const [session, operationId] = this.#operationOf(run.id);
     let finish = () => {};
     const live: LiveRun = {
       operationId,
@@ -1630,7 +1884,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           ? await this.#carryTurn(run, session, legacy, live)
           : await this.#place(run, session, operationId, stored, live);
       }
-      if ("ended" in placed) return placed.ended;
+      if ("ended" in placed) {
+        this.#endUnrunChatTurn(run.id, placed.ended);
+        return placed.ended;
+      }
       const built = live.built ?? (await this.#build(session));
       live.tools = built.tools;
       live.continues = placed.continues;
@@ -1647,13 +1904,25 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         continuation: placed.continues || live.partial.length > live.discarded
       });
       try {
+        const host = this.#chatHostDeps;
         const turn = chatTurnDefinition(
           {
             tasks: this.#tasks,
             streams: this.#streams,
             sessions: this.#sessions,
             kv: this.lifecycle.storage.kv,
-            session
+            session,
+            // With a host on the shared dispatch, the turn frames its own
+            // reply to the tabs, as AIChatAgent's does (H2c).
+            // Read per frame: with no tab connected there is no frame to
+            // serialize.
+            get webSockets() {
+              const sockets = host?.webSockets;
+              if (!sockets) return undefined;
+              for (const _ of sockets.getConnections()) return sockets;
+              return undefined;
+            },
+            ...(host?.emit && { emit: host.emit })
           },
           this.#chatHost(run, session, operationId, built, placed, live)
         );
@@ -1663,7 +1932,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           ...(placed.questionId !== undefined && {
             questionId: placed.questionId
           }),
-          clientTools: clientToolsOf(built.tools)
+          // As declared, schemas and all: the turn keeps them as the
+          // chat's request context, which later turns read.
+          clientTools: [...built.clientTools]
         };
         const result = await turn(input, run);
         if (result instanceof TaskSettlement) return result;
@@ -2505,6 +2776,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     // message of its own does not move it.
     const keep = await this.#truncation(session, turn, history);
     request = keep.cut(request);
+    const body = operationInputOf(this.#tasks.inputOf(turn.run.id)).body;
     const config =
       (await hooks?.beforeTurn?.({
         session,
@@ -2516,7 +2788,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         tools: Object.keys(tools),
         // A copy: a hook that edits it does not change what is offered.
         toolSet: { ...tools },
-        signal: stopSignal
+        signal: stopSignal,
+        // The request body is read from the run's input, where it is kept
+        // once, not copied into the placement.
+        ...(body !== undefined && { body })
       })) ?? {};
     const model = config.model ?? (await resolve(this.#options.model, session));
     if (model === undefined) throw new Error("ThinkHarness has no model");
@@ -2978,7 +3253,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
   /** An operation's status report: its event, and a settled one's end. */
   async #reportStatus(record: TaskRecord): Promise<void> {
-    const [session, operationId] = operationOf(record.runId);
+    const [session, operationId] = this.#operationOf(record.runId);
     if (isQueued(record)) {
       this.#events.emit(session, {
         type: "operation",
@@ -3050,7 +3325,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
 
   /** A settled operation's result, from its run. */
   #result(record: TaskRecord): ThinkOperationResult {
-    const [session, operationId] = operationOf(record.runId);
+    const [session, operationId] = this.#operationOf(record.runId);
     const unanswered = (reason: string | undefined): ThinkOperationResult => ({
       operationId,
       session,
@@ -3350,11 +3625,12 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       await this.#handle(session).internal_config(CLIENT_TOOLS_KEY);
     // A client's declaration that is not a list declares nothing.
     const parsed: unknown = declared === null ? [] : JSON.parse(declared);
-    const client = createToolsFromClientSchemas(
-      // SAFETY: the list a client declared, as `enqueue` stored it; before
-      // this value existed the harness store read it the same way.
-      Array.isArray(parsed) ? (parsed as ClientToolSchema[]) : []
-    );
+    // SAFETY: the list a client declared, as `enqueue` stored it; before
+    // this value existed the harness store read it the same way.
+    const clientTools = Array.isArray(parsed)
+      ? (parsed as ClientToolSchema[])
+      : [];
+    const client = createToolsFromClientSchemas(clientTools);
     // Client tools go last, as in Think. A client cannot replace a server
     // tool: the server's definition, its execute and its approval policy
     // win on a name clash.
@@ -3368,7 +3644,16 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       }
       merged[name] = tool;
     }
-    return { tools: merged, system, remind, allSections };
+    return {
+      tools: merged,
+      system,
+      remind,
+      allSections,
+      // The ones a server tool's name did not shadow.
+      clientTools: clientTools.filter(
+        (tool) => !Object.hasOwn(tools, tool.name)
+      )
+    };
   }
 
   /**

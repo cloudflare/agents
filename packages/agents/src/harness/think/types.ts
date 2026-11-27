@@ -296,6 +296,11 @@ export type ThinkTurnContext = ThinkHookContext & {
    * passes it on as `abortSignal`).
    */
   readonly signal: AbortSignal;
+  /**
+   * @internal The request body the turn was asked with (a tab's, past its
+   * messages), for a host that hands it to its own `beforeTurn`.
+   */
+  readonly body?: Record<string, unknown>;
 };
 
 /**
