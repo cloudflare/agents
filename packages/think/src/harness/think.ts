@@ -79,7 +79,7 @@ import {
   loadThinkExtensions,
   ThinkExtensionHooks
 } from "../extensions/wiring";
-import { turnMetadataFromMessages } from "../turn-metadata";
+import { stampTurnContext, turnMetadataFromMessages } from "../turn-metadata";
 import type {
   ExtensionConfig,
   MessageMetadataCallback,
@@ -1982,26 +1982,11 @@ export class Think<
         : toInput(userMessage);
     // As on Think: the caller's channel and metadata are stamped on the
     // user messages, under keys a client's writes cannot set.
-    const stamp = {
-      ...(options?.channel !== undefined && { channel: options.channel }),
-      ...(options?.metadata !== undefined && {
-        turnMetadata: options.metadata
-      })
-    };
-    const messages =
-      Object.keys(stamp).length === 0
-        ? given
-        : given.map((message) =>
-            message.role === "user"
-              ? {
-                  ...message,
-                  metadata: {
-                    ...(message.metadata as object | undefined),
-                    ...stamp
-                  }
-                }
-              : message
-          );
+    const messages = stampTurnContext(
+      given,
+      options?.channel,
+      options?.metadata
+    );
     this.#turns.set(operationId, { trigger: "rpc" });
     options?.signal?.addEventListener(
       "abort",
