@@ -2046,6 +2046,9 @@ describe("chatTurnDefinition", () => {
         body: "quota exceeded",
         error: true
       });
+      // One error frame for the failure: the end does not repeat it.
+      expect(sent.at(-1)).toMatchObject({ done: true, outcome: "error" });
+      expect(sent.at(-1)?.error).toBe(false);
     });
   });
 });

@@ -459,8 +459,17 @@ async function applyAnswer(
   deps: ChatDeps,
   lane: ChatLane,
   answer: ToolAnswer,
-  options: { autoContinue?: boolean; clientTools?: unknown }
+  options: {
+    autoContinue?: boolean;
+    clientTools?: unknown;
+    connection?: Connection;
+  }
 ): Promise<boolean> {
+  // The continuation's run names the tab that answered, as a request's
+  // names the tab that sent it.
+  const answeredFrom = options.connection
+    ? { metadata: { chat: { origin: options.connection.id } } }
+    : {};
   const storeTools = async () => {
     if (!Array.isArray(options.clientTools) || !options.clientTools.length)
       return;
@@ -520,7 +529,7 @@ async function applyAnswer(
             deps,
             lane,
             { trigger: "tool-answer", replyId },
-            { idempotencyKey: `continue:${live.requestId}` }
+            { idempotencyKey: `continue:${live.requestId}`, ...answeredFrom }
           ).catch((error: unknown) => {
             console.error(
               "[chat] could not continue after a tool answer:",
@@ -579,7 +588,10 @@ async function applyAnswer(
         deps,
         lane,
         { trigger: "tool-answer", replyId: next.id },
-        { idempotencyKey: `continue:${next.id}:${answeredCalls(next)}` }
+        {
+          idempotencyKey: `continue:${next.id}:${answeredCalls(next)}`,
+          ...answeredFrom
+        }
       );
     }
     return true;

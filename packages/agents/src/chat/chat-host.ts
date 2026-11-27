@@ -1022,7 +1022,9 @@ export function chatTurnDefinition(
         }
       };
       if (result.messageId !== undefined && result.status !== "aborted") {
-        await sendTranscript(true);
+        // A continuation's tab gets it too: it answered, it did not send
+        // the reply's question.
+        await sendTranscript(client);
       }
       if (inBand && result.error !== undefined) {
         send({
@@ -1033,10 +1035,11 @@ export function chatTurnDefinition(
         });
       }
       if (result.status !== "completed" && result.status !== "skipped") {
+        // One error frame per failed reply: the model's own error was it.
         send({
-          body: result.error ?? "",
+          body: inBand ? "" : (result.error ?? ""),
           done: true,
-          error: result.status === "error",
+          error: result.status === "error" && !inBand,
           outcome: result.status,
           ...(continuation && { continuation: true }),
           ...(messageIds && { messageIds })
