@@ -4556,6 +4556,96 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
    * The chat turns' Task runs not yet settled: a turn a replay could
    * recover. A run started only for a recovery attempt is not one.
    */
+  private _startedFailingTurn: Promise<string> | null = null;
+
+  /**
+   * Start a turn whose reply fails with `message`, and return once its run
+   * waits for its next attempt (hold that wait with a `retry-after` header).
+   * Returns the turn's request id; `startedFailingTurnStatusForTest` gives
+   * how it ended.
+   */
+  async startFailingReaderTurnForTest(
+    message: string,
+    turns: number,
+    options: {
+      responseHeaders?: Record<string, string>;
+      /** How far ahead the next attempt must be for the turn to count as waiting. */
+      waitsAtLeastMs?: number;
+    } = {}
+  ): Promise<string> {
+    this._failingTurn = {
+      message,
+      remaining: turns,
+      prelude: "partial",
+      responseHeaders: options.responseHeaders
+    };
+    this._startedFailingTurn = this.saveMessages((current) => [
+      ...current,
+      {
+        id: `u-${crypto.randomUUID()}`,
+        role: "user",
+        parts: [{ type: "text", text: "tell me a long story" }]
+      }
+    ]).then(
+      (result) => result.status,
+      (error) => `threw: ${String(error)}`
+    );
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const [waiting] = this.sql<{ run_id: string }>`
+        SELECT run_id FROM cf_agents_task_runs
+        WHERE lane = 'chat' AND status IN ('pending', 'running')
+          AND next_at > ${Date.now() + (options.waitsAtLeastMs ?? 5_000)}
+      `;
+      if (waiting) return waiting.run_id;
+      if (Date.now() > deadline) {
+        throw new Error("the failing turn's run never waited for a retry");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  /** How the turn `startFailingReaderTurnForTest` started ended. */
+  async startedFailingTurnStatusForTest(): Promise<string> {
+    if (!this._startedFailingTurn) throw new Error("no turn was started");
+    return this._startedFailingTurn;
+  }
+
+  /**
+   * End the wait of every chat turn that waits for its next attempt: the
+   * attempt is made due and the alarm run. Returns how many waited.
+   */
+  async endRetryWaitsForTest(): Promise<number> {
+    const past = Date.now() - 1_000;
+    const waiting = this.sql<{ run_id: string }>`
+      SELECT run_id FROM cf_agents_task_runs
+      WHERE lane = 'chat' AND status IN ('pending', 'running')
+        AND next_at > ${Date.now() + 1_000}
+    `;
+    for (const { run_id } of waiting) {
+      this.sql`
+        UPDATE cf_agents_task_runs SET next_at = ${past}
+        WHERE run_id = ${run_id}
+      `;
+      this.sql`
+        UPDATE cf_agents_jobs SET time = ${past}
+        WHERE id = ${`task:${run_id}`}
+      `;
+    }
+    if (waiting.length > 0) await this.alarm();
+    return waiting.length;
+  }
+
+  /** Chat turn runs of the chat lane that have not ended. */
+  openChatLaneRunsForTest(): number {
+    return (
+      this.sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM cf_agents_task_runs
+        WHERE lane = 'chat' AND status IN ('pending', 'running')
+      `[0]?.count ?? 0
+    );
+  }
+
   openChatTurnRunsForTest(): number {
     return (
       this.sql<{ count: number }>`
