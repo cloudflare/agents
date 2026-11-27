@@ -5,8 +5,12 @@ import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS, waitUntilHandled } from "./test-utils";
 import { getAgentByName } from "agents";
 
-/** Bounds for waits on the agent: a loaded CI needs more than 1 s. */
-const BOUNDS = { timeout: 10_000, interval: 20 };
+/**
+ * Bounds for waits on the agent: a loaded CI needs more than 1 s, and half
+ * the 10 s test timeout leaves room for the rest of the test, so a missing
+ * event fails here, by name.
+ */
+const BOUNDS = { timeout: 5_000, interval: 20 };
 
 function collectMessages(ws: WebSocket): Array<Record<string, unknown>> {
   const messages: Array<Record<string, unknown>> = [];
