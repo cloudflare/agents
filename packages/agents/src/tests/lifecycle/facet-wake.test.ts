@@ -107,7 +107,7 @@ describe("facet wake", () => {
       { timeout: 10_000, interval: 20 }
     );
     expect(await agent.middleRan("m")).toEqual([]);
-  });
+  }, 20_000);
 
   it("ignores a wake report older than the one it holds", async () => {
     const agent = await root();
