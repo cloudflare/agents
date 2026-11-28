@@ -65,6 +65,7 @@ On an `Agent`, call `this.lifecycle.use(this.harness)` in the constructor. Do no
 | `reservedMetadataKeys` | Message-metadata keys only the server may write; stripped from input submitted with `source: "client"`.                                                                     |
 | `configureSession`     | Called with each session's `Session` handle the first time the harness uses it. Set compaction here with `onCompaction()` and `compactAfter()`.                             |
 | `hooks`                | Callbacks into the turn loop. Refer to [Hooks](#hooks).                                                                                                                     |
+| `extensions`           | Shipped extensions, such as Code Mode. Refer to [Code Mode](#code-mode).                                                                                                    |
 
 ## Submit and wait
 
@@ -135,6 +136,70 @@ Input submitted with `source: "client"` is untrusted:
 - A message whose id is already stored, on any branch, is dropped rather than rewritten.
 - A client tool never replaces a server tool of the same name.
 - A tool result answers only a client tool. A result for a server tool call ends `unanswered` with reason `not_client_tool`, so a server tool's result always comes from running it under its approval policy.
+
+## Code Mode
+
+`codemode()` from `agents/harness/think/extensions` gives the model one `code` tool. The model writes a JavaScript async arrow function, and the other server tools become functions the script calls, such as `await tools.weather({ city: "Lisbon" })`. Each call is a recorded step of the turn, with the tool hooks and approvals: a call that needs approval parks the script, and once it is approved the script runs again from the top with the calls it already made answered from their records. Call the functions in a fixed order: after an approval or a restart the script runs again, and a call made in another order than before is not run. Install it through the `extensions` option, with `@cloudflare/codemode` installed:
+
+```ts
+import { DurableObject } from "cloudflare:workers";
+import { tool } from "ai";
+import { z } from "zod";
+import { ThinkHarness } from "agents/harness/think";
+import {
+  CodemodeSandbox,
+  codemode,
+  sandboxExecutor
+} from "agents/harness/think/extensions";
+import { Lifecycle } from "agents/lifecycle";
+import { createAI } from "agents/models/ai-sdk";
+
+// The sandbox class, exported from the Worker entry.
+export { CodemodeSandbox };
+
+export class Assistant extends DurableObject<Env> {
+  ai = createAI({ binding: this.env.AI });
+
+  harness = new ThinkHarness({
+    model: this.ai("@cf/deepseek-ai/deepseek-v4.1-flash-1017"),
+    tools: {
+      weather: tool({
+        description: "Get the weather for a city",
+        inputSchema: z.object({ city: z.string() }),
+        execute: async ({ city }) => `Sunny in ${city}`
+      })
+    },
+    extensions: [
+      codemode({
+        executor: sandboxExecutor(
+          this.env.CODEMODE_SANDBOX,
+          this.ctx.id.toString()
+        ),
+        // Tools the model still calls directly, besides `code`.
+        direct: ["weather"]
+      })
+    ]
+  });
+
+  lifecycle = Lifecycle.install(this).use(this.harness);
+}
+```
+
+`sandboxExecutor` runs each script in a `CodemodeSandbox` Durable Object, one per agent, so a script that computes for a while holds that object and not the agent. The sandbox loads the script into a dynamic Worker, so it needs a Worker Loader binding named `LOADER`. Export the class from your Worker entry, and declare it:
+
+```jsonc
+{
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "durable_objects": {
+    "bindings": [
+      { "name": "CODEMODE_SANDBOX", "class_name": "CodemodeSandbox" }
+    ]
+  },
+  "migrations": [{ "tag": "v2", "new_sqlite_classes": ["CodemodeSandbox"] }]
+}
+```
+
+Any `Executor` from `@cloudflare/codemode` works too, for example a `DynamicWorkerExecutor` that runs scripts from the agent's own isolate. `codemode()`, `CodemodeSandbox` and `sandboxExecutor` are experimental.
 
 ## Recovery
 
@@ -210,7 +275,7 @@ Not supported yet:
 - `messageConcurrency` strategies other than queueing (`latest`, `merge`, `drop`, debounce).
 - Context blocks from `configureContext()`. Compute the system prompt in `system` or `beforeTurn`.
 - Read-time truncation of older tool results and media eviction.
-- Workspace tools, `getActions()` with its ledger, agent tools, skills, extensions, MCP tools, messengers, channels policy, scheduled tasks, and workflows. Pass the tools these produce in `tools`; the higher-level features are not ported.
+- Workspace tools, `getActions()` with its ledger, agent tools, skills, Think's own extensions (`getExtensions()`; Code Mode is above), MCP tools, messengers, channels policy, scheduled tasks, and workflows. Pass the tools these produce in `tools`; the higher-level features are not ported.
 - `listSubmissions` and `deleteSubmissions`. `pending()` lists open operations.
 - Client tool ownership by participant, and the `cf_agent_chat_recovering` frame.
 - `configure()` and `getConfig()`.
