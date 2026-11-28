@@ -218,6 +218,12 @@ const CARRY_BATCH = 50;
 const TURN_KEY = "turn";
 /** The run checkpoint holding how a placed operation's turn runs. */
 const PLACED_KEY = "think:placed";
+
+/** The most a structured output may take, as JSON, inside the run result. */
+const MAX_OUTPUT_BYTES = 512 * 1024;
+
+/** How many schema-produced outputs wait in memory for their callers. */
+const MAX_OUTPUT_VALUES = 32;
 /**
  * The turn definition's run checkpoint naming the reply a turn continues,
  * read to rebuild what a turn streamed outside its attempt.
@@ -344,6 +350,10 @@ type LiveRun = {
   hideReasoning?: boolean;
   /** How many of the reply's parts were stored before this run began. */
   storedParts?: number;
+  /** The structured output the last model call parsed, if it asked. */
+  output?: TaskJson;
+  /** The same output as the schema produced it, for this isolate's caller. */
+  outputValue?: unknown;
   /** Settles when the attempt has returned. */
   readonly done: Promise<void>;
 };
@@ -357,6 +367,11 @@ type PlacedTurn = {
   readonly owner?: string;
   /** Whether the turn continues a reply stored before it began. */
   readonly continues: boolean;
+  /**
+   * The structured output the turn's answer parsed, kept with the
+   * placement so a recovery that reuses the saved reply still has it.
+   */
+  readonly output?: TaskJson;
 };
 
 /**
@@ -403,6 +418,7 @@ type OperationOutcome =
       readonly status: "done";
       readonly text: string;
       readonly messageId?: string;
+      readonly output?: TaskJson;
     }
   | {
       readonly status: "unanswered";
@@ -1891,7 +1907,26 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       const stored = result.messageId
         ? await this.#handle(session).getMessage(result.messageId)
         : null;
-      return outcomeOf({}, stored ? asUIMessage(stored) : undefined);
+      const outcome = outcomeOf({}, stored ? asUIMessage(stored) : undefined);
+      // A recovery that reused the saved reply has the output its
+      // placement kept.
+      const placed = run.checkpoint.get<Placed>(PLACED_KEY);
+      const output =
+        live.output ??
+        (placed && !("ended" in placed) ? placed.output : undefined);
+      // The output as its schema produced it, for the caller waiting on
+      // it: the most recent few, oldest dropped first.
+      if (live.outputValue !== undefined) {
+        const runId = runIdOf(session, live.operationId);
+        this.#outputValues.set(runId, live.outputValue);
+        if (this.#outputValues.size > MAX_OUTPUT_VALUES) {
+          const oldest = this.#outputValues.keys().next().value;
+          if (oldest !== undefined) this.#outputValues.delete(oldest);
+        }
+      }
+      return outcome.status === "done" && output !== undefined
+        ? { ...outcome, output }
+        : outcome;
     }
     // The definition gave up on an interrupted turn, past the budget or as
     // `onRecovery` chose. It stored the partial itself, with its cut-off
@@ -2533,6 +2568,17 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           pendingModel = lastStep(reply).some(
             (part) => isToolCallPart(part) && !part.providerExecuted
           );
+          // The answer, not a tool call: its structured output, if asked.
+          // Parsed once the step is reported, as Think reports a step whose
+          // output then fails to parse.
+          let parsed: { value: unknown } | { error: unknown } | undefined;
+          if (!pendingModel && model.output) {
+            try {
+              parsed = { value: await model.output() };
+            } catch (error) {
+              parsed = { error };
+            }
+          }
           await this.#extensions.hook("onStepFinish", {
             session: turn.session,
             operationId: turn.operationId,
@@ -2542,6 +2588,29 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
               finish.type === "finish" ? finish.finishReason : undefined,
             usage: await model.usage()
           });
+          if (parsed && "error" in parsed) {
+            throw new ModelCallError("fail", parsed.error);
+          }
+          if (parsed) {
+            const json = asJson(parsed.value) as TaskJson;
+            // The output shares the run result's size bound: past its own
+            // bound the turn fails, naming the size, before it settles.
+            const bytes = JSON.stringify(json)?.length ?? 0;
+            if (bytes > MAX_OUTPUT_BYTES) {
+              throw new ModelCallError(
+                "fail",
+                new Error(
+                  `Structured output is ${bytes} bytes; an operation's output holds at most ${MAX_OUTPUT_BYTES}`
+                )
+              );
+            }
+            live.output = json;
+            live.outputValue = parsed.value;
+            const placed = turn.run.checkpoint.get<Placed>(PLACED_KEY);
+            if (placed && !("ended" in placed)) {
+              turn.run.checkpoint.set(PLACED_KEY, { ...placed, output: json });
+            }
+          }
           continue;
         }
         if (action._tag === "run-tools" && reply) {
@@ -2649,6 +2718,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     readonly error: () => unknown;
     /** The call's token usage, once its stream ended. */
     readonly usage: () => Promise<LanguageModelUsage | undefined>;
+    /** The call's parsed structured output, when `output` asked for one. */
+    readonly output?: () => Promise<unknown>;
   }> {
     const { session, operationId, built, placed } = turn;
     const { tools } = built;
@@ -2773,6 +2844,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
       ...(config.temperature !== undefined && {
         temperature: config.temperature
       }),
+      // SAFETY: the AI SDK's own output spec, as `beforeTurn` gave it.
+      ...(config.output !== undefined && { output: config.output as never }),
       stopWhen: stepCountIs(1),
       abortSignal: signal,
       onError: ({ error }) => {
@@ -2799,6 +2872,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         }
       })(),
       error: () => modelError,
+      ...(config.output !== undefined && {
+        output: () => Promise.resolve(result.output as unknown)
+      }),
       // A failed call may have none; the step goes on without it.
       usage: () =>
         Promise.resolve(result.usage).then(
@@ -3665,6 +3741,33 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   }
 
   /** A settled operation's result, from its run. */
+  /**
+   * @internal The structured output a settled operation's last model call
+   * parsed (its `beforeTurn` asked with `output`), or undefined.
+   */
+  operationOutput(session: ThinkSessionId, operationId: string): unknown {
+    // As in Think, this isolate's caller gets the value the schema
+    // produced; across a restart, the JSON the run's result kept.
+    const runId = runIdOf(session, operationId);
+    if (this.#outputValues.has(runId)) {
+      const value = this.#outputValues.get(runId);
+      this.#outputValues.delete(runId);
+      return value;
+    }
+    const record = this.#tasks.peek(runId);
+    if (record?.status !== "completed") return undefined;
+    // SAFETY: the handler's result is an OperationOutcome.
+    const outcome = record.result as OperationOutcome;
+    return outcome.status === "done" ? outcome.output : undefined;
+  }
+
+  /**
+   * Structured outputs as their schemas produced them, by run, until read:
+   * at most `MAX_OUTPUT_VALUES`, oldest dropped first (a dropped one is
+   * read as the run's stored JSON).
+   */
+  readonly #outputValues = new Map<string, unknown>();
+
   #result(record: TaskRecord): ThinkOperationResult {
     const [session, operationId] = operationOf(record.runId);
     const unanswered = (reason: string | undefined): ThinkOperationResult => ({
