@@ -913,5 +913,161 @@
     "test": "Think durable submissions > does not complete an overflow segment when its retry crashes pre-stream (successor accepted: true)",
     "reason": "the class's stream-segment stamps for a retry and its successor request (`seedSubmissionStreamForTest`, `moveSubmissionRequestForTest`), read by its recovery: a form the harness's turn record has no counterpart for",
     "mechanicsOnly": true
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > keeps a submission recoverable during the retry successor-turn handoff",
+    "reason": "a `running` submission seeded in the class's shape (`seedSubmissionForTest`) and a recovery scheduled by hand (`preSchedule…ForTest`), paused at a private window of the class's detached recovery (`reproduceSubmissionRecoveryHandoffGapForTest`: its recovery Task handing the submission to a successor chat turn under a new request id, gated through `_turnQueue`, `updateIncident` and `getLatestLeaf`). On the new core a recovery is the turn's own next attempt, so there is no successor turn and no handoff (CHAT-MODULE.md, one run per turn across attempts); the successor shows what an app sees: `running` while the reply is recovered, then `completed` once",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > is never reported as failed while a reply a reset cut off before any text is recovered"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > keeps a submission recoverable during the continue successor-turn handoff",
+    "reason": "a `running` submission seeded in the class's shape (`seedSubmissionForTest`) and a recovery scheduled by hand (`preSchedule…ForTest`), paused at a private window of the class's detached recovery (`reproduceSubmissionRecoveryHandoffGapForTest`: its recovery Task handing the submission to a successor chat turn under a new request id, gated through `_turnQueue`, `updateIncident` and `getLatestLeaf`). On the new core a recovery is the turn's own next attempt, so there is no successor turn and no handoff (CHAT-MODULE.md, one run per turn across attempts); the successor shows what an app sees: `running` while the reply is recovered, then `completed` once",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > is never reported as failed while its reply is being recovered"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > keeps a submission recoverable after the retry successor is accepted",
+    "reason": "a `running` submission seeded in the class's shape (`seedSubmissionForTest`) and a recovery scheduled by hand (`preSchedule…ForTest`), paused at a private window of the class's detached recovery (`reproduceSubmissionRecoveryHandoffGapForTest`: its recovery Task handing the submission to a successor chat turn under a new request id, gated through `_turnQueue`, `updateIncident` and `getLatestLeaf`). On the new core a recovery is the turn's own next attempt, so there is no successor turn and no handoff (CHAT-MODULE.md, one run per turn across attempts); the successor shows what an app sees: `running` while the reply is recovered, then `completed` once",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > is never reported as failed while a reply a reset cut off before any text is recovered"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > keeps a submission recoverable after the continue successor is accepted",
+    "reason": "a `running` submission seeded in the class's shape (`seedSubmissionForTest`) and a recovery scheduled by hand (`preSchedule…ForTest`), paused at a private window of the class's detached recovery (`reproduceSubmissionRecoveryHandoffGapForTest`: its recovery Task handing the submission to a successor chat turn under a new request id, gated through `_turnQueue`, `updateIncident` and `getLatestLeaf`). On the new core a recovery is the turn's own next attempt, so there is no successor turn and no handoff (CHAT-MODULE.md, one run per turn across attempts); the successor shows what an app sees: `running` while the reply is recovered, then `completed` once",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > is never reported as failed while its reply is being recovered"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > does not let a foreign turn claim the retry recovery handoff before successor admission",
+    "reason": "a `running` submission seeded in the class's shape (`seedSubmissionForTest`) and a recovery scheduled by hand (`preSchedule…ForTest`), paused at a private window of the class's detached recovery (`reproduceSubmissionRecoveryHandoffGapForTest`: its recovery Task handing the submission to a successor chat turn under a new request id, gated through `_turnQueue`, `updateIncident` and `getLatestLeaf`). On the new core a recovery is the turn's own next attempt, so there is no successor turn and no handoff (CHAT-MODULE.md, one run per turn across attempts); here another turn runs inside the window. The successor shows what an app sees: a question sent during the recovery waits behind it, and both complete in order",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > answers a question sent during its recovery after the recovered reply, in order"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > does not let a foreign turn claim the continue recovery handoff before successor admission",
+    "reason": "a `running` submission seeded in the class's shape (`seedSubmissionForTest`) and a recovery scheduled by hand (`preSchedule…ForTest`), paused at a private window of the class's detached recovery (`reproduceSubmissionRecoveryHandoffGapForTest`: its recovery Task handing the submission to a successor chat turn under a new request id, gated through `_turnQueue`, `updateIncident` and `getLatestLeaf`). On the new core a recovery is the turn's own next attempt, so there is no successor turn and no handoff (CHAT-MODULE.md, one run per turn across attempts); here another turn runs inside the window. The successor shows what an app sees: a question sent during the recovery waits behind it, and both complete in order",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > answers a question sent during its recovery after the recovered reply, in order"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > settles a retry submission from its completed successor stream before ledger completion",
+    "reason": "a `running` submission seeded in the class's shape (`seedSubmissionForTest`) and a recovery scheduled by hand (`preSchedule…ForTest`), paused at a private window of the class's detached recovery (`reproduceSubmissionRecoveryHandoffGapForTest`: its recovery Task handing the submission to a successor chat turn under a new request id, gated through `_turnQueue`, `updateIncident` and `getLatestLeaf`). On the new core a recovery is the turn's own next attempt, so there is no successor turn and no handoff (CHAT-MODULE.md, one run per turn across attempts); here the window between the successor's terminal stream and the ledger's completion. The successor shows the outcome an app sees: the recovered submission ends `completed` once",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > is never reported as failed while a reply a reset cut off before any text is recovered"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > settles a continue submission from its completed successor stream before ledger completion",
+    "reason": "a `running` submission seeded in the class's shape (`seedSubmissionForTest`) and a recovery scheduled by hand (`preSchedule…ForTest`), paused at a private window of the class's detached recovery (`reproduceSubmissionRecoveryHandoffGapForTest`: its recovery Task handing the submission to a successor chat turn under a new request id, gated through `_turnQueue`, `updateIncident` and `getLatestLeaf`). On the new core a recovery is the turn's own next attempt, so there is no successor turn and no handoff (CHAT-MODULE.md, one run per turn across attempts); here the window between the successor's terminal stream and the ledger's completion. The successor shows the outcome an app sees: the recovered submission ends `completed` once",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > finishes it once: one question, one reply, and the submission completed"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > settles a retry submission from its error successor stream before ledger completion",
+    "reason": "a `running` submission seeded in the class's shape (`seedSubmissionForTest`) and a recovery scheduled by hand (`preSchedule…ForTest`), paused at a private window of the class's detached recovery (`reproduceSubmissionRecoveryHandoffGapForTest`: its recovery Task handing the submission to a successor chat turn under a new request id, gated through `_turnQueue`, `updateIncident` and `getLatestLeaf`). On the new core a recovery is the turn's own next attempt, so there is no successor turn and no handoff (CHAT-MODULE.md, one run per turn across attempts); here the window between the successor's terminal stream and the ledger's completion. The successor shows the outcome an app sees: the recovered submission ends `error` with the model's error text",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > ends in error with the model's own error text when a reply a reset cut off before any text fails recovered"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > settles a continue submission from its error successor stream before ledger completion",
+    "reason": "a `running` submission seeded in the class's shape (`seedSubmissionForTest`) and a recovery scheduled by hand (`preSchedule…ForTest`), paused at a private window of the class's detached recovery (`reproduceSubmissionRecoveryHandoffGapForTest`: its recovery Task handing the submission to a successor chat turn under a new request id, gated through `_turnQueue`, `updateIncident` and `getLatestLeaf`). On the new core a recovery is the turn's own next attempt, so there is no successor turn and no handoff (CHAT-MODULE.md, one run per turn across attempts); here the window between the successor's terminal stream and the ledger's completion. The successor shows the outcome an app sees: the recovered submission ends `error` with the model's error text",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > ends in error with the model's own error text when its recovered reply fails"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > preserves retry completed successor evidence across a foreign stream before ledger settlement",
+    "reason": "the class's handoff window (`reproduceSubmissionRecoveryHandoffGapForTest`, as the rows above) with another request's terminal stream written into it: it pins that the class's ledger reads the successor's stream, not the foreign one, as the submission's end. The outcome an app sees is held by the successors of the 'settles a … successor stream' rows",
+    "ruledOut": "a submission's end is its run's status, not stream evidence (THINK-HARNESS.md: operations on Tasks; arch ruling (std theme f, follow-up), 27 Nov)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > preserves continue completed successor evidence across a foreign stream before ledger settlement",
+    "reason": "the class's handoff window (`reproduceSubmissionRecoveryHandoffGapForTest`, as the rows above) with another request's terminal stream written into it: it pins that the class's ledger reads the successor's stream, not the foreign one, as the submission's end. The outcome an app sees is held by the successors of the 'settles a … successor stream' rows",
+    "ruledOut": "a submission's end is its run's status, not stream evidence (THINK-HARNESS.md: operations on Tasks; arch ruling (std theme f, follow-up), 27 Nov)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > preserves retry error successor evidence across a foreign stream before ledger settlement",
+    "reason": "the class's handoff window (`reproduceSubmissionRecoveryHandoffGapForTest`, as the rows above) with another request's terminal stream written into it: it pins that the class's ledger reads the successor's stream, not the foreign one, as the submission's end. The outcome an app sees is held by the successors of the 'settles a … successor stream' rows",
+    "ruledOut": "a submission's end is its run's status, not stream evidence (THINK-HARNESS.md: operations on Tasks; arch ruling (std theme f, follow-up), 27 Nov)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > preserves continue error successor evidence across a foreign stream before ledger settlement",
+    "reason": "the class's handoff window (`reproduceSubmissionRecoveryHandoffGapForTest`, as the rows above) with another request's terminal stream written into it: it pins that the class's ledger reads the successor's stream, not the foreign one, as the submission's end. The outcome an app sees is held by the successors of the 'settles a … successor stream' rows",
+    "ruledOut": "a submission's end is its run's status, not stream evidence (THINK-HARNESS.md: operations on Tasks; arch ruling (std theme f, follow-up), 27 Nov)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > does not mistake another request's terminal stream for submission completion",
+    "reason": "a `running` submission seeded in the class's shape (`seedRunningSubmissionForTest`) next to another request's terminal stream rows (`insertAgedStreamForTest`), judged by the class's start-up reconciliation (`recoverSubmissionsOnStartForTest`)",
+    "ruledOut": "a submission's end is its run's status, not stream evidence (THINK-HARNESS.md: operations on Tasks; arch ruling (std theme f, follow-up), 27 Nov)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > does not settle a submission as completed on a stream a reconnecting tab closed after a reset",
+    "reason": "a `running` submission seeded in the class's shape (`seedRunningSubmissionForTest`) and its stream rows written by hand as a closed stream (`insertInterruptedStream`), judged by the class's start-up reconciliation (`recoverSubmissionsOnStartForTest`)",
+    "ruledOut": "a submission's end is its run's status, not stream evidence (THINK-HARNESS.md: operations on Tasks; arch ruling (std theme f, follow-up), 27 Nov)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > keeps pending retry recovery ahead of terminal-stream ledger settlement",
+    "reason": "a `running` submission seeded in the class's shape with a completed stream row (`insertAgedStreamForTest`) and a recovery scheduled by hand (`preSchedule…ForTest`): it pins that the class's start-up reconciliation does not settle a submission from stream evidence while its recovery is scheduled",
+    "ruledOut": "a submission's end is its run's status, not stream evidence (THINK-HARNESS.md: operations on Tasks; arch ruling (std theme f, follow-up), 27 Nov)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > keeps pending continue recovery ahead of terminal-stream ledger settlement",
+    "reason": "a `running` submission seeded in the class's shape with a completed stream row (`insertAgedStreamForTest`) and a recovery scheduled by hand (`preSchedule…ForTest`): it pins that the class's start-up reconciliation does not settle a submission from stream evidence while its recovery is scheduled",
+    "ruledOut": "a submission's end is its run's status, not stream evidence (THINK-HARNESS.md: operations on Tasks; arch ruling (std theme f, follow-up), 27 Nov)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > gives exact submission identity precedence over another row's successor request",
+    "reason": "two `running` submissions seeded in the class's shape (`seedRunningSubmissionForTest`), one whose id is the other's successor request id, with the class's recovery callback run by hand (`runChatRecoveryContinueForTestWith`): no app can make a submission id equal another's request id",
+    "ruledOut": "a submission is one operation with one id (THINK-HARNESS.md; arch ruling H2 Q3; arch ruling (std theme f, follow-up), 27 Nov)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > protects only the exact submission targeted by scheduled recovery",
+    "reason": "the same seeded id collision as 'gives exact submission identity precedence…', with a recovery scheduled by hand and the class's start-up reconciliation run (`recoverSubmissionsOnStartForTest`)",
+    "ruledOut": "a submission is one operation with one id (THINK-HARNESS.md; arch ruling H2 Q3; arch ruling (std theme f, follow-up), 27 Nov)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — chatRecovery > chat() discards the stream once its message is persisted",
+    "reason": "the class's stream rows read directly (`getLatestStreamSnapshot`) after a completed chat(): which rows are kept or deleted, which nothing an app sees exposes; the reply itself is asserted by every chat() test",
+    "mechanicsOnly": true
   }
 ]
