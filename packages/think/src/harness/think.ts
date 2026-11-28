@@ -48,6 +48,7 @@ import {
   tool,
   type LanguageModel,
   type LanguageModelUsage,
+  type ModelMessage,
   type ToolSet,
   type TypedToolCall,
   type UIMessage,
@@ -559,6 +560,10 @@ export class Think<
         messages?: TurnConfig["messages"];
         /** How many parts of a continued reply the rewrite already had. */
         replyParts?: number;
+        /** The proactive compactions the turn tried (`contextOverflow`). */
+        proactive?: number;
+        /** The history a proactive compaction left, for the turn's later calls. */
+        compactedHead?: UIMessage[];
       }
     | undefined;
   /**
@@ -3361,6 +3366,9 @@ export class Think<
     // The step before this call ran its tools: it ends now, before this
     // call's hooks, as an AI SDK step ends before the next `prepareStep`.
     const reply = turn.messages.at(-1);
+    // The step that just ended, whose usage the proactive guard reads.
+    const lastUsage =
+      turn.step > 0 ? this.#openSteps.get(turn.operationId)?.usage : undefined;
     if (turn.step > 0 && reply?.role === "assistant") {
       await this.#endStep(turn.operationId, reply);
     }
@@ -3502,6 +3510,7 @@ export class Think<
           ? continued.parts.length
           : 0;
     }
+    const compacted = await this.#compactBeforeStep(turn, lastUsage, tools);
     const rewritten = this.#ownTurn?.messages;
     // This turn's reply, and what follows it (a context reminder), as the
     // harness projects them for this call.
@@ -3520,8 +3529,9 @@ export class Think<
             ...turn.messages.slice(replyAt + 1)
           ].filter((m) => m.parts.length > 0)
         : [];
-    const turnMessages =
-      rewritten === undefined
+    const turnMessages = compacted
+      ? compacted
+      : rewritten === undefined
         ? undefined
         : added.length === 0
           ? rewritten
@@ -3791,6 +3801,79 @@ export class Think<
       this.#extensionTurn = undefined;
     }
     return shortened;
+  }
+
+  /**
+   * Think's proactive guard (`contextOverflow.proactive`): when the step
+   * before reported input tokens past the budget, compact the session and
+   * send this call the compacted history with the turn's reply so far.
+   * Best-effort: on any failure the call goes on unchanged.
+   */
+  async #compactBeforeStep(
+    turn: ThinkTurnContext,
+    usage: LanguageModelUsage | undefined,
+    tools: ToolSet
+  ): Promise<ModelMessage[] | undefined> {
+    const guard = this.contextOverflow?.proactive;
+    const own = this.#ownTurn;
+    if (!guard || guard.maxInputTokens <= 0) return undefined;
+    if (own?.operationId !== turn.operationId) return undefined;
+    // The turn's reply, and what the harness projects after it for this
+    // call (the context reminder), found by role, not position.
+    let replyAt = turn.messages.length - 1;
+    while (replyAt >= 0 && turn.messages[replyAt].role !== "assistant") {
+      replyAt--;
+    }
+    const reply = replyAt >= 0 ? turn.messages[replyAt] : undefined;
+    const after = turn.messages.slice(replyAt + 1);
+    // The compacted history, then the live reply (never a stored copy of
+    // it under the same id) and the call's projection after it.
+    const withLive = async (head: UIMessage[]) =>
+      convertToModelMessages(
+        [
+          ...head.filter((m) => m.id !== reply?.id),
+          ...(reply ? [reply] : []),
+          ...after
+        ],
+        { tools, ignoreIncompleteToolCalls: true }
+      );
+    // Once compacted, every later call of the turn sends the compacted
+    // history: the harness's own transcript for the turn predates it.
+    const compactedHead = own.compactedHead;
+    const tried = own.proactive ?? 0;
+    const used = usage?.inputTokens ?? usage?.totalTokens;
+    const due =
+      tried < Math.max(1, guard.maxCompactions ?? 1) &&
+      used != null &&
+      Number.isFinite(used) &&
+      used >= guard.maxInputTokens * (guard.headroom ?? 0.9);
+    if (!due) return compactedHead ? withLive(compactedHead) : undefined;
+    try {
+      // The attempt counts, so a no-op compaction isn't tried every step.
+      own.proactive = tried + 1;
+      // The branch the turn answers, not the session's active one (a
+      // regenerate answers an earlier message).
+      const asked = turn.messages
+        .slice(0, replyAt >= 0 ? replyAt : turn.messages.length)
+        .filter((m) => m.role === "user");
+      const question = asked[asked.length - 1]?.id;
+      const shortened = Boolean(await this.session.compact(question));
+      this._emit("chat:context:compacted", {
+        reason: "proactive",
+        shortened
+      });
+      if (!shortened) {
+        return compactedHead ? withLive(compactedHead) : undefined;
+      }
+      const head = (await this.session.getHistory(question)) as UIMessage[];
+      own.compactedHead = head;
+      return await withLive(head);
+    } catch (error) {
+      console.warn(
+        `[Think] proactive context compaction failed; proceeding without it: ${error instanceof Error ? error.message : String(error)}`
+      );
+      return compactedHead ? withLive(compactedHead) : undefined;
+    }
   }
 
   #classify(error: unknown): ThinkErrorClass {
