@@ -836,6 +836,48 @@ describe("Think durable submissions", () => {
       expect(reported.at(-1)).toBe("completed");
     }, 30_000);
 
+    it("is never reported as failed while a reply a reset cut off before any text is recovered", async () => {
+      const name = crypto.randomUUID();
+      const agent = await freshAgent(name);
+      await agent.setDelayedChunkResponse(["a ", "b ", "c "], 50);
+      // The reply's stream opens and waits before its first text.
+      await agent.holdChunksAfterForTest(0);
+      await agent.testSubmitMessages("interrupt me before I answer", {
+        submissionId: "sub-evicted-before-text"
+      });
+      await chunkStreamHeld(agent);
+      await agent.holdChunksAfterResetForTest(["e ", "f ", "g "], 50, 1);
+      await agent.resetIsolateForTest().catch(() => {});
+      const restarted = await freshAgent(name);
+      onTestFinished(() => restarted.releaseChunksForTest());
+      // The recovered reply is streaming, and waits.
+      await chunkStreamHeld(restarted);
+
+      await expect(
+        restarted.inspectSubmissionForTest("sub-evicted-before-text")
+      ).resolves.toMatchObject({ status: "running" });
+      await restarted.releaseChunksForTest();
+      await expect(
+        restarted.waitForSubmissionForTest("sub-evicted-before-text", {
+          timeoutMs: 20_000
+        })
+      ).resolves.toMatchObject({ status: "completed" });
+      await tasksIdle(restarted);
+      // Its status went to `completed` and nowhere else since the reset.
+      const reported = (await restarted.getSubmissionLog())
+        .filter((entry) => entry.submissionId === "sub-evicted-before-text")
+        .map((entry) => entry.status);
+      expect(reported).not.toContain("error");
+      expect(reported).not.toContain("aborted");
+      expect(reported.at(-1)).toBe("completed");
+      // One question, one reply: the recovered one.
+      const stored = await restarted.getStoredMessages();
+      expect(stored.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+    }, 30_000);
+
     it("keeps a tool's result and does not run the tool again", async () => {
       const name = crypto.randomUUID();
       const agent = await freshAgent(name);
@@ -1097,6 +1139,31 @@ describe("Think durable submissions", () => {
 
       await expect(
         restarted.inspectSubmissionForTest("sub-recovered-fails")
+      ).resolves.toMatchObject({
+        status: "error",
+        error: "recovered in-band failure"
+      });
+    }, 30_000);
+
+    it("ends in error with the model's own error text when a reply a reset cut off before any text fails recovered", async () => {
+      const name = crypto.randomUUID();
+      const agent = await freshAgent(name);
+      await agent.setDelayedChunkResponse(["alpha ", "beta "], 200);
+      // The reply's stream opens and waits before its first text.
+      await agent.holdChunksAfterForTest(0);
+      await agent.testSubmitMessages("fails once recovered before any text", {
+        submissionId: "sub-recovered-before-text-fails"
+      });
+      await chunkStreamHeld(agent);
+      // The next model call, the recovered one, fails in its stream.
+      await agent.failInBandAfterResetForTest("recovered in-band failure");
+
+      await agent.resetIsolateForTest().catch(() => {});
+      const restarted = await freshAgent(name);
+      await tasksIdle(restarted);
+
+      await expect(
+        restarted.inspectSubmissionForTest("sub-recovered-before-text-fails")
       ).resolves.toMatchObject({
         status: "error",
         error: "recovered in-band failure"
