@@ -651,6 +651,19 @@ describe("BrowserSession", () => {
     expect(t.sockets).toHaveLength(0);
   });
 
+  it.each(["Fetch.enable", "Network.setRequestInterception"])(
+    "refuses %s, since its code can't answer intercepted requests",
+    async (method) => {
+      const t = setup();
+      const { error } = await t.run([
+        ["send", { method, params: {}, sessionId: "active" }]
+      ]);
+      expect(String(error)).toContain(`${method} is not available`);
+      expect(String(error)).toContain("Network.setBlockedURLs");
+      expect(t.sockets).toHaveLength(0);
+    }
+  );
+
   it("shares one connection between concurrent first calls", async () => {
     const t = setup();
     const session = t.browser.session();

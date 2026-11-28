@@ -343,6 +343,51 @@ const spec = normalizeCdpSpec({
 });
 ```
 
+### Listening for CDP events
+
+A `CdpConnection`, from any of these or from `browser.connect()`, also delivers CDP events. `on()` returns a function that stops listening, and `waitFor()` resolves with the next matching event:
+
+```ts
+const { cdp } = await this.browser.connect();
+try {
+  const { targetId } = (await cdp.send("Target.createTarget", {
+    url: "about:blank"
+  })) as { targetId: string };
+  try {
+    const sessionId = await cdp.attachToTarget(targetId);
+    await cdp.send("Page.enable", {}, { sessionId });
+
+    const stop = cdp.on(
+      "Page.frameNavigated",
+      ({ params }) => {
+        // params is typed: params.frame is a Frame.
+        if (!params.frame.parentId) console.log("navigated", params.frame.url);
+      },
+      { sessionId }
+    );
+
+    // Start waiting before sending the command that causes the event, and
+    // await both together.
+    await Promise.all([
+      cdp.waitFor("Page.loadEventFired", { sessionId, timeoutMs: 30_000 }),
+      cdp.send("Page.navigate", { url: "https://example.com" }, { sessionId })
+    ]);
+    stop();
+  } finally {
+    // The browser outlives the connection, so close the tab you opened.
+    await cdp.send("Target.closeTarget", { targetId });
+  }
+} finally {
+  cdp.disconnect();
+}
+```
+
+Events are typed from the [`devtools-protocol`](https://www.npmjs.com/package/devtools-protocol) package: a handler for `Page.frameNavigated` gets that event's `params`, and so do `waitFor()` and its `predicate`. Any other event name, such as Browser Run's own `Cloudflare.handoffComplete`, works too, with untyped `params`. A `CdpEventHandler` with no type argument handles any event, so one handler can listen for several.
+
+Without `sessionId`, a listener hears the event from every CDP session on the connection and from the browser itself. `sessionId: null` hears browser-level events only. Browser Run sends `Cloudflare.handoffComplete` once at browser level and once more in each attached session, so listen for it with `sessionId: null` to hear it once.
+
+Handlers run synchronously as each event arrives, so code awaiting a command's reply has already seen the events sent before it. A handler that throws is logged and does not stop the others, and no handler runs once the connection ends. Every handler gets the same event object, so its `params` are read-only. `waitFor()` rejects on timeout (by default the connection's command timeout), when its `signal` aborts, and when the connection closes. A wait that rejects before your code awaits it is not reported as an unhandled rejection, so a failed command beside it leaves nothing behind.
+
 ## Local development
 
 Recent Wrangler releases support Browser Run in local development. `npx wrangler dev` provisions the browser automatically, so the same `browser: env.BROWSER` setup works locally and when deployed.
@@ -352,6 +397,7 @@ Recent Wrangler releases support Browser Run in local development. `npx wrangler
 - The model's code runs in a fresh Dynamic Worker for every call, with no network access (`fetch` and `connect` are blocked). `browser` is its only way out.
 - CDP commands go to your Durable Object over Workers RPC. The WebSocket and the browser stay in your Durable Object, not the sandbox.
 - The model cannot close or crash the browser; `Browser.close` and `Browser.crash*` are refused.
+- The model cannot intercept requests: `Fetch.enable` and `Network.setRequestInterception` are refused, because its code never receives the events it would have to answer, so every intercepted request would hang the tab. `Network.setBlockedURLs` and `Network.setExtraHTTPHeaders` still work.
 - The model cannot get a Live View link: `Cloudflare.getLiveView` and `Cloudflare.handoff` are refused, and so are `Target.sendMessageToTarget` and `Target.exposeDevToolsProtocol`, which could carry those commands inside them.
 - Live View links give whoever holds them control of the browser, including its logins. Do not show them to the model or store them.
 

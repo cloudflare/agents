@@ -8,7 +8,7 @@
 import type { OAuthClientProvider } from "@modelcontextprotocol/client";
 import type { AgentMcpOAuthProvider } from "agents";
 import { Browser, browserRun } from "agents/browser";
-import type { BrowserSource } from "agents/browser";
+import type { BrowserSource, CdpConnection } from "agents/browser";
 import { browserTool as aiSdkBrowserTool } from "agents/browser/ai-sdk";
 import { browserTool as piBrowserTool } from "agents/browser/pi";
 import { browserTool as tanStackBrowserTool } from "agents/browser/tanstack-ai";
@@ -46,4 +46,14 @@ export const piTool = piBrowserTool({ browser, loader: env.LOADER });
 export const tanStackTool = tanStackBrowserTool({
   browser,
   loader: env.LOADER
+});
+
+// CDP events are typed from devtools-protocol, which the built types import.
+declare const cdp: CdpConnection;
+export const stopListening = cdp.on("Page.frameNavigated", ({ params }) => {
+  params.frame.url satisfies string;
+});
+export const loaded = cdp.waitFor("Page.loadEventFired", {
+  sessionId: "session",
+  predicate: ({ params }) => params.timestamp > 0
 });

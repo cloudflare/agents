@@ -192,7 +192,20 @@ export interface BrowserConnection {
    * browser.
    */
   activeTargetId?: string;
-  /** Closing this connection does NOT close the browser. */
+  /**
+   * Raw CDP over the connection's WebSocket. Closing it does NOT close the
+   * browser.
+   *
+   * Listen for events with `cdp.on(method, handler, { sessionId })`, or wait
+   * for one with `cdp.waitFor(method, { sessionId, predicate, timeoutMs })`,
+   * registered before sending the command that causes it. Events are typed
+   * from `devtools-protocol`. Without `sessionId` a listener hears the event
+   * from every CDP session on this connection and from the browser itself;
+   * `null` means browser-level events only. Browser Run sends
+   * `Cloudflare.handoffComplete` once at browser level and once more in
+   * each attached session, so listen for it with `sessionId: null` to hear
+   * it once.
+   */
   cdp: CdpConnection;
   /**
    * Record the tab this scope is working in (or clear it with `undefined`).
