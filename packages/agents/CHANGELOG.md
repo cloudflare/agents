@@ -1,5 +1,109 @@
 # @cloudflare/agents
 
+## 0.35.0
+
+### Minor Changes
+
+- [#3184](https://github.com/cloudflare/agents/pull/3184) [`ab6072e`](https://github.com/cloudflare/agents/commit/ab6072ecceaa1c3ea25cc7313d2e04c4d5fd1c86) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Experimental harnesses and Channels.
+
+  - Remove the experimental `AiSdkHarness` (`agents/harness/ai-sdk`), with its `createSendMessageTool` and AI SDK conversion exports. Use Think or the Pi harness; to serve an agent through Channels, use `ThinkHarness` from `agents/harness/think`, which takes the same `model` and `tools`; existing `AiSdkHarness` transcripts stay in storage and are not carried over.
+  - `ThinkHarness`: `recovery.maxAttempts` (default 10) counts attempts without progress, `recovery.backoffMs` is removed, a cut-off tool reruns only if marked `recovery: "rerun"`, and tools' `onInputStart`, `onInputDelta` and `onInputAvailable` are no longer called.
+  - `ThinkHarness` tells the model when its tools changed, answers a cut-off call to a removed tool with an error instead of waiting, and emits `prefix-changed` ([#3194](https://github.com/cloudflare/agents/issues/3194)).
+  - `ThinkHarness` takes client tool results only from the turn's owner, runs on AI SDK 6, no longer hangs on an in-band stream error, and no longer corrupts long log entries with emoji ([#3054](https://github.com/cloudflare/agents/issues/3054)).
+  - `ThinkHarness`'s `onRecovery` may return `{ continue, persist }` beside `"continue"` and `"abandon"`, where `persist: false` drops the interrupted reply, and its context carries the turn's `stash()` data as `recoveryData`.
+  - Channels: a surface `key` groups one place's messages, and a reset no longer double-posts an answer ([#3145](https://github.com/cloudflare/agents/issues/3145)).
+  - ThinkHarness retries a turn after a platform transient (a lost connection, a storage reset, an error marked retryable) within its recovery budget unless the app's classifier says `fail` (`classifyContextOverflow` now says `retry` for one), finishes a turn whose recovery gives up like any given-up reply, and names the reply an aborted operation kept (`messageId`).
+  - Channels: a response cut off while a tool's input was still arriving is replaced by its rerun, not posted as cut off.
+  - `ThinkHarness` takes shipped extensions through its `extensions` option. The first is Code Mode, `codemode()` from the new experimental entry `agents/harness/think/extensions`: the model writes one script, and the other tools become functions it calls, each a recorded step with the tool hooks and approvals. `CodemodeSandbox` and `sandboxExecutor` run the scripts in their own Durable Object.
+
+- [#3184](https://github.com/cloudflare/agents/pull/3184) [`ab6072e`](https://github.com/cloudflare/agents/commit/ab6072ecceaa1c3ea25cc7313d2e04c4d5fd1c86) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Storage limits and `agents/streams`.
+
+  - Agents now store up to 8 MB in one SQLite row (was 2 MB), as production allows. Event-log replay, Sessions search and `getAgentToolChunks` now page by size (16 MiB per frame or reply); a caller of `getAgentToolChunks` reads the rest by passing the last `afterSequence` until a call returns no chunks. Local development needs workerd 1.20260930 or later: `wrangler` 4.145.0+ and `@cloudflare/vitest-plugin` 1.9.1+; older local runtimes fail large writes with `SQLITE_TOOBIG`. See [Adding to an existing project](https://developers.cloudflare.com/agents/getting-started/add-to-existing-project/).
+  - `ROW_MAX_BYTES` and `enforceRowSizeLimit` are removed from `agents/chat` (use `ROW_VALUE_BYTES`).
+  - An oversized callable result answers with an error, an oversized chat message list is logged instead of sent, and oversized state or SQL throws a `SqlError` naming the limit ([#2991](https://github.com/cloudflare/agents/issues/2991), [#3050](https://github.com/cloudflare/agents/issues/3050), [#3063](https://github.com/cloudflare/agents/issues/3063)).
+  - `agents/streams` takes an optional `name` (experimental) and validates its arguments ([#3062](https://github.com/cloudflare/agents/issues/3062)).
+
+- [#3184](https://github.com/cloudflare/agents/pull/3184) [`ab6072e`](https://github.com/cloudflare/agents/commit/ab6072ecceaa1c3ea25cc7313d2e04c4d5fd1c86) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Sessions.
+
+  - Sessions resolves what the model sees from the newest message back: compaction overlays apply at any length, reads cost what they return, and deleting messages keeps overlays applying ([#2871](https://github.com/cloudflare/agents/issues/2871)). Behaviour changes: `addCompaction()` throws on anchors that can never apply, overlapping hand-written overlays resolve to the one ending later, and reads that start at the root throw past 200,000 visible messages. Existing overlays are carried forward on start. See [Sessions](https://developers.cloudflare.com/agents/api-reference/sessions/#compaction).
+  - Sessions takes an optional `name` (experimental).
+  - Long compacted chats no longer send raw history, long sessions load, and search handles large messages and long texts ([#3056](https://github.com/cloudflare/agents/issues/3056), [#3075](https://github.com/cloudflare/agents/issues/3075), [#3124](https://github.com/cloudflare/agents/issues/3124), [#3084](https://github.com/cloudflare/agents/issues/3084)).
+  - A request no longer fails with "web_search_call was provided without its required reasoning item" ([#3090](https://github.com/cloudflare/agents/issues/3090)).
+
+- [#3184](https://github.com/cloudflare/agents/pull/3184) [`ab6072e`](https://github.com/cloudflare/agents/commit/ab6072ecceaa1c3ea25cc7313d2e04c4d5fd1c86) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Experimental `agents/tasks` API changes. See [Tasks](https://github.com/cloudflare/agents/blob/main/docs/agents/tasks.md#inspection-and-control).
+
+  - Snapshots and receipts carry `status` (was `state`), `TaskRunState` is now `TaskStatus`, `failed` is now `error`, `cancelled` is now `aborted`, and `waiting` is now `pending` with `waitReason` and `wakeAt`; stored runs are migrated.
+  - `cancel()` settles a run `aborted` at once, and `tasks.run()` throws `TaskInputConflictError` when a reused `runId` or `idempotencyKey` has a different input.
+  - Tasks takes an optional `name` for more than one Tasks per object.
+  - A run is recovered within seconds of a reset, or 30 seconds after a transient platform failure ([#3066](https://github.com/cloudflare/agents/issues/3066)).
+
+- [#3184](https://github.com/cloudflare/agents/pull/3184) [`ab6072e`](https://github.com/cloudflare/agents/commit/ab6072ecceaa1c3ea25cc7313d2e04c4d5fd1c86) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Think.
+
+  - Scheduled tasks from `getScheduledTasks()` move to new storage, and existing task rows migrate forward on first start. `getScheduledTasksScope()` is removed: a sub-agent now arms its own declared tasks, and its root wakes it. See [Scheduled tasks](https://developers.cloudflare.com/agents/api-reference/think/#scheduled-tasks).
+  - Experimental `agents/context`: `freezeSystemPrompt`, `refreshSystemPrompt` and `reminder` moved from `ContextBlocks` to the new `Context`, `ContextBlocks` no longer takes a prompt store, prompt stores are only read, turns keep their first system prompt, and `set_context` blocks are not echoed back.
+  - Messenger replies: `messengerReplySnapshot`, `parseMessengerReplySnapshot`, `MessengerReplySnapshot`, `MESSENGER_REPLY_FIBER_NAME`, `DeliveryTag` and `defaultDeliveryTag` are removed, `messengerReplyRecoveryMode()` takes a stage, `ThinkMessengerRuntime` no longer has `handleFiberRecovery()`, `hasLiveReply()`, `initialReplySnapshot()` or `executeLiveReply()`, and `deliverMessengerReply()` takes `onStage` instead of `checkpoint`, `fiber` and `snapshotThread`; a reply cut off by a reset answers again or apologizes, and replies a reset left open in think@0.24.0 are carried forward.
+  - `submitMessages` stores messages whole up to 16 MiB.
+  - `deliverNotice` before the first webhook no longer throws.
+  - Sandboxed extensions work in sub-agents and enforce `permissions.network` when the Worker re-exports `HostBridgeLoopback` ([#3173](https://github.com/cloudflare/agents/issues/3173)).
+
+### Patch Changes
+
+- [#3184](https://github.com/cloudflare/agents/pull/3184) [`ab6072e`](https://github.com/cloudflare/agents/commit/ab6072ecceaa1c3ea25cc7313d2e04c4d5fd1c86) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Agent tools and sub-agents.
+
+  - `Think.startAgentToolRun` takes an optional `signal`.
+  - A run cut off by a parent reset re-attaches to its child and ends once, or `interrupted` after 2 s, and a throwing `onAgentToolFinish` goes to `onError`.
+  - A run whose child cannot stay up ends `error`, and a detached run without progress ends `interrupted`, not `running` ([#3073](https://github.com/cloudflare/agents/issues/3073), [#2467](https://github.com/cloudflare/agents/issues/2467)).
+  - A given-up detached run is no longer re-armed forever, and `onMilestones` gets a milestone reached before finishing ([#2769](https://github.com/cloudflare/agents/issues/2769), [#3278](https://github.com/cloudflare/agents/issues/3278)).
+  - Runs wait for their child's recovery and start in order, and aged-media eviction runs for every sub-agent ([#3024](https://github.com/cloudflare/agents/issues/3024), [#3144](https://github.com/cloudflare/agents/issues/3144), [#2974](https://github.com/cloudflare/agents/issues/2974)).
+  - Many sub-agents started at once no longer stall, and their work resumes when the root restarts ([#3077](https://github.com/cloudflare/agents/issues/3077), [#3014](https://github.com/cloudflare/agents/issues/3014), [#3086](https://github.com/cloudflare/agents/issues/3086)).
+  - Sub-agents work under a jurisdiction, keep socket frames in order, and no longer reset their tree's storage when upgrading old chat tables ([#3085](https://github.com/cloudflare/agents/issues/3085), [#3181](https://github.com/cloudflare/agents/issues/3181), [#3215](https://github.com/cloudflare/agents/issues/3215), [#3192](https://github.com/cloudflare/agents/issues/3192)).
+
+- [#3184](https://github.com/cloudflare/agents/pull/3184) [`ab6072e`](https://github.com/cloudflare/agents/commit/ab6072ecceaa1c3ea25cc7313d2e04c4d5fd1c86) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Stored chat messages.
+
+  - Before each turn, calls and approvals left pending earlier are failed (`chat:transcript:repaired`), and `continueLastTurn()` returns `"awaiting-client"` while a reply waits on a client.
+  - Stored parts keep metadata, file names and steering messages, and a finished streaming tool stays in later turns ([#3143](https://github.com/cloudflare/agents/issues/3143), [#3145](https://github.com/cloudflare/agents/issues/3145)).
+  - A repeated tool result is a no-op, an early approval keeps the final input, and a failed store reaches `onChatResponse` as `error` ([#2981](https://github.com/cloudflare/agents/issues/2981)).
+
+- [#3184](https://github.com/cloudflare/agents/pull/3184) [`ab6072e`](https://github.com/cloudflare/agents/commit/ab6072ecceaa1c3ea25cc7313d2e04c4d5fd1c86) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Chat recovery.
+
+  - Recovery work units (`maxRecoveryWork`, `ctx.work`) now count ten stored chunks each. See [Recovery work units](https://developers.cloudflare.com/agents/api-reference/chat-agents/#recovery-work-units).
+  - Rate-limit, transient and overflow errors are recognised without `classifyChatError`, and recovery honours `Retry-After` (up to 60 s).
+  - An interrupted turn is skipped if the conversation moved on, else answered or continued once, and requests behind it run afterwards in order ([#2922](https://github.com/cloudflare/agents/issues/2922)).
+  - Long conversations are no longer sealed with `work_budget_exceeded` ([#3055](https://github.com/cloudflare/agents/issues/3055)).
+  - A stop during recovery always ends the request `aborted`, and the next message no longer waits out its backoff ([#3027](https://github.com/cloudflare/agents/issues/3027)).
+  - A rebuilt reply no longer repeats parts, and a tool that only reported progress before a reset is reported interrupted ([#2979](https://github.com/cloudflare/agents/issues/2979)).
+
+- [#3184](https://github.com/cloudflare/agents/pull/3184) [`ab6072e`](https://github.com/cloudflare/agents/commit/ab6072ecceaa1c3ea25cc7313d2e04c4d5fd1c86) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Chat turns.
+
+  - **Upgrade `agents`, `@cloudflare/ai-chat` and `@cloudflare/think` together.** `@cloudflare/ai-chat` and `@cloudflare/think` require `agents` 0.35.0 or later. Released `@cloudflare/ai-chat` 0.12.x and `@cloudflare/think` 0.24.x can't run a turn on this `agents`, so `agents/chat` no longer keeps exports for them. `TurnQueue`, `SubmitConcurrencyController`, `AbortRegistry`, `ResumableStream`, `ContinuationState`, `AutoContinuationController`, `buildInClauseStrings` and `enforceRowSizeLimit` are removed, and an old pairing fails at bundle time with a missing export.
+  - A message sent while a turn runs is stored when its own turn starts, so the transcript reads `U1, A1, U2, A2`.
+  - Waiting messages are dropped only by a clear, and a cancelled or superseded one stays so across a restart ([#2928](https://github.com/cloudflare/agents/issues/2928)).
+  - A stop also drops waiting auto-continuations, an `aborted` result carries `reason: "stopped"` or `"interrupted"`, and an `autoContinue` tool result answered just before a restart still continues the reply ([#3101](https://github.com/cloudflare/agents/issues/3101), [#3142](https://github.com/cloudflare/agents/issues/3142)).
+  - New events: `chat:request:failed`, `chat:stream:stalled`, `chat:continuation:dropped`, and Think's `tool:result`, `tool:approval`, `message:cancel`.
+
+- [#3184](https://github.com/cloudflare/agents/pull/3184) [`ab6072e`](https://github.com/cloudflare/agents/commit/ab6072ecceaa1c3ea25cc7313d2e04c4d5fd1c86) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Clients.
+
+  - `useAgent` and `AgentClient` wait up to 15 s for the handshake (was 4 s) and spread their reconnects.
+  - A tab joining a running reply gets live chunks, and each request's end once, also after a stop or reconnect ([#2703](https://github.com/cloudflare/agents/issues/2703), [#3068](https://github.com/cloudflare/agents/issues/3068), [#3074](https://github.com/cloudflare/agents/issues/3074), [#3135](https://github.com/cloudflare/agents/issues/3135), [#3064](https://github.com/cloudflare/agents/issues/3064)).
+  - After a reconnect, `useAgentChat` shows an accepted turn as busy, and Stop cancels it ([#2741](https://github.com/cloudflare/agents/issues/2741)).
+  - A client reconnecting to a sub-agent before its old socket closed gets frames ([#2709](https://github.com/cloudflare/agents/issues/2709)).
+
+- [#3184](https://github.com/cloudflare/agents/pull/3184) [`ab6072e`](https://github.com/cloudflare/agents/commit/ab6072ecceaa1c3ea25cc7313d2e04c4d5fd1c86) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Schedules, jobs and workflows.
+
+  - Work cut off by a reset resumes within 5 s instead of 30, and survives a dropped alarm ([#3028](https://github.com/cloudflare/agents/issues/3028), [#2977](https://github.com/cloudflare/agents/issues/2977)).
+  - A failing job no longer retries forever and reaches its `onJobError` ([#3022](https://github.com/cloudflare/agents/issues/3022), [#3023](https://github.com/cloudflare/agents/issues/3023), [#3032](https://github.com/cloudflare/agents/issues/3032), [#3025](https://github.com/cloudflare/agents/issues/3025), [#3007](https://github.com/cloudflare/agents/issues/3007)).
+  - Jobs and `getSchedule()` work in sub-agents, and `destroy()` from a scheduled callback sticks ([#3012](https://github.com/cloudflare/agents/issues/3012), [#3020](https://github.com/cloudflare/agents/issues/3020), [#3083](https://github.com/cloudflare/agents/issues/3083)).
+  - A crashing fiber recovery hook no longer takes the agent down ([#2970](https://github.com/cloudflare/agents/issues/2970)).
+  - `AgentWorkflow` runs and stubs survive an Agent reset, and `approveWorkflow()` and `rejectWorkflow()` skip an overridden `sendWorkflowEvent()` ([#3052](https://github.com/cloudflare/agents/issues/3052), [#2978](https://github.com/cloudflare/agents/issues/2978)).
+  - `deleteSubAgent()` and a sub-agent's `destroy()` now empty the sub-agent's storage, and its own sub-agents' storage, on deployed Workers.
+
+- [#3184](https://github.com/cloudflare/agents/pull/3184) [`ab6072e`](https://github.com/cloudflare/agents/commit/ab6072ecceaa1c3ea25cc7313d2e04c4d5fd1c86) Thanks [@mattzcarey](https://github.com/mattzcarey)! - MCP, email and models.
+
+  - The MCP client checks server URLs like `web_fetch`, refusing more private addresses, `.internal` names and URLs with credentials.
+  - The MCP RPC transport and `getAgentByName` recover from an Agent reset ([#2978](https://github.com/cloudflare/agents/issues/2978)).
+  - `replyToEmail()` no longer adds a second `Re:` ([#3207](https://github.com/cloudflare/agents/issues/3207)).
+  - `agents/models/pi-ai`: an `AbortError` from `onResponse` on Anthropic stops a fallback chain.
+
 ## 0.34.1
 
 ### Patch Changes

@@ -1,5 +1,11 @@
 # @cloudflare/worker-bundler
 
+## 0.2.7
+
+### Patch Changes
+
+- [#3098](https://github.com/cloudflare/agents/pull/3098) [`e44ff29`](https://github.com/cloudflare/agents/commit/e44ff290f5d8a039ba5afeee2ba89be5e89a2ac2) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Python packages with native extensions get wheels for the Python the compatibility date picks, not always 3.12.
+
 ## 0.2.6
 
 ### Patch Changes
