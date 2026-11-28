@@ -29,6 +29,7 @@ type ThinkSubmissionTestStub = {
   holdChunksAfterForTest(after: number): Promise<void>;
   isChunkStreamHeldForTest(): Promise<boolean>;
   setStallTimeoutForTest(timeoutMs: number): Promise<void>;
+  failInBandAfterResetForTest(errorText: string): Promise<void>;
   abandonChunkHoldForTest(): Promise<void>;
   releaseChunksForTest(): Promise<void>;
   clearDelayedChunkResponse(): Promise<void>;
@@ -573,6 +574,128 @@ describe("Think durable submissions", () => {
       ).resolves.toMatchObject({ status: "pending" });
     });
 
+    it("a cancel says its messages were not stored while it starts, and were once its reply streams", async () => {
+      const agent = await freshAgent();
+      // Its `running` report waits, before the turn stores its question.
+      await agent.holdSubmissionStatusHookForTest("running");
+      onTestFinished(() => agent.releaseSubmissionStatusHookForTest());
+      await agent.testSubmitMessages("cancel me early", {
+        submissionId: "sub-cancel-starting"
+      });
+      await statusHookHeld(agent);
+      // The cancel is asked while it starts; it answers once the report
+      // has run.
+      const early = agent.cancelSubmissionForTest("sub-cancel-starting");
+      await agent.releaseSubmissionStatusHookForTest();
+      await expect(early).resolves.toMatchObject({
+        outcome: "cancelled",
+        previousStatus: "running",
+        messagesApplied: false
+      });
+      await tasksIdle(agent);
+
+      await running(agent, "sub-cancel-streaming");
+      await expect(
+        agent.cancelSubmissionForTest("sub-cancel-streaming")
+      ).resolves.toMatchObject({
+        outcome: "cancelled",
+        previousStatus: "running",
+        messagesApplied: true
+      });
+    }, 30_000);
+
+    it("a reused id is not settled with the result of the submission deleted before it", async () => {
+      const agent = await freshAgent();
+      await running(agent, "sub-reused");
+      // Its terminal report waits while it is deleted and the id reused.
+      await agent.holdSubmissionStatusHookForTest("aborted");
+      onTestFinished(() => agent.releaseSubmissionStatusHookForTest());
+      const cancel = agent.cancelSubmissionForTest("sub-reused", "stop");
+      await statusHookHeld(agent);
+      await expect(agent.deleteSubmissionForTest("sub-reused")).resolves.toBe(
+        true
+      );
+      await agent.releaseChunksForTest();
+      // The id is submitted again, and waited on, before the deleted
+      // one's report ends.
+      const resubmitted = agent.testSubmitMessages("the second one", {
+        submissionId: "sub-reused"
+      });
+      const waiting = agent.waitForSubmissionForTest("sub-reused", {
+        timeoutMs: 20_000
+      });
+      await agent.releaseSubmissionStatusHookForTest();
+      await cancel;
+      await resubmitted;
+      // The deleted one's end is not the reused id's: it runs to its own.
+      await expect(waiting).resolves.toMatchObject({ status: "completed" });
+    }, 30_000);
+
+    /** A submission that has completed, and when. */
+    async function completed(agent: ThinkSubmissionTestStub, id: string) {
+      await agent.testSubmitMessages(`finish ${id}`, { submissionId: id });
+      await expect(
+        agent.waitForSubmissionForTest(id, { timeoutMs: 10_000 })
+      ).resolves.toMatchObject({ status: "completed" });
+      const done = await agent.inspectSubmissionForTest(id);
+      // The next one completes at a later millisecond.
+      await vi.waitFor(() =>
+        expect(Date.now()).toBeGreaterThan(done?.completedAt ?? 0)
+      );
+      return done?.completedAt ?? 0;
+    }
+
+    it("a status filter applies before the limit and the cutoff, to list and to delete", async () => {
+      const agent = await freshAgent();
+      await completed(agent, "sub-older-completed");
+      const newer = await completed(agent, "sub-newer-completed");
+      await running(agent, "sub-filter-running");
+      await agent.testSubmitMessages("wait behind it", {
+        submissionId: "sub-filter-pending"
+      });
+
+      // The newest completed one, though two newer submissions exist.
+      const listed = await agent.listSubmissionsForTest({
+        status: "completed",
+        limit: 1
+      });
+      expect(listed.map((submission) => submission.submissionId)).toEqual([
+        "sub-newer-completed"
+      ]);
+      await expect(
+        agent.deleteSubmissionsForTest({
+          status: "completed",
+          completedBefore: new Date(newer),
+          limit: 10
+        })
+      ).resolves.toBe(1);
+      await expect(
+        agent.inspectSubmissionForTest("sub-older-completed")
+      ).resolves.toBeNull();
+      await expect(
+        agent.inspectSubmissionForTest("sub-newer-completed")
+      ).resolves.toMatchObject({ status: "completed" });
+    });
+
+    it("a limit over several statuses takes the newest of them all", async () => {
+      const agent = await freshAgent();
+      await completed(agent, "sub-several-older");
+      await completed(agent, "sub-several-newer");
+      await running(agent, "sub-several-running");
+      await agent.testSubmitMessages("wait behind it", {
+        submissionId: "sub-several-pending"
+      });
+
+      const listed = await agent.listSubmissionsForTest({
+        status: ["pending", "completed"],
+        limit: 2
+      });
+      expect(listed.map((submission) => submission.submissionId)).toEqual([
+        "sub-several-pending",
+        "sub-several-newer"
+      ]);
+    });
+
     it("a turn reset ends it skipped, and the one that waits behind it", async () => {
       const agent = await freshAgent();
       await running(agent, "sub-reset-running");
@@ -651,6 +774,32 @@ describe("Think durable submissions", () => {
       expect(
         (await restarted.getStoredMessages()).map((message) => message.role)
       ).toEqual(["user", "assistant"]);
+    }, 30_000);
+
+    it("runs it again, its question stored once, when the reset comes before its messages are stored", async () => {
+      const name = crypto.randomUUID();
+      const agent = await freshAgent(name);
+      // Its `running` report waits: the turn has not stored its messages.
+      await agent.holdSubmissionStatusHookForTest("running");
+      await agent.testSubmitMessages("run me again", {
+        submissionId: "sub-before-placement"
+      });
+      await statusHookHeld(agent);
+      await expect(agent.getStoredMessages()).resolves.toEqual([]);
+      await agent.resetIsolateForTest().catch(() => {});
+      const restarted = await freshAgent(name);
+
+      await expect(
+        restarted.waitForSubmissionForTest("sub-before-placement", {
+          timeoutMs: 20_000
+        })
+      ).resolves.toMatchObject({ status: "completed" });
+      await tasksIdle(restarted);
+      const stored = await restarted.getStoredMessages();
+      expect(stored.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
     }, 30_000);
 
     it("is never reported as failed while its reply is being recovered", async () => {
@@ -929,6 +1078,30 @@ describe("Think durable submissions", () => {
       expect(text(stored[0])).toBe("interrupt me");
       expect(text(stored[2])).toBe("a newer question");
     }, 40_000);
+
+    it("ends in error with the model's own error text when its recovered reply fails", async () => {
+      const name = crypto.randomUUID();
+      const agent = await freshAgent(name);
+      await agent.setDelayedChunkResponse(["alpha ", "beta "], 200);
+      await agent.holdChunksAfterForTest(1);
+      await agent.testSubmitMessages("fails once recovered", {
+        submissionId: "sub-recovered-fails"
+      });
+      await chunkStreamHeld(agent);
+      // The next model call, the recovered one, fails in its stream.
+      await agent.failInBandAfterResetForTest("recovered in-band failure");
+
+      await agent.resetIsolateForTest().catch(() => {});
+      const restarted = await freshAgent(name);
+      await tasksIdle(restarted);
+
+      await expect(
+        restarted.inspectSubmissionForTest("sub-recovered-fails")
+      ).resolves.toMatchObject({
+        status: "error",
+        error: "recovered in-band failure"
+      });
+    }, 30_000);
 
     it("stays aborted when it is cancelled while its reply is being recovered", async () => {
       const name = crypto.randomUUID();
