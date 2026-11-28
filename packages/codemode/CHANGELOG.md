@@ -1,5 +1,11 @@
 # @cloudflare/codemode
 
+## 0.5.7
+
+### Patch Changes
+
+- [#3129](https://github.com/cloudflare/agents/pull/3129) [`f0a1bb7`](https://github.com/cloudflare/agents/commit/f0a1bb78fa1f289f2a17d0d9e1267c5db072aa4e) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Types generated from JSON Schema group unions correctly, and a `type` list such as `["array", "null"]` keeps its `items` and `properties`.
+
 ## 0.5.6
 
 ### Patch Changes

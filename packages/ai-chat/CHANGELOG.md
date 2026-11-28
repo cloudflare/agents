@@ -1,5 +1,49 @@
 # @cloudflare/ai-chat
 
+## 0.12.4
+
+### Patch Changes
+
+- [#3184](https://github.com/cloudflare/agents/pull/3184) [`ab6072e`](https://github.com/cloudflare/agents/commit/ab6072ecceaa1c3ea25cc7313d2e04c4d5fd1c86) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Agent tools and sub-agents.
+
+  - `Think.startAgentToolRun` takes an optional `signal`.
+  - A run cut off by a parent reset re-attaches to its child and ends once, or `interrupted` after 2 s, and a throwing `onAgentToolFinish` goes to `onError`.
+  - A run whose child cannot stay up ends `error`, and a detached run without progress ends `interrupted`, not `running` ([#3073](https://github.com/cloudflare/agents/issues/3073), [#2467](https://github.com/cloudflare/agents/issues/2467)).
+  - A given-up detached run is no longer re-armed forever, and `onMilestones` gets a milestone reached before finishing ([#2769](https://github.com/cloudflare/agents/issues/2769), [#3278](https://github.com/cloudflare/agents/issues/3278)).
+  - Runs wait for their child's recovery and start in order, and aged-media eviction runs for every sub-agent ([#3024](https://github.com/cloudflare/agents/issues/3024), [#3144](https://github.com/cloudflare/agents/issues/3144), [#2974](https://github.com/cloudflare/agents/issues/2974)).
+  - Many sub-agents started at once no longer stall, and their work resumes when the root restarts ([#3077](https://github.com/cloudflare/agents/issues/3077), [#3014](https://github.com/cloudflare/agents/issues/3014), [#3086](https://github.com/cloudflare/agents/issues/3086)).
+  - Sub-agents work under a jurisdiction, keep socket frames in order, and no longer reset their tree's storage when upgrading old chat tables ([#3085](https://github.com/cloudflare/agents/issues/3085), [#3181](https://github.com/cloudflare/agents/issues/3181), [#3215](https://github.com/cloudflare/agents/issues/3215), [#3192](https://github.com/cloudflare/agents/issues/3192)).
+
+- [#3184](https://github.com/cloudflare/agents/pull/3184) [`ab6072e`](https://github.com/cloudflare/agents/commit/ab6072ecceaa1c3ea25cc7313d2e04c4d5fd1c86) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Stored chat messages.
+
+  - Before each turn, calls and approvals left pending earlier are failed (`chat:transcript:repaired`), and `continueLastTurn()` returns `"awaiting-client"` while a reply waits on a client.
+  - Stored parts keep metadata, file names and steering messages, and a finished streaming tool stays in later turns ([#3143](https://github.com/cloudflare/agents/issues/3143), [#3145](https://github.com/cloudflare/agents/issues/3145)).
+  - A repeated tool result is a no-op, an early approval keeps the final input, and a failed store reaches `onChatResponse` as `error` ([#2981](https://github.com/cloudflare/agents/issues/2981)).
+
+- [#3184](https://github.com/cloudflare/agents/pull/3184) [`ab6072e`](https://github.com/cloudflare/agents/commit/ab6072ecceaa1c3ea25cc7313d2e04c4d5fd1c86) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Chat recovery.
+
+  - Recovery work units (`maxRecoveryWork`, `ctx.work`) now count ten stored chunks each. See [Recovery work units](https://developers.cloudflare.com/agents/api-reference/chat-agents/#recovery-work-units).
+  - Rate-limit, transient and overflow errors are recognised without `classifyChatError`, and recovery honours `Retry-After` (up to 60 s).
+  - An interrupted turn is skipped if the conversation moved on, else answered or continued once, and requests behind it run afterwards in order ([#2922](https://github.com/cloudflare/agents/issues/2922)).
+  - Long conversations are no longer sealed with `work_budget_exceeded` ([#3055](https://github.com/cloudflare/agents/issues/3055)).
+  - A stop during recovery always ends the request `aborted`, and the next message no longer waits out its backoff ([#3027](https://github.com/cloudflare/agents/issues/3027)).
+  - A rebuilt reply no longer repeats parts, and a tool that only reported progress before a reset is reported interrupted ([#2979](https://github.com/cloudflare/agents/issues/2979)).
+
+- [#3184](https://github.com/cloudflare/agents/pull/3184) [`ab6072e`](https://github.com/cloudflare/agents/commit/ab6072ecceaa1c3ea25cc7313d2e04c4d5fd1c86) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Chat turns.
+
+  - **Upgrade `agents`, `@cloudflare/ai-chat` and `@cloudflare/think` together.** `@cloudflare/ai-chat` and `@cloudflare/think` require `agents` 0.35.0 or later. Released `@cloudflare/ai-chat` 0.12.x and `@cloudflare/think` 0.24.x can't run a turn on this `agents`, so `agents/chat` no longer keeps exports for them. `TurnQueue`, `SubmitConcurrencyController`, `AbortRegistry`, `ResumableStream`, `ContinuationState`, `AutoContinuationController`, `buildInClauseStrings` and `enforceRowSizeLimit` are removed, and an old pairing fails at bundle time with a missing export.
+  - A message sent while a turn runs is stored when its own turn starts, so the transcript reads `U1, A1, U2, A2`.
+  - Waiting messages are dropped only by a clear, and a cancelled or superseded one stays so across a restart ([#2928](https://github.com/cloudflare/agents/issues/2928)).
+  - A stop also drops waiting auto-continuations, an `aborted` result carries `reason: "stopped"` or `"interrupted"`, and an `autoContinue` tool result answered just before a restart still continues the reply ([#3101](https://github.com/cloudflare/agents/issues/3101), [#3142](https://github.com/cloudflare/agents/issues/3142)).
+  - New events: `chat:request:failed`, `chat:stream:stalled`, `chat:continuation:dropped`, and Think's `tool:result`, `tool:approval`, `message:cancel`.
+
+- [#3184](https://github.com/cloudflare/agents/pull/3184) [`ab6072e`](https://github.com/cloudflare/agents/commit/ab6072ecceaa1c3ea25cc7313d2e04c4d5fd1c86) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Clients.
+
+  - `useAgent` and `AgentClient` wait up to 15 s for the handshake (was 4 s) and spread their reconnects.
+  - A tab joining a running reply gets live chunks, and each request's end once, also after a stop or reconnect ([#2703](https://github.com/cloudflare/agents/issues/2703), [#3068](https://github.com/cloudflare/agents/issues/3068), [#3074](https://github.com/cloudflare/agents/issues/3074), [#3135](https://github.com/cloudflare/agents/issues/3135), [#3064](https://github.com/cloudflare/agents/issues/3064)).
+  - After a reconnect, `useAgentChat` shows an accepted turn as busy, and Stop cancels it ([#2741](https://github.com/cloudflare/agents/issues/2741)).
+  - A client reconnecting to a sub-agent before its old socket closed gets frames ([#2709](https://github.com/cloudflare/agents/issues/2709)).
+
 ## 0.12.3
 
 This release fixes chat races across tabs and during recovery, so stop, clear, regenerate and resume do what the user asked even while another tab or a recovery is streaming. A chat request cancelled while it waits in the queue no longer runs, and when `onError` returns instead of throwing, `AIChatAgent` passes the original error on. No changes are needed to upgrade.
