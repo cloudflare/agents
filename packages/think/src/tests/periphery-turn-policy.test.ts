@@ -194,6 +194,65 @@ describe("ThinkContextOverflow", () => {
     ]);
   });
 
+  it("keeps only the step's own messages when beforeStep put context in front of a prompt that repeats its question", async () => {
+    const { guard } = overflow({ proactive: { maxInputTokens: 100 } });
+    const prompt: ModelMessage[] = [
+      { role: "user", content: "Check status" },
+      { role: "assistant", content: "earlier answer" },
+      { role: "user", content: "Check status" }
+    ];
+    const call: ModelMessage = {
+      role: "assistant",
+      content: [
+        {
+          type: "tool-call",
+          toolCallId: "call-1",
+          toolName: "check_status",
+          input: {}
+        }
+      ]
+    };
+    const result: ModelMessage = {
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId: "call-1",
+          toolName: "check_status",
+          output: { type: "text", value: "ok" }
+        }
+      ]
+    };
+    guard.beginRun(prompt);
+    // A beforeStep put per-step context in front; the copies are new objects.
+    const step = [
+      { role: "system", content: "per-step context" } as ModelMessage,
+      ...structuredClone(prompt),
+      call,
+      result
+    ];
+    expect(await guard.compactBeforeStep(stepEvent(95, step))).toEqual([
+      { role: "user", content: "summary" },
+      call,
+      result
+    ]);
+  });
+
+  it("keeps no prompt for a run whose guard is off", async () => {
+    let config: ContextOverflowConfig | undefined = undefined;
+    const head: ModelMessage = { role: "user", content: "old" };
+    const step: ModelMessage = { role: "assistant", content: "in flight" };
+    const { guard } = overflow(undefined, { config: () => config });
+    guard.beginRun([head]);
+    // Turned on after the run began: with no prompt kept, the run's steps
+    // are found by count, as before the prompt was kept.
+    config = { proactive: { maxInputTokens: 100 } };
+    const prepended = { role: "system", content: "ctx" } as ModelMessage;
+    expect(
+      await guard.compactBeforeStep(stepEvent(95, [prepended, head, step]))
+    ).toEqual([{ role: "user", content: "summary" }, head, step]);
+  });
+
   it("compacts before a step over budget and keeps the in-flight tail", async () => {
     const { guard, emitted } = overflow({ proactive: { maxInputTokens: 100 } });
     const head: ModelMessage = { role: "user", content: "old" };
