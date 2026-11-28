@@ -724,5 +724,137 @@
       "file": "channel-recovery.test.ts",
       "test": "recovery × channels, after a real reset > re-applies a channel's policy to a turn a reset cut off"
     }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > re-throws the SqlError shape (wrapped transient, retryable flag lost) and does NOT terminalize (#1730)",
+    "reason": "the class's recovery engine (`_chatRecoveryEngine`) driven by hand with a platform error thrown inside the recovery attempt: an error shape the runtime throws, which a Workers test cannot raise",
+    "probeCovered": {
+      "scenario": "vTransientSqlWrapped",
+      "verified": "#3474@52dc26ac4"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > re-throws a retryable-flagged platform error and does NOT terminalize (#1730)",
+    "reason": "the class's recovery engine (`_chatRecoveryEngine`) driven by hand with a platform error thrown inside the recovery attempt: an error shape the runtime throws, which a Workers test cannot raise",
+    "probeCovered": {
+      "scenario": "vTransientRetryableFlag",
+      "verified": "#3474@52dc26ac4"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — error handling > routes a stream-stall watchdog abort into bounded recovery instead of failing terminally (#1626)",
+    "reason": "the class's detached recovery shape: the chat() consumer told `interrupted` once (`firstInterruptedCalls`) and a continuation scheduled (`scheduledContinues`), read through the class's recovery fixtures. The outcome both configs share (the turn ends answered) is held by chat-recovery-public's stall successors ('continues a stalled turn and calls onChatRecovery with its partial', 'gives up through onExhausted with max_attempts_exceeded once the attempts are spent').",
+    "ruledOut": "a stalled stream is retried inside the run, not handed to a separately scheduled recovery the caller is told about (arch ruling (harness Q7/Q9/Q10/Q11), Q10, 27 Nov; changeset at H11)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — error handling > tells the caller of saveMessages that a stalled turn was interrupted, not stopped",
+    "reason": "saveMessages returning `{ status: 'aborted', reason: 'interrupted' }` for a stalled turn, which the class hands to a scheduled recovery; the shell finishes it in the run. The outcome both configs share (the turn ends answered) is held by chat-recovery-public's stall successors ('continues a stalled turn and calls onChatRecovery with its partial', 'gives up through onExhausted with max_attempts_exceeded once the attempts are spent').",
+    "ruledOut": "a stalled stream is retried inside the run, not handed to a separately scheduled recovery the caller is told about (arch ruling (harness Q7/Q9/Q10/Q11), Q10, 27 Nov; changeset at H11)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — error handling > retries the user turn when the stream stalls before its first chunk (#1941)",
+    "reason": "the class's detached retry shape: the consumer told `interrupted` and a retry scheduled (`scheduledRetries: 1`, `scheduledContinues: 0`), read through the class's recovery fixtures. The outcome both configs share (the turn ends answered) is held by chat-recovery-public's stall successors ('continues a stalled turn and calls onChatRecovery with its partial', 'gives up through onExhausted with max_attempts_exceeded once the attempts are spent').",
+    "ruledOut": "a stalled stream is retried inside the run, not handed to a separately scheduled recovery the caller is told about (arch ruling (harness Q7/Q9/Q10/Q11), Q10, 27 Nov; changeset at H11)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — error handling > retries a WebSocket turn that stalls before its first chunk (#1941)",
+    "reason": "the class's detached retry shape (`scheduledRetries: 1`, `scheduledContinues: 0`), with the scheduled recovery run by hand (`runScheduledRecoveryForTest`). The outcome both configs share (the turn ends answered) is held by chat-recovery-public's stall successors ('continues a stalled turn and calls onChatRecovery with its partial', 'gives up through onExhausted with max_attempts_exceeded once the attempts are spent').",
+    "ruledOut": "a stalled stream is retried inside the run, not handed to a separately scheduled recovery the caller is told about (arch ruling (harness Q7/Q9/Q10/Q11), Q10, 27 Nov; changeset at H11)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — error handling > retries a regeneration that stalls before its first chunk as a new branch (#2028)",
+    "reason": "the class's detached retry shape (`scheduledRetries: 1`, `scheduledContinues: 0`), with the scheduled recovery run by hand. The new-branch outcome after a reset is held by chat-recovery-public 'retries a regeneration a reset cut off before its first chunk as a new branch, keeping the earlier answer'.",
+    "ruledOut": "a stalled stream is retried inside the run, not handed to a separately scheduled recovery the caller is told about (arch ruling (harness Q7/Q9/Q10/Q11), Q10, 27 Nov; changeset at H11)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > a superseded continuation (leaf moved to another assistant message) skips benignly without erroring the submission",
+    "reason": "a `running` submission and a recovery incident seeded in the class's shape, and a stale continuation delivered by hand naming an old target message. The promise an app sees (a second interruption during a recovery does not error the submission) is held by submissions.test.ts 'a submission whose isolate is evicted while it runs > stays running when a reset also cuts its recovery, then completes once'.",
+    "ruledOut": "a recovery is the turn's own next attempt, claimed once; no separately delivered continuation names a target message (CHAT-MODULE.md, one run per turn across attempts; arch ruling (std theme f, 6238 re-ruled), 27 Nov)"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > re-throws \"Network connection lost.\" (storage transient in a deploy-reset window) and does NOT terminalize (#1730)",
+    "reason": "the class's recovery engine (`_chatRecoveryEngine`) driven by hand with a plain platform error ('Network connection lost.') thrown inside the recovery attempt: an error the runtime throws, which a Workers test cannot raise",
+    "probeCovered": {
+      "scenario": "vTransientPlain (htfaults.mjs, the shell, 18/18 root and facet) / vTransientRunsAgain (faults.mjs, the class: Think and AIChatAgent, root and facet, 8/8 on main 62423fad9)",
+      "verified": "#3474@cc6114de9"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > onExhausted context carries terminalMessage, recoveryRootRequestId, and the partial (#1631)",
+    "reason": "an interrupted stream and its chat fiber row inserted in the class's shape (`insertInterruptedStream`, `insertInterruptedFiber`), with recovery triggered by hand and an incident seeded at the cap with its progress marker set by hand",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > the recovery budget > tells onExhausted the turn's root request, a terminal message and the partial, and keeps the partial"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > answers the question again when onChatRecovery drops a new turn's partial",
+    "reason": "an interrupted stream and its chat fiber row inserted in the class's shape (`insertInterruptedStream`, `insertInterruptedFiber`), with recovery triggered by hand",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > onChatRecovery's answer after a reset > answers the question again, from the start, when onChatRecovery says persist: false"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > stashed data round-trips through fiber recovery",
+    "reason": "an interrupted stream and its chat fiber row, with the stash in its snapshot, inserted in the class's shape, and recovery triggered by hand",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > onChatRecovery's context after a reset > hands onChatRecovery the data the turn stashed before a reset"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > does not continue a recovered chat fiber whose stream already completed",
+    "reason": "a completed stream and an interrupted chat fiber row inserted in the class's shape (`insertInterruptedStream`, `insertInterruptedFiber`), with recovery triggered by hand",
+    "successor": {
+      "file": "think-session.test.ts",
+      "test": "Think — error handling > neither continues nor stores again a reply a reset cut after it was stored"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > does not duplicate an already-persisted completed stream on recovery",
+    "reason": "a completed stream and an interrupted chat fiber row inserted in the class's shape (`insertInterruptedStream`, `insertInterruptedFiber`), with recovery triggered by hand",
+    "successor": {
+      "file": "think-session.test.ts",
+      "test": "Think — error handling > neither continues nor stores again a reply a reset cut after it was stored"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > re-reconstructing the same interrupted stream is idempotent (no duplicate, no loss)",
+    "reason": "an interrupted stream and its chat fiber row inserted in the class's shape, and recovery triggered by hand twice over the same fiber",
+    "successor": {
+      "file": "chat-recovery-public.test.ts",
+      "test": "chat recovery, through public behaviour > keeps a reply recovered twice once, with its partial once, when onChatRecovery says continue: false"
+    }
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > ends a turn found interrupted whose conversation moved on for the tabs",
+    "reason": "an interrupted stream and chat fiber row inserted in the class's shape, with a newer user message persisted by hand after it, and recovery triggered by hand",
+    "ruledOut": "a later request waits behind the recovery on the chat lane, so a recovery never finds a newer user leaf; the state is reachable only by seeding (arch ruling (std theme f), 27 Nov). On Think: submissions.test.ts 'a submission whose isolate is evicted while it runs > answers a question sent during its recovery after the recovered reply, in order', which passes on both configs"
+  },
+  {
+    "file": "think-session.test.ts",
+    "test": "Think — onChatRecovery > flushes a settled tool result to durable storage immediately",
+    "reason": "the class's reply stream store (`_replyStreams.store`) driven by hand, counting rows in its stream log. What an app sees, a settled tool result surviving a reset right after it so the tool is not run again, is the successor's",
+    "successor": {
+      "file": "submissions.test.ts",
+      "test": "Think durable submissions > a submission whose isolate is evicted while it runs > keeps a tool's result and does not run the tool again"
+    }
   }
 ]

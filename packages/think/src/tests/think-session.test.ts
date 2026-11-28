@@ -1151,6 +1151,53 @@ describe("Think — error handling", () => {
     expect(result.streamStates).toEqual(["errored"]);
   });
 
+  // Successor of "does not continue a recovered chat fiber whose stream
+  // already completed" and "does not duplicate an already-persisted
+  // completed stream on recovery": a reset after the reply was stored.
+  it("neither continues nor stores again a reply a reset cut after it was stored", async () => {
+    const room = `stored-reset-${crypto.randomUUID()}`;
+    const agent = await freshAgent(room);
+    await agent.holdResponseHookOnceForTest();
+    const ws = await connectThinkTestAgentWS(room);
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_use_chat_request",
+        id: crypto.randomUUID(),
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [
+              {
+                id: crypto.randomUUID(),
+                role: "user",
+                parts: [{ type: "text", text: "hello" }]
+              }
+            ]
+          })
+        }
+      })
+    );
+    // The reply is stored: the hook after it has been called, and holds.
+    await vi.waitFor(
+      async () =>
+        expect(await agent.responseHookCallsForTest()).toEqual(["completed"]),
+      { timeout: 5_000, interval: 20 }
+    );
+    const stored = (await agent.getMessages()) as UIMessage[];
+    ws.close();
+    await agent.resetIsolateForTest().catch(() => undefined);
+
+    const restarted = await freshAgent(room);
+    await vi.waitFor(
+      async () => expect(await restarted.stableWithinForTest(2_000)).toBe(true),
+      { timeout: 15_000, interval: 50 }
+    );
+    // The same one reply, and no turn ran to continue it.
+    expect(await restarted.getMessages()).toEqual(stored);
+    expect(await restarted.getBeforeTurnLog()).toEqual([]);
+    expect(await restarted.modelCallsForTest()).toBe(0);
+  });
+
   // Successor of the next test through a real reset: the platform cuts
   // the hook, and the next isolate delivers it.
   it("calls onChatResponse again after a reset cuts it, with the completed reply", async () => {

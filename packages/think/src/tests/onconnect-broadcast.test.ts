@@ -534,6 +534,95 @@ describe("Think — terminal replay on reconnect (#1645)", () => {
   });
 });
 
+// Successor of think-session's "replays a terminal error to a reconnecting
+// client (hydration)", through a turn that really fails and tabs that
+// really reconnect.
+describe("the terminal a reconnecting tab is told", () => {
+  function chatTurn(
+    ws: WebSocket,
+    text: string
+  ): Promise<Record<string, unknown>> {
+    const id = crypto.randomUUID();
+    // Whether the turn's frames carried an error, once its stream is done.
+    const done = new Promise<{ error: boolean }>((resolve) => {
+      let error = false;
+      ws.addEventListener("message", (e: MessageEvent) => {
+        const frame = JSON.parse(e.data as string) as Record<string, unknown>;
+        if (frame.type !== MSG_CHAT_RESPONSE || frame.id !== id) return;
+        if (frame.error === true) error = true;
+        if (frame.done) resolve({ error });
+      });
+    });
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_use_chat_request",
+        id,
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [
+              {
+                id: crypto.randomUUID(),
+                role: "user",
+                parts: [{ type: "text", text }]
+              }
+            ]
+          })
+        }
+      })
+    );
+    return done;
+  }
+
+  /** A tab connects and resumes as useChat does: the error it hears, if any. */
+  async function reconnect(room: string): Promise<string | null> {
+    const { ws } = await connectWS(room);
+    const heard = await new Promise<string | null>((resolve) => {
+      let acked = false;
+      ws.addEventListener("message", (e: MessageEvent) => {
+        const frame = JSON.parse(e.data as string) as Record<string, unknown>;
+        if (frame.type === MSG_STREAM_RESUMING) {
+          acked = true;
+          ws.send(
+            JSON.stringify({ type: MSG_STREAM_RESUME_ACK, id: frame.id })
+          );
+        }
+        if (frame.type === "cf_agent_stream_resume_none") resolve(null);
+        if (
+          acked &&
+          frame.type === MSG_CHAT_RESPONSE &&
+          frame.error === true &&
+          frame.done === true
+        ) {
+          resolve(String(frame.body ?? ""));
+        }
+      });
+      ws.send(JSON.stringify({ type: "cf_agent_stream_resume_request" }));
+    });
+    await closeWS(ws);
+    return heard;
+  }
+
+  it("tells a tab that reconnects after a turn failed, and stops once a later turn completes", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.setInBandErrorResponse("provider exploded");
+    const { ws } = await connectWS(room);
+    expect((await chatTurn(ws, "fail please")).error).toBe(true);
+    await closeWS(ws);
+
+    // A tab that missed the live error learns it on reconnect.
+    expect(await reconnect(room)).toContain("provider exploded");
+
+    // A later turn completes: no tab is told the old error again.
+    await agent.clearInBandErrorResponse();
+    const { ws: again } = await connectWS(room);
+    expect((await chatTurn(again, "now work")).error).toBe(false);
+    await closeWS(again);
+    expect(await reconnect(room)).toBeNull();
+  });
+});
+
 describe("chat frames with no client (#2724)", () => {
   type Counting = {
     countChatFrameSerializationsForTest(

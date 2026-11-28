@@ -1817,7 +1817,10 @@ export class ThinkTestAgent extends Think {
     if (this.ctx.storage.kv.get<boolean>(RECOVERY_GATE_KEY)) {
       this.ctx.storage.kv.delete(RECOVERY_GATE_KEY);
       this.ctx.storage.kv.put(RECOVERY_HELD_KEY, true);
-      await new Promise<never>(() => {});
+      // Until released, or for good if the isolate resets first.
+      await new Promise<void>((resolve) => {
+        this._releaseRecoveryHoldForTest = resolve;
+      });
     }
     // A test that resets the isolate leaves its answer in storage, where the
     // next isolate's recovery finds it.
@@ -2717,6 +2720,12 @@ export class ThinkTestAgent extends Think {
     }
     if (this._stashInBeforeTurnForTest !== undefined) {
       this.stash(this._stashInBeforeTurnForTest);
+    }
+    // A stash a test asked of the next turn, held in storage.
+    const stashOnce = this.ctx.storage.kv.get<string>("test:stash-next-turn");
+    if (stashOnce !== undefined) {
+      this.ctx.storage.kv.delete("test:stash-next-turn");
+      this.stash(stashOnce);
     }
     const hold = this._messengerTurnHold;
     if (hold) {
@@ -4168,9 +4177,16 @@ export class ThinkTestAgent extends Think {
       .join("");
   }
 
-  /** The next onChatRecovery waits, until the isolate is reset. */
+  /** The next onChatRecovery waits until released, or the isolate is reset. */
   async holdRecoveryOnceForTest(): Promise<void> {
     this.ctx.storage.kv.put(RECOVERY_GATE_KEY, true);
+  }
+
+  private _releaseRecoveryHoldForTest: (() => void) | undefined;
+
+  /** Let a held onChatRecovery return. */
+  async releaseRecoveryHoldForTest(): Promise<void> {
+    this._releaseRecoveryHoldForTest?.();
   }
 
   /** Whether an onChatRecovery is (or was) held; and its calls so far. */
@@ -4184,6 +4200,11 @@ export class ThinkTestAgent extends Think {
   /** What onChatRecovery answers from now on, across resets. */
   async answerRecoveryForTest(answer: ChatRecoveryOptions): Promise<void> {
     this.ctx.storage.kv.put(RECOVERY_ANSWER_KEY, answer);
+  }
+
+  /** The next turn stashes `data` in its beforeTurn. */
+  async stashInNextTurnForTest(data: string): Promise<void> {
+    this.ctx.storage.kv.put("test:stash-next-turn", data);
   }
 
   /** What onChatRecovery was told in this isolate, in order. */

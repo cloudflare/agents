@@ -19,11 +19,20 @@ async function resetDuringTurn(
   name: string,
   chunksBeforeReset: number,
   answer?: { continue?: boolean; persist?: boolean },
-  options?: { holdRecovery?: boolean; openedStream?: boolean }
+  options?: {
+    holdRecovery?: boolean;
+    openedStream?: boolean;
+    stash?: string;
+    /** More of the request body, beside its messages. */
+    body?: Record<string, unknown>;
+  }
 ) {
   const room = `${name}-${crypto.randomUUID()}`;
   const agent = () => getAgentByName(env.ThinkTestAgent, room);
   if (answer) await (await agent()).answerRecoveryForTest(answer);
+  if (options?.stash !== undefined) {
+    await (await agent()).stashInNextTurnForTest(options.stash);
+  }
   if (options?.holdRecovery) await (await agent()).holdRecoveryOnceForTest();
   const startedAt = Date.now();
   if (options?.openedStream) {
@@ -68,6 +77,7 @@ async function resetDuringTurn(
       init: {
         method: "POST",
         body: JSON.stringify({
+          ...options?.body,
           messages: [
             {
               id: userId,
@@ -99,6 +109,7 @@ async function resetDuringTurn(
   // The next start recovers the turn and asks onChatRecovery.
   let calls: Array<{
     partialText: string;
+    recoveryData: string | null;
     streamId: string;
     createdAt: number;
     recoveryRootRequestId: string;
@@ -278,6 +289,40 @@ describe("chat recovery, through public behaviour", () => {
       expect(first?.streamId).not.toBe("");
       expect(first?.createdAt).toEqual(expect.any(Number));
       expect(first?.recoveryRootRequestId).toBe(requestId);
+    }, 30_000);
+
+    // Successor of think-session's "continues a partial stream with request
+    // context from the recovered snapshot".
+    it("continues a reset-cut reply with the request's body and client tools", async () => {
+      const { agent } = await resetDuringTurn("reset-context", 2, undefined, {
+        body: {
+          mode: "snapshot",
+          clientTools: [{ name: "snapshotTool", description: "A client tool" }]
+        }
+      });
+      await vi.waitFor(
+        async () => {
+          expect(await (await agent()).stableWithinForTest(2_000)).toBe(true);
+        },
+        { timeout: 15_000, interval: 50 }
+      );
+
+      // The new isolate's only turn is the recovery's continuation.
+      const turns = await (await agent()).getBeforeTurnLog();
+      expect(turns).toHaveLength(1);
+      expect(turns[0]?.continuation).toBe(true);
+      expect(turns[0]?.body).toMatchObject({ mode: "snapshot" });
+      expect(turns[0]?.toolNames).toContain("snapshotTool");
+    }, 30_000);
+
+    // Successor of think-session's "stashed data round-trips through fiber
+    // recovery".
+    it("hands onChatRecovery the data the turn stashed before a reset", async () => {
+      const { calls } = await resetDuringTurn("reset-stash", 2, undefined, {
+        stash: "notes that outlive the isolate"
+      });
+
+      expect(calls[0]?.recoveryData).toBe("notes that outlive the isolate");
     }, 30_000);
 
     it("dates a reset-interrupted turn by when it started, not by when it was recovered", async () => {
@@ -461,6 +506,32 @@ describe("chat recovery, through public behaviour", () => {
       expect(calledAt.at(-1)! - calledAt[0]!).toBeGreaterThan(300);
     }, 30_000);
 
+    // Successor of think-session's "onExhausted context carries
+    // terminalMessage, recoveryRootRequestId, and the partial (#1631)".
+    it("tells onExhausted the turn's root request, a terminal message and the partial, and keeps the partial", async () => {
+      const progress = await recoverUntil(
+        "exhausted-context",
+        { afterParts: 25, stalledCalls: 10, maxAttempts: 1, progressing: true },
+        (p) => p.exhausted.length > 0
+      );
+
+      expect(progress.exhausted).toHaveLength(1);
+      const [ctx] = progress.exhausted as Array<{
+        reason: string;
+        terminalMessage: string;
+        recoveryRootRequestId: string;
+        partialText: string;
+      }>;
+      const [first] = progress.recoveryCalls as unknown as Array<{
+        recoveryRootRequestId: string;
+      }>;
+      expect(ctx?.recoveryRootRequestId).toBe(first?.recoveryRootRequestId);
+      expect(ctx?.terminalMessage.length).toBeGreaterThan(0);
+      expect(ctx?.partialText.length).toBeGreaterThan(0);
+      // What the turn had written is kept for the user.
+      expect(progress.lastAssistantText).toContain(ctx?.partialText.trim());
+    }, 30_000);
+
     it("ends recovery with recovery_aborted when shouldKeepRecovering says no", async () => {
       const progress = await recoverUntil(
         "budget-declined",
@@ -623,6 +694,34 @@ describe("chat recovery, through public behaviour", () => {
       // A new answer, with nothing of what the reset cut off.
       expect(text).not.toMatch(/one /);
       expect(text?.length).toBeGreaterThan(0);
+      expect(await (await agent()).modelCallsForTest()).toBe(1);
+    }, 30_000);
+
+    // Successor of think-session's "answers the question again when
+    // onChatRecovery drops a new turn's partial" and "honors { persist:
+    // false } for a text-only partial with no settled work".
+    it("answers the question again, from the start, when onChatRecovery says persist: false", async () => {
+      const { agent, userId } = await resetDuringTurn(
+        "answer-persist-false",
+        2,
+        {
+          persist: false
+        }
+      );
+      const messages = await settle(agent);
+
+      expect(messages.map((message) => message.role)).toEqual([
+        "user",
+        "assistant"
+      ]);
+      expect(messages[0]?.id).toBe(userId);
+      // Asked once more (the slow model doesn't survive the reset, so the
+      // default one answers): a whole answer, with nothing of the dropped
+      // partial ("one two …") before it.
+      const text = messages[1]?.parts
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .join("");
+      expect(text).toBe("Hello from the assistant!");
       expect(await (await agent()).modelCallsForTest()).toBe(1);
     }, 30_000);
 
@@ -949,6 +1048,137 @@ describe("chat recovery, through public behaviour", () => {
   // onChatRecovery", #1730/#2613): a recovery attempt the platform cuts
   // (here, a reset while onChatRecovery is running) does not end the turn:
   // the next start runs the recovery again, and no terminal is sent.
+  // Successor of think-session's "continues a cut-off turn whose stream a
+  // reconnecting tab closed before recovery ran": the tab's resume closes
+  // the cut-off stream first, and the recovery still continues the reply.
+  it("continues a reset-cut reply whose stream a reconnecting tab closed before the recovery decided", async () => {
+    const first = await resetDuringTurn("tab-closed-first", 2, undefined, {
+      holdRecovery: true
+    });
+    const agent = first.agent;
+    await vi.waitFor(
+      async () => {
+        expect((await (await agent()).recoveryHoldForTest()).held).toBe(true);
+      },
+      { timeout: 15_000, interval: 50 }
+    );
+    const cutOff = first.calls[0]?.partialText ?? "";
+    expect(cutOff.length).toBeGreaterThan(0);
+
+    // A tab reconnects and resumes, as useChat does, while onChatRecovery
+    // waits: its ack closes the stream nobody is producing.
+    const res = await exports.default.fetch(
+      `http://example.com/agents/think-test-agent/${first.room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const ws = res.webSocket;
+    if (!ws) throw new Error("no socket");
+    let resumed = false;
+    ws.addEventListener("message", (event) => {
+      const frame = JSON.parse(String(event.data)) as {
+        type?: string;
+        id?: string;
+        done?: boolean;
+      };
+      if (frame.type === "cf_agent_stream_resuming") {
+        ws.send(
+          JSON.stringify({ type: "cf_agent_stream_resume_ack", id: frame.id })
+        );
+      }
+      if (frame.type === "cf_agent_use_chat_response" && frame.done) {
+        resumed = true;
+      }
+    });
+    ws.accept();
+    ws.send(JSON.stringify({ type: "cf_agent_stream_resume_request" }));
+    await vi.waitFor(() => expect(resumed).toBe(true), {
+      timeout: 10_000,
+      interval: 20
+    });
+
+    await (await agent()).releaseRecoveryHoldForTest();
+    await vi.waitFor(
+      async () => {
+        expect(await (await agent()).stableWithinForTest(2_000)).toBe(true);
+      },
+      { timeout: 20_000, interval: 100 }
+    );
+    ws.close();
+
+    const messages = (await (await agent()).getMessages()) as Array<{
+      role: string;
+      parts: Array<{ type: string; text?: string }>;
+    }>;
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    const text = messages[1]?.parts
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .join("");
+    // Continued: the partial, then more after it.
+    expect(text.startsWith(cutOff)).toBe(true);
+    expect(text.length).toBeGreaterThan(cutOff.length);
+  }, 60_000);
+
+  // Successor of think-session's "re-reconstructing the same interrupted
+  // stream is idempotent (no duplicate, no loss)": the same cut-off reply is
+  // recovered twice (a second reset cuts the first recovery), and with
+  // continue: false it is kept once, whole.
+  it("keeps a reply recovered twice once, with its partial once, when onChatRecovery says continue: false", async () => {
+    const first = await resetDuringTurn(
+      "recovered-twice",
+      2,
+      { continue: false },
+      {
+        holdRecovery: true
+      }
+    );
+    const agent = first.agent;
+    await vi.waitFor(
+      async () => {
+        expect((await (await agent()).recoveryHoldForTest()).held).toBe(true);
+      },
+      { timeout: 15_000, interval: 50 }
+    );
+    const cutOff = first.calls[0]?.partialText ?? "";
+    expect(cutOff.length).toBeGreaterThan(0);
+    await (await agent()).resetIsolateForTest().catch(() => undefined);
+
+    // A tab wakes the agent; its start recovers the same reply again.
+    const res = await exports.default.fetch(
+      `http://example.com/agents/think-test-agent/${first.room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const ws = res.webSocket;
+    if (!ws) throw new Error("no socket");
+    ws.accept();
+    await vi.waitFor(
+      async () => {
+        expect(
+          (await (await agent()).recoveryHoldForTest()).calls
+        ).toBeGreaterThanOrEqual(2);
+        expect(await (await agent()).stableWithinForTest(2_000)).toBe(true);
+      },
+      { timeout: 20_000, interval: 100 }
+    );
+    ws.close();
+
+    const messages = (await (await agent()).getMessages()) as Array<{
+      role: string;
+      parts: Array<{ type: string; text?: string }>;
+    }>;
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant"
+    ]);
+    const text = messages[1]?.parts
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .join("");
+    // Nothing lost, nothing written twice.
+    expect(text).toBe(cutOff);
+  }, 60_000);
+
   it("re-runs a recovery a reset cut while onChatRecovery ran, and sends no terminal", async () => {
     const exhausted: unknown[] = [];
     let room = "";
