@@ -8,8 +8,13 @@ on:
       - "release/**"
 
 concurrency:
+  # One group for main and release/** so two publishes never overlap (a
+  # maintenance run decides its dist-tag from npm's latest), and a queue so a
+  # push to main cannot replace a pending maintenance release: each waits its
+  # turn.
   group: ${{ github.workflow }}
   cancel-in-progress: false
+  queue: max
 
 env:
   PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
