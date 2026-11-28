@@ -335,4 +335,69 @@ describe("deferred destroy (#1625)", () => {
 
     await expectTeardownCompleted(namespace, name);
   });
+
+  it("a request for an unknown MCP session ID does not leave its DO behind", async () => {
+    const handler = TestMcpJurisdiction.serve("/mcp", {
+      binding: "TEST_MCP_JURISDICTION",
+      transport: "streamable-http"
+    });
+    const namespace =
+      env.TEST_MCP_JURISDICTION as unknown as DurableObjectNamespace<
+        Agent<Cloudflare.Env>
+      >;
+
+    // Each of these creates the Durable Object named after the session ID
+    // the client made up. Nothing else will ever address it, so it has to
+    // remove itself.
+    const requests = [
+      new Request("http://example.com/mcp", {
+        method: "POST",
+        headers: {
+          "mcp-session-id": `unknown-${crypto.randomUUID()}`,
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: "2", method: "tools/list" })
+      }),
+      new Request("http://example.com/mcp", {
+        method: "GET",
+        headers: {
+          "mcp-session-id": `unknown-${crypto.randomUUID()}`,
+          Accept: "text/event-stream"
+        }
+      }),
+      new Request("http://example.com/mcp", {
+        method: "DELETE",
+        headers: { "mcp-session-id": `unknown-${crypto.randomUUID()}` }
+      })
+    ];
+    for (const request of requests) {
+      const response = await handler.fetch(
+        request,
+        env,
+        createExecutionContext()
+      );
+      expect(response.status, request.method).toBe(404);
+
+      // The 404 scheduled the teardown. Without that the object would have
+      // no marker either, and would hold its tables forever.
+      const name = `streamable-http:${request.headers.get("mcp-session-id")}`;
+      const stub = await getAgentByName(namespace, name);
+      await runInDurableObject(stub, async (_instance, state) => {
+        expect(
+          await state.storage.get(DESTROY_PENDING_KEY),
+          request.method
+        ).toBeDefined();
+      });
+      await expectTeardownCompleted(namespace, name);
+
+      // The teardown removed what the request stored, not only the marker.
+      const after = await getAgentByName(namespace, name);
+      await runInDurableObject(after, async (_instance, state) => {
+        expect(await state.storage.get("props"), request.method).toBe(
+          undefined
+        );
+      });
+    }
+  });
 });

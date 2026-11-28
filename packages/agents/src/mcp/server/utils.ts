@@ -246,6 +246,10 @@ export const createStreamingHttpHandler = (
         } else if (!(await agent.getInitializeRequest())) {
           // if we have gotten here, then a session id that was never initialized
           // was provided
+          // That request created the object named after an ID the client
+          // made up, and nothing else will ever address it. Schedule its
+          // teardown so it does not stay behind holding storage.
+          await agent._cf_terminateSession();
           const body = JSON.stringify({
             error: {
               code: -32001,
@@ -438,6 +442,10 @@ export const createStreamingHttpHandler = (
         );
         const isInitialized = await agent.getInitializeRequest();
         if (!isInitialized) {
+          // That request created the object named after an ID the client
+          // made up, and nothing else will ever address it. Schedule its
+          // teardown so it does not stay behind holding storage.
+          await agent._cf_terminateSession();
           return new Response(
             JSON.stringify({
               jsonrpc: "2.0",
@@ -536,6 +544,10 @@ export const createStreamingHttpHandler = (
         );
         const isInitialized = await agent.getInitializeRequest();
         if (!isInitialized) {
+          // That request created the object named after an ID the client
+          // made up, and nothing else will ever address it. Schedule its
+          // teardown so it does not stay behind holding storage.
+          await agent._cf_terminateSession();
           return new Response(
             JSON.stringify({
               jsonrpc: "2.0",
