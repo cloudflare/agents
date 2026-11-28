@@ -1,4 +1,6 @@
-import type { LanguageModel, UIMessage } from "ai";
+import type { LanguageModel, ToolSet, UIMessage } from "ai";
+import { tool } from "ai";
+import { z } from "zod";
 import type { ChatRecoveryContext, ChatRecoveryOptions } from "agents/chat";
 import type { Adapter, Chat, ChatInstance } from "chat";
 import { Message, parseMarkdown } from "chat";
@@ -92,6 +94,37 @@ function lastUserText(prompt: unknown): string {
     .filter((part) => part.type === "text")
     .map((part) => part.text ?? "")
     .join("");
+}
+
+function hasToolResult(prompt: unknown): boolean {
+  return (
+    Array.isArray(prompt) &&
+    prompt.some((message: { role?: string }) => message.role === "tool")
+  );
+}
+
+/** One model step that calls the `notify` tool. */
+function notifyToolCallStream(): ReadableStream {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue({ type: "stream-start", warnings: [] });
+      controller.enqueue({
+        type: "tool-call",
+        toolCallId: "notify-1",
+        toolName: "notify",
+        input: "{}"
+      });
+      controller.enqueue({
+        type: "finish",
+        finishReason: { unified: "tool-calls", raw: undefined },
+        usage: {
+          inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 1, text: 1, reasoning: 0 }
+        }
+      });
+      controller.close();
+    }
+  });
 }
 
 /**
@@ -246,6 +279,8 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         : undefined;
     const slow = this.name.startsWith("slow-") || slowReset !== undefined;
     const held = () => this._slowModelHeld;
+    // An agent named `notice-tool-…` calls its `notify` tool first.
+    const callsNotifyTool = this.name.startsWith("notice-tool-");
     return {
       specificationVersion: "v3",
       provider: "test",
@@ -256,6 +291,9 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
       },
       async doStream(options: { prompt: unknown }) {
         const prompt = lastUserText(options.prompt);
+        if (callsNotifyTool && !hasToolResult(options.prompt)) {
+          return { stream: notifyToolCallStream() };
+        }
         record(prompt);
         await resetOnce?.();
         if (slow) {
@@ -323,6 +361,21 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         return { stream };
       }
     } as LanguageModel;
+  }
+
+  /** A `notice-tool-…` agent's tool posts a notice naming no channel. */
+  override getTools(): ToolSet {
+    if (!this.name.startsWith("notice-tool-")) return {};
+    return {
+      notify: tool({
+        description: "Post a notice",
+        inputSchema: z.object({}),
+        execute: async () => {
+          await this.deliverNotice("tool notice");
+          return "posted";
+        }
+      })
+    };
   }
 
   /**
@@ -853,7 +906,8 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
         SELECT COUNT(*) AS n FROM cf_agents_task_runs
         WHERE (
           definition IN (
-            '__cf_internal_messenger_reply', '__cf_delivery:messenger-reply'
+            '__cf_internal_messenger_reply', '__cf_delivery:messenger-reply',
+            '__cf_delivery:think-messenger-recovery'
           )
           -- The harness-backed Think sends replies through Channels.
           OR definition LIKE '__cf_delivery:channels:%'
@@ -879,12 +933,18 @@ export class ThinkMessengerDeliveryTestAgent extends Think {
     ]);
   }
 
-  /** The messenger thread each response hook saw. */
-  override onChatResponse(): void {
+  /**
+   * The messenger thread each response hook saw. A `notice-hook-…` agent
+   * also posts a notice from it, naming no channel.
+   */
+  override async onChatResponse(): Promise<void> {
     this.ctx.storage.kv.put("response-threads", [
       ...(this.ctx.storage.kv.get<string[]>("response-threads") ?? []),
       this.getMessengerContext()?.thread.id ?? ""
     ]);
+    if (this.name.startsWith("notice-hook-")) {
+      await this.deliverNotice("hook notice");
+    }
   }
 
   /** The thread each turn's channel context, and its response hook, had. */

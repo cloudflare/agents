@@ -724,5 +724,14 @@
       "file": "channel-recovery.test.ts",
       "test": "recovery × channels, after a real reset > re-applies a channel's policy to a turn a reset cut off"
     }
+  },
+  {
+    "file": "attachment-consumption.test.ts",
+    "test": "attachment consumption (Phase 5) > delivers known attachments to the channel and skips unknown ones",
+    "reason": "calls the class's private `_renderChannelAttachments` with a list it never recorded",
+    "successor": {
+      "file": "attachment-consumption.test.ts",
+      "test": "attachment consumption (Phase 5) > delivers a turn's attachments to its channel, skipping the ones it cannot render"
+    }
   }
 ]

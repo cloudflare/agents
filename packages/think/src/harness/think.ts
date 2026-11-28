@@ -102,6 +102,7 @@ import {
 } from "../action-ledger";
 import { runLedgeredAction } from "../action-run";
 import { ReplyAttachments } from "../reply-attachments";
+import { defaultAttachmentText, deliverReplyAttachments } from "../attachments";
 import type {
   Action,
   ActionApprovalDescriptor,
@@ -588,6 +589,17 @@ export class Think<
     gateway: (model) => this.getGateway(model),
     sessionAffinity: () => this.sessionAffinity
   });
+  /**
+   * Render a reply attachment for delivery to the turn's channel, as on
+   * Think: the text or markdown to post, or `undefined` to skip it (unknown
+   * types, and types a channel handles itself, such as `voice_note`).
+   */
+  renderAttachment(
+    attachment: ReplyAttachment
+  ): string | { markdown: string } | undefined {
+    return defaultAttachmentText(attachment);
+  }
+
   /** The latest turn's reply attachments, as on Think. */
   readonly #replyAttachments = new ReplyAttachments();
   /** The action ledger's coalescing, as on Think. */
@@ -895,6 +907,20 @@ export class Think<
           } as unknown as ChunkContext);
         },
         onTurnEnd: async (end) => {
+          // Its messenger context, for its response hook, taken first so it
+          // is forgotten whichever way the hook ends. A turn that did not
+          // run here (a terminal report replayed after a reset) reads it
+          // from its user message as stored.
+          const ranHere = this.#ranHere.delete(end.operationId);
+          const kept = this.#responseContexts.get(end.operationId);
+          this.#responseContexts.delete(end.operationId);
+          const responding =
+            kept ??
+            (!ranHere && this.#messengers
+              ? await this.#storedMessengerContext(
+                  end.message?.id ?? end.messageId
+                )
+              : undefined);
           // The extensions' chunk hooks finish inside the turn, as in Think.
           await this.#chunkHooks;
           const continued = this.#continued.get(end.operationId);
@@ -920,10 +946,6 @@ export class Think<
           // A turn that never ran has no response: one stopped while it
           // waited, or input the harness turned away before a model call (a
           // tool result no call waits for, an empty or unknown operation).
-          // Its messenger context, for its response hook; forgotten here,
-          // whichever way the hook ends.
-          const responding = this.#responseContexts.get(end.operationId);
-          this.#responseContexts.delete(end.operationId);
           const stoppedByCaller = this.#callerStops.delete(end.operationId);
           // As on Think, a turn the chat was cleared under, running or
           // waiting, gets no response hook. Its `chat()` caller is told of
@@ -961,9 +983,29 @@ export class Think<
               error
             });
           }
+          // As on Think: the turn's reply attachments go with its result,
+          // and each one this agent can render is posted to the turn's
+          // channel as an interim notice first.
+          const attachments = this.replyAttachments(end.operationId);
+          const turnChannel =
+            this.#turnChannel?.operationId === end.operationId
+              ? this.#turnChannel.channelId
+              : undefined;
+          this.#respondingContext = responding;
+          await deliverReplyAttachments(
+            attachments,
+            (attachment) => this.renderAttachment(attachment),
+            (rendered) =>
+              this.deliverNotice(rendered, {
+                kind: "interim",
+                ...(turnChannel !== undefined && { channel: turnChannel }),
+                ...(responding && { thread: responding.thread.id })
+              })
+          );
           this.#respondingContext = responding;
           try {
             await this.onChatResponse({
+              attachments,
               // As on Think, a turn that ended before it wrote anything still
               // reports, with an empty assistant message.
               message: end.message ?? {
@@ -1729,12 +1771,28 @@ export class Think<
     text: string | { markdown: string },
     options?: DeliverNoticeOptions
   ): Promise<void> {
-    const channelId = options?.channel ?? "web";
-    await deliverChannelNotice(text, options, {
+    // As on Think: the active turn's channel and thread, unless given. A
+    // messenger turn's thread while it runs, or while its response hook
+    // does; outside a turn, `web`.
+    const running = this.#running?.requestId;
+    const active =
+      (running !== undefined
+        ? this.#messengerContexts.get(running)
+        : undefined) ?? this.#respondingContext;
+    const channelId =
+      options?.channel ??
+      this.activeChannel?.channelId ??
+      active?.messengerId ??
+      "web";
+    const thread =
+      options?.thread ??
+      (active?.messengerId === channelId ? active.thread.id : undefined);
+    const given = thread !== undefined ? { ...options, thread } : options;
+    await deliverChannelNotice(text, given, {
       channelId,
       registry: this.#channels,
       surface: async () =>
-        this.#messengers?.noticeSurface(channelId, options?.thread) as never,
+        this.#messengers?.noticeSurface(channelId, thread) as never,
       addMessages: (messages) => this.addMessages(messages),
       emit: (event) => {
         const emit = this._emit as unknown as (
@@ -2184,6 +2242,37 @@ export class Think<
 
   /** Each turn's messenger context, kept for its response hook. */
   #responseContexts = new Map<string, MessengerContext>();
+  /** Operations whose turn ran in this isolate, until their end hook. */
+  #ranHere = new Set<string>();
+
+  /** The latest user message's trusted messenger context, as stored. */
+  async #storedMessengerContext(
+    replyId: string | undefined
+  ): Promise<MessengerContext | undefined> {
+    // The turn's own user message: the nearest one on the stored path that
+    // ends at its reply (the hydrated window, or the active branch, may not
+    // hold it), read newest first so only the rows up to it are loaded.
+    // With no reply stored, the latest user message.
+    if (replyId !== undefined) {
+      const handle = await this.#rootHandle();
+      let stored = false;
+      for await (const message of handle.history({
+        leafId: replyId,
+        newestFirst: true
+      })) {
+        stored = true;
+        if (message.role === "user") {
+          return this.#trustedMessengerOf(message as unknown as UIMessage);
+        }
+      }
+      if (stored) return undefined;
+    }
+    await this.#sync();
+    const user = [...this.#transcript.messages]
+      .reverse()
+      .find((message) => message.role === "user");
+    return this.#trustedMessengerOf(user);
+  }
 
   /**
    * Run a turn for a messenger event, as on Think: the context is kept on
@@ -3154,6 +3243,7 @@ export class Think<
       // A message's own context is trusted only on a messenger's channel,
       // which only the server stamps: a browser cannot claim a sender.
       const context = this.#trustedMessengerOf(user) ?? webhook;
+      this.#ranHere.add(turn.operationId);
       if (context) {
         this.#messengerContexts.set(turn.operationId, context);
         this.#responseContexts.set(turn.operationId, context);

@@ -403,6 +403,12 @@ describe("recovery × channels, after a real reset", () => {
         ).toBeGreaterThan(0),
       { timeout: 15_000, interval: 50 }
     );
+    // Recovery continued the partial reply; it did not retry the turn.
+    expect(
+      (await (await agent()).recoveryCallsForTest()).map(
+        (call) => call.recoveryKind
+      )
+    ).toEqual(["continue"]);
     expect(await (await agent()).getCapturedTurnChannelsForTest()).toEqual([
       "web"
     ]);

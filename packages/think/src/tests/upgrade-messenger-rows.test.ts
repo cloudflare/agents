@@ -307,16 +307,21 @@ describe("messenger rows think@0.24.0 left, after the upgrade", () => {
         }
       );
       await writeRecoveredReply(storage, incidentId, {});
-      // As 0.24's `chatRecoveryTaskRunOptions` wrote an initial job: not
-      // retained, keyed by its callback and incident. Due a little after
-      // the upgrade's start, so the held reply's silence is seen first.
+      // As 0.24 left an initial job (`chatRecoveryTaskRunOptions`: not
+      // retained, keyed by its callback and incident) that ran its first
+      // attempt into its `backoff` sleep: the run `waiting` on the sleep,
+      // and the step journaled. It wakes a little after the upgrade's
+      // start, so the held reply's silence is seen first.
+      const runId = `chatrec_${crypto.randomUUID()}`;
+      const wakeAt = now + 3_000;
       storage.sql.exec(
         `INSERT INTO cf_agents_task_runs
            (run_id, definition, input, state, metadata, idempotency_key,
-            retain, attempt, next_at, created_at, updated_at)
-         VALUES (?, '__cf_internal_chat_recovery', ?, 'pending', ?, ?, 0, 0,
-                 ?, ?, ?)`,
-        `chatrec_${crypto.randomUUID()}`,
+            retain, attempt, generation, next_at, wait_reason, created_at,
+            started_at, updated_at)
+         VALUES (?, '__cf_internal_chat_recovery', ?, 'waiting', ?, ?, 0, 1,
+                 NULL, ?, 'sleep', ?, ?, ?)`,
+        runId,
         JSON.stringify({
           callback: "_chatRecoveryRetry",
           data: { incidentId },
@@ -324,7 +329,19 @@ describe("messenger rows think@0.24.0 left, after the upgrade", () => {
         }),
         JSON.stringify({ callback: "_chatRecoveryRetry", incidentId }),
         `chat-recovery:_chatRecoveryRetry:${incidentId}`,
-        now + 3_000,
+        wakeAt,
+        now - 1_000,
+        now - 1_000,
+        now - 1_000
+      );
+      storage.sql.exec(
+        `INSERT INTO cf_agents_task_steps
+           (run_id, step_name, kind, state, attempt, next_at, created_at,
+            started_at, updated_at)
+         VALUES (?, 'backoff', 'sleep', 'waiting', 0, ?, ?, ?, ?)`,
+        runId,
+        wakeAt,
+        now - 1_000,
         now - 1_000,
         now - 1_000
       );
