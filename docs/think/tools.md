@@ -489,7 +489,7 @@ export class MyAgent extends Think<Env> {
         manifest: {
           name: "math",
           version: "1.0.0",
-          permissions: { network: false }
+          permissions: { network: [] }
         },
         source: `({
           tools: {
@@ -510,6 +510,8 @@ export class MyAgent extends Think<Env> {
 ```
 
 Extension tools are namespaced — `math` extension with `add` tool becomes `math_add` in the model's tool set.
+
+`permissions.network` lists the hosts an extension may fetch: `api.example.com` matches that host only, `*.example.com` its subdomains. An empty list, or none, means no network at all. To enforce the list, re-export `HostBridgeLoopback` from your Worker entry (`export { HostBridgeLoopback } from "@cloudflare/think/extensions";`). Every request the extension makes then goes through it, and a request to an unlisted host or to a private or local address gets a `403`. Without the re-export the list is not enforced: an extension with any host listed can reach every host, and Think logs a warning.
 
 ### LLM-Driven Extensions
 
@@ -551,7 +553,7 @@ getExtensions() {
     manifest: {
       name: "notes",
       version: "1.0.0",
-      permissions: { network: false },
+      permissions: { network: [] },
       context: [
         { label: "scratchpad", description: "Extension scratch space", maxTokens: 500 }
       ]
@@ -561,4 +563,4 @@ getExtensions() {
 }
 ```
 
-The context block is registered as `notes_scratchpad` (namespaced by extension name).
+The context block is registered as `notes_scratchpad` (namespaced by extension name). The extension writes it with `host.setContext()`, which needs the `context.write` permission. A block's `type` is ignored, with a warning.

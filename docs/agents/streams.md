@@ -38,6 +38,22 @@ export class ReportAgent extends Agent<Env> {
 }
 ```
 
+### More than one Streams
+
+Give a second Streams a `name` to keep its streams apart from the first:
+
+```ts
+readonly streams = new Streams();
+readonly audit = new Streams({ name: "audit" });
+readonly lifecycle = Lifecycle.install(this).use(this.streams).use(this.audit);
+```
+
+Each has its own streams, stream ids and tags; `open`, `read`, `status`,
+`list` and `delete` see only their own. A name is a lowercase letter
+followed by up to 31 lowercase letters, digits or hyphens, and two
+instances with the same name in one object throw at install. The unnamed
+Streams keeps the tables it always had. The `name` option is experimental.
+
 ## Producing
 
 ```ts
@@ -187,20 +203,18 @@ pay 42 to write and 3 to cut over.
 
 ## Chat runs on this
 
-`AIChatAgent` and `Think` store their in-flight turn output here:
-`ResumableStream` (from `agents/chat`) is a thin adapter over Streams that
-packs ~10 wire chunks into one stored segment for write economy, and ends
-every turn with the cutover: the assistant message, the stream's
-settlement and the deletion of its rows commit in one transaction. Nothing
-is swept on an alarm any more. A stream a crash left behind is either
-still `streaming` (recovery rebuilds the message from it) or reclaimed by
-the next stream start, together with in-flight rows abandoned for over an
-hour. Existing `cf_ai_chat_stream_*` tables migrate onto the capability
-automatically. The packing pattern is worth copying for any
-high-frequency producer: buffer what you already hold synchronously, append
-one packed chunk, and unpack on read — durability is unchanged (nothing is
-held across an await at settlement) and rows written drop by ~an order of
-magnitude versus per-token appends.
+`AIChatAgent` and `Think` store their in-flight turn output here, through
+their internal chat stream log, one stream per turn, and end every turn with the cutover: the assistant
+message, the stream's settlement and the deletion of its rows commit in one
+transaction. Nothing is swept on an alarm any more. A stream a crash left
+behind is either still `streaming` (recovery rebuilds the message from it)
+or reclaimed by the next stream start, together with in-flight rows
+abandoned for over an hour. Existing `cf_ai_chat_stream_*` tables migrate
+onto the capability automatically. Chat buffers a turn's chunks in memory
+and writes them ten at a time in one row write, into the turn's newest
+block while it stays under 256 KB, so a turn costs about one row per ten
+chunks to write and one row per 256 KB to delete. A crash loses at most
+the nine chunks still buffered.
 
 ## Current limits
 

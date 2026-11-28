@@ -342,6 +342,12 @@ messages against the latest persisted transcript when the turn actually starts.
 This avoids stale baselines when multiple `saveMessages()` calls queue up
 behind active work.
 
+`persistMessages()` is the method your own code calls. A turn stores its
+messages directly, so an override of `persistMessages()` does not see a turn's
+writes. To change what a turn stores, override
+[`sanitizeMessageForPersistence()`](#sanitizemessageforpersistence); to act
+after a reply is stored, use [`onChatResponse`](#onchatresponse).
+
 `saveMessages()` returns `{ requestId, status, error? }`. The `status` is
 `"completed"` when the turn ran, `"error"` when the stream reported an error,
 `"skipped"` when it was invalidated (chat cleared mid-flight), or `"aborted"`
@@ -636,8 +642,10 @@ The usual rules still apply after the reset:
 - A stop by the request id, sent before or after the reset, ends the request `aborted` without calling the model.
 - A clear deletes every record, so nothing that was waiting runs afterwards.
 - A request a later one superseded under `"latest"`, `"merge"` or `"debounce"` stays superseded.
-- A new request that arrives before the waiting ones have run lets them go first, without waiting for the recovery. The recovery then finds the conversation has moved on, as it does for any new message.
+- A new request that arrives before the waiting ones have run queues behind them, and they all wait for the recovered reply.
 - A waiting request is replayed however long it waited. One whose conversation gained a user message no waiting request holds (a release without these records ran in between and answered something newer) does not run: its message is stored after what is there, and it ends `skipped`. Only a clear discards a waiting message.
+
+The same order holds with no reset. When a stall, a transient provider error or a dropped stream cuts a turn off, its recovery waits out a backoff and then continues the reply. A message sent during that wait is answered after the recovered reply, even when the recovered reply is cut off again and recovers once more. A stop during the wait ends the recovery, and what is queued behind it runs at once.
 
 A `saveMessages()` or `continueLastTurn()` call that is waiting in the queue stores nothing until its turn starts, so a reset loses nothing of it. Its caller's promise rejects with the reset, and the caller decides whether to call again.
 
@@ -645,7 +653,9 @@ A `saveMessages()` or `continueLastTurn()` call that is waiting in the queue sto
 
 #### `onChatRecovery`
 
-Override to implement provider-specific recovery. The default behavior persists the partial response and schedules a continuation via `continueLastTurn()`.
+Override to implement provider-specific recovery. The default behavior persists the partial response and continues the reply.
+
+A recovery is another attempt of the same turn. It keeps the turn's request id, and the request ends once: a tab gets one final `done` frame for it, when the recovered reply is complete or recovery has given up. Recovery does not call `continueLastTurn()` or `waitUntilStable()`, so overriding those does not change or observe a recovery. `onChatRecovery` is the place to do that: return `{ continue: false }` to stop, or `{ persist: false }` to drop the partial response and answer again.
 
 ```typescript
 export class ChatAgent extends AIChatAgent {
@@ -715,7 +725,7 @@ override chatRecovery = {
   // Primary stuck-turn bound. Resets on every progress-bearing attempt, so a
   // turn that keeps producing content survives unbounded interruption.
   noProgressTimeoutMs: 5 * 60 * 1000,
-  // Runaway-loop guard, counted in durable stream segments. Defaults to a
+  // Runaway-loop guard, one unit per ten stored stream chunks. Defaults to a
   // finite backstop (10000). Set a different value to tune when a turn that
   // keeps emitting content but never converges is sealed.
   maxRecoveryWork: 2000,
@@ -745,23 +755,23 @@ override chatRecovery = {
 | `stableTimeoutMs`        | `10_000`          | How long a recovery attempt waits for the isolate to reach stable state before rescheduling.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `terminalMessage`        | generic message   | The message shown to the user when recovery is given up on.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `noProgressTimeoutMs`    | `300_000` (5 min) | Primary stuck-turn bound: how long an incident may go without forward progress before it is sealed (`no_progress_timeout`). **Resets on every progress-bearing attempt**, so a turn that keeps producing content survives unbounded interruption.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `maxRecoveryWork`        | `10000`           | Runaway-loop guard. Maximum recovery work since the incident began before a still-progressing turn is sealed (`work_budget_exceeded`), counted in durable stream segments (see [Recovery work units](#recovery-work-units)). A generous finite backstop so an agent that keeps emitting a little content but never converges (for example an isolate that runs out of memory mid-stream on every recovery) cannot loop forever. Work only accrues from the first interruption until the turn completes. Set a higher value, or `Infinity`, for a very long agentic turn that legitimately needs more.                                                                                                                                                                                                                                                              |
+| `maxRecoveryWork`        | `10000`           | Runaway-loop guard. Maximum recovery work since the incident began before a still-progressing turn is sealed (`work_budget_exceeded`), counted in units of ten stored stream chunks (see [Recovery work units](#recovery-work-units)). A generous finite backstop so an agent that keeps emitting a little content but never converges (for example an isolate that runs out of memory mid-stream on every recovery) cannot loop forever. Work only accrues from the first interruption until the turn completes. Set a higher value, or `Infinity`, for a very long agentic turn that legitimately needs more.                                                                                                                                                                                                                                                    |
 | `maxInterruptedAttempts` | `5`               | How many of one turn's attempts may be interrupted before recovery gives up (`interrupted_attempts_exceeded`). An attempt is interrupted when its isolate dies before it finishes: a Durable Object memory-limit reset, a deploy, or any other reset. The original turn counts, so the default runs the model at most five times for a turn that dies every time. The count is taken when the next isolate picks the turn up, before it re-runs anything, because an isolate killed by a memory-limit reset cannot record anything. Progress never resets it. A memory-limit reset and a deploy look the same from the next isolate, so a turn interrupted by five deploys in a row is also sealed. Values below `1` are read as `1`; `Infinity` disables the bound. Replaces `maxOomRetries`, which is still read as `maxInterruptedAttempts: maxOomRetries + 1`. |
-| `shouldKeepRecovering`   | —                 | Caller policy consulted from the second recovery attempt onward (never on the first detection, never once a hard bound has sealed the incident). Return `false` to stop recovery. The hook point for a token/cost budget — `ctx.work` is a coarse segment count, not tokens, so track real spend yourself.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `shouldKeepRecovering`   | —                 | Caller policy consulted from the second recovery attempt onward (never on the first detection, never once a hard bound has sealed the incident). Return `false` to stop recovery. The hook point for a token/cost budget — `ctx.work` is a coarse count of stored chunks, not tokens, so track real spend yourself.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `onExhausted`            | —                 | Called once when recovery is given up on, before the terminal message is delivered. Inspect `ctx.reason` for why.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
 **`ChatRecoveryProgressContext`** (the `ctx` passed to `shouldKeepRecovering`):
 
-| Field                   | Type                    | Description                                                                                  |
-| ----------------------- | ----------------------- | -------------------------------------------------------------------------------------------- |
-| `incidentId`            | `string`                | Stable ID for this recovery incident.                                                        |
-| `requestId`             | `string`                | Request ID for the current continuation (changes per chained continuation).                  |
-| `recoveryRootRequestId` | `string`                | Stable ID for the whole continuation chain — the right key for per-incident budget tracking. |
-| `attempt`               | `number`                | Attempt number for this incident (2 or greater when this hook runs).                         |
-| `maxAttempts`           | `number`                | Configured attempt cap.                                                                      |
-| `recoveryKind`          | `"retry" \| "continue"` | Whether recovery retries an unanswered user turn or continues a partial assistant turn.      |
-| `work`                  | `number`                | Monotonic count of durable stream segments produced since the incident opened (not tokens).  |
-| `ageMs`                 | `number`                | Wall-clock ms since the incident's first interruption.                                       |
+| Field                   | Type                    | Description                                                                                                    |
+| ----------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `incidentId`            | `string`                | Stable ID for this recovery incident.                                                                          |
+| `requestId`             | `string`                | Request ID for the current continuation (changes per chained continuation).                                    |
+| `recoveryRootRequestId` | `string`                | Stable ID for the whole continuation chain — the right key for per-incident budget tracking.                   |
+| `attempt`               | `number`                | Attempt number for this incident (2 or greater when this hook runs).                                           |
+| `maxAttempts`           | `number`                | Configured attempt cap.                                                                                        |
+| `recoveryKind`          | `"retry" \| "continue"` | Whether recovery retries an unanswered user turn or continues a partial assistant turn.                        |
+| `work`                  | `number`                | Monotonic count of work units (ten stored stream chunks each) produced since the incident opened (not tokens). |
+| `ageMs`                 | `number`                | Wall-clock ms since the incident's first interruption.                                                         |
 
 A progressing turn survives repeated interruption (for example a dense deploy window) as long as it keeps making forward progress, stays under the `maxRecoveryWork` backstop, and fewer than `maxInterruptedAttempts` of its attempts die. Recovery is sealed only by one of these `ctx.reason` values:
 
@@ -777,11 +787,12 @@ A progressing turn survives repeated interruption (for example a dense deploy wi
 
 #### Recovery work units
 
-`maxRecoveryWork` and `ctx.work` count **durable stream segments**, not tokens, messages, or chunks. One unit is one of:
+`maxRecoveryWork` and `ctx.work` count **stored stream chunks**, not tokens or messages. One unit is one of:
 
-- a flushed segment of the turn's stream log, which holds roughly ten packed streaming chunks;
-- a settled tool result, which is flushed as its own segment;
+- ten chunks stored in a turn's stream log (rounded up per stream), whatever their type;
 - an explicit progress credit for output forwarded from a sub-agent.
+
+A stream written by a release before this one counts one unit per stored segment of up to ten chunks, as it did then. Earlier releases also counted each tool call and tool result as a unit of its own; a turn with many short tool calls now counts fewer units.
 
 The unit is only meaningful relative to another `ctx.work` reading, so to choose a cap, log `ctx.work` from `shouldKeepRecovering` for a healthy interrupted turn and set `maxRecoveryWork` well above it.
 
