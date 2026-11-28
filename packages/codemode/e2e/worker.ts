@@ -24,6 +24,10 @@ type Env = {
 
 // ── Tool definitions ──────────────────────────────────────────────
 
+// The arithmetic tools state their result's shape, so the generated types
+// the model writes against say `{ result: number }`, not `unknown`.
+const numberResult = z.object({ result: z.number() });
+
 const pmTools = {
   createProject: tool({
     description: "Create a new project",
@@ -53,6 +57,7 @@ const pmTools = {
       a: z.number().describe("First number"),
       b: z.number().describe("Second number")
     }),
+    outputSchema: numberResult,
     execute: async ({ a, b }) => ({ result: a + b })
   }),
 
@@ -76,6 +81,7 @@ const mathTools = {
       a: z.number().describe("First number"),
       b: z.number().describe("Second number")
     }),
+    outputSchema: numberResult,
     execute: async ({ a, b }) => ({ result: a * b })
   }),
 
@@ -85,6 +91,7 @@ const mathTools = {
       a: z.number().describe("Numerator"),
       b: z.number().describe("Denominator")
     }),
+    outputSchema: numberResult,
     execute: async ({ a, b }) => {
       if (b === 0) throw new Error("Division by zero");
       return { result: a / b };
