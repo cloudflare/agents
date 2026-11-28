@@ -21,7 +21,8 @@ import {
   type ChatRecoveryConfig,
   type ChatRecoveryContext,
   type ChatRecoveryExhaustedContext,
-  type ChatRecoveryOptions
+  type ChatRecoveryOptions,
+  classifyProviderError
 } from "agents/chat";
 import type {
   ChatResponseResult,
@@ -43,8 +44,11 @@ import {
   convertToModelMessages,
   getToolName,
   isToolUIPart,
+  jsonSchema,
+  tool,
   type LanguageModel,
   type LanguageModelUsage,
+  type ModelMessage,
   type ToolSet,
   type TypedToolCall,
   type UIMessage,
@@ -124,7 +128,13 @@ import {
   loadThinkExtensions,
   ThinkExtensionHooks
 } from "../extensions/wiring";
-import type { ExtensionConfig, OnStartDegradation } from "../turn-types";
+import type {
+  ChatErrorContext,
+  ContextOverflowConfig,
+  ExtensionConfig,
+  MessageMetadataCallback,
+  OnStartDegradation
+} from "../turn-types";
 import { ThinkSkills } from "../skills-runtime";
 import { declaredOverrides } from "../overrides";
 import type { SkillScriptRunner, SkillSource } from "agents/skills";
@@ -137,8 +147,14 @@ import {
 import {
   WORKFLOW_NOTIFICATION_SINK,
   sendWorkflowNotification,
-  workflowNotificationSink
+  workflowNotificationSink,
+  workflowPromptContext
 } from "../workflow-notifications";
+import {
+  THINK_FINAL_ANSWER_TOOL_NAME,
+  thinkFinalAnswerInstruction,
+  withoutFinalAnswerParts
+} from "../inference/structured-output";
 import {
   admittedSubmissionMetadata,
   SKIPPED_BY_RESET,
@@ -391,6 +407,18 @@ export class Think<
   /** How a messenger thread's burst of messages is answered, as on Think. */
   messengerConcurrency: MessengerConcurrency = DEFAULT_MESSENGER_CONCURRENCY;
 
+  /**
+   * Metadata for every assistant message, as on Think. A turn's
+   * `beforeTurn` may return its own `messageMetadata` instead.
+   */
+  messageMetadata?: MessageMetadataCallback;
+
+  /**
+   * Opt-in handling for a turn that overflows the context window, as on
+   * Think. Unset leaves an overflow terminal.
+   */
+  contextOverflow?: ContextOverflowConfig;
+
   readonly harness: ThinkHarness;
   readonly #chat: ThinkChat;
   /** The messengers from `getMessengers()`, as Chat SDK Channels. */
@@ -531,6 +559,27 @@ export class Think<
         messages?: TurnConfig["messages"];
         /** How many parts of a continued reply the rewrite already had. */
         replyParts?: number;
+        /** Whether the turn continues a reply (its first call's value). */
+        continuation?: boolean;
+        /** The proactive compactions the turn tried (`contextOverflow`). */
+        proactive?: number;
+        /** The history a proactive compaction left, for the turn's later calls. */
+        compactedHead?: UIMessage[];
+        /** The turn's `stopWhen`, checked as each step ends. */
+        stopWhen?: TurnConfig["stopWhen"];
+        /** The writer of the reply's finish metadata, and its last part. */
+        finishWrite?: (part: unknown) => Record<string, unknown> | undefined;
+        lastFinish?: unknown;
+        /** Each step's usage and finish reason, for `stopWhen`. */
+        stepMeta?: Array<{ usage?: LanguageModelUsage; finishReason?: string }>;
+        /** The step whose server tools `stopWhen` waits on. */
+        pendingStop?: {
+          readonly step: number;
+          readonly message: UIMessage;
+          readonly segment: number;
+          readonly waiting: Set<string>;
+          readonly results: unknown[];
+        };
       }
     | undefined;
   /**
@@ -714,7 +763,7 @@ export class Think<
         const frozen = (await this.#context?.freezeSystemPrompt()) ?? "";
         return frozen ? undefined : this.getSystemPrompt();
       },
-      tools: () => this.getTools(),
+      tools: async () => this.#withFinalAnswer(await this.getTools()),
       // The harness cuts older messages as Think does, by its step.
       truncationStep: () => this.truncationStep,
       // A turn's `beforeTurn` may set its own, as in Think.
@@ -731,9 +780,39 @@ export class Think<
         return self.#recoveryOptions();
       },
       hooks: {
+        // As in Think: a workflow turn's final-answer tool is plumbing,
+        // never stored. A reply that held only it is not stored at all.
+        // As in Think: a structured workflow turn that ends without its
+        // final-answer tool's answer fails.
+        finishMetadata: ({ operationId }) => {
+          const own = this.#ownTurn;
+          if (own?.operationId !== operationId) return undefined;
+          const part = own.lastFinish;
+          own.lastFinish = undefined;
+          return part === undefined ? undefined : own.finishWrite?.(part);
+        },
+        beforeTurnEnd: ({ operationId }) => {
+          const final = this.#finalAnswer;
+          if (final?.operationId === operationId && !final.output) {
+            throw new Error(
+              `Model ended the turn without calling the ${final.name} tool`
+            );
+          }
+        },
+        storedReply: (message) => {
+          const kept = withoutFinalAnswerParts(message);
+          return kept === message ||
+            kept.parts.some((part) => part.type !== "step-start")
+            ? kept
+            : { ...kept, parts: [] };
+        },
         onRecovery: (context) => this.#onRecovery(context),
+        onContextOverflow: ({ operationId, signal }) =>
+          this.#onContextOverflow(operationId, signal),
         beforeTurn: (turn) => this.#beforeTurn(turn),
         beforeToolCall: async (call) => {
+          // As in Think, the final-answer tool is plumbing: no hook sees it.
+          if (this.#isFinalAnswer(call)) return undefined;
           // The step's chunks reach extensions before its tool calls do.
           await this.#chunkHooks;
           // A call approved after a restart runs before any model call of
@@ -816,6 +895,14 @@ export class Think<
           return decision;
         },
         afterToolCall: async (result) => {
+          if (this.#isFinalAnswer(result)) return;
+          await this.#toolSettledForStop(result.operationId, {
+            toolCallId: result.toolCallId,
+            toolName: result.toolName,
+            input: result.input,
+            ok: result.ok,
+            ...(result.ok && { output: result.output })
+          });
           const kept = this.#modelInputs.get(result.toolCallId);
           // From the decision to run it to its result, as Think times
           // `execute`: not the approval before it or the hooks after.
@@ -867,6 +954,11 @@ export class Think<
           await this.#endStep(operationId, message);
           const segment = stepSegments(message);
           const ended = { operationId, step, finishReason, segment, usage };
+          await this.#stepEndedForStop(operationId, step, message, segment, {
+            ...(usage && { usage }),
+            ...(finishReason !== undefined && { finishReason })
+          });
+
           // A step that called tools ends once they ran, as an AI SDK step
           // does: at the next step, or at the turn's end.
           if (stepResultOf(message, segment).toolCalls.length > 0) {
@@ -878,23 +970,18 @@ export class Think<
         onChunk: ({ chunk, operationId }) => {
           this.#streamed.add(operationId);
           this.#noteLiveCall(operationId, chunk);
-          // A snapshot reads a delta's text as `text`, as a stream part has it.
-          const text = "delta" in chunk ? chunk.delta : undefined;
-          // In order, one after another, as Think awaits each chunk's hooks.
-          this.#chunkHooks = this.#chunkHooks
-            .then(() =>
-              this.#extensionHooks.chunk({
-                chunk: text === undefined ? chunk : { ...chunk, text }
-              } as unknown as ChunkContext)
-            )
-            .catch((error: unknown) =>
-              console.error("[Think] An extension's onChunk failed", error)
-            );
-          void this.onChunk({
-            chunk: streamPartOf(chunk, this.#callsOf(operationId))
-          } as unknown as ChunkContext);
+          // The AI SDK's stream part, which Think gives its extensions and
+          // `onChunk` alike.
+          const part = streamPartOf(chunk, this.#callsOf(operationId), (id) =>
+            this.#storedCall(id)
+          );
+          this.#dispatchChunk(part);
         },
         onTurnEnd: async (end) => {
+          // A turn no `chat()` caller waits on has nobody to tell.
+          if (!this.#chatClears.has(end.operationId)) {
+            this.#overflowed.delete(end.operationId);
+          }
           // The extensions' chunk hooks finish inside the turn, as in Think.
           await this.#chunkHooks;
           const continued = this.#continued.get(end.operationId);
@@ -987,7 +1074,8 @@ export class Think<
             this.#respondingContext = undefined;
           }
         },
-        classifyError: (error) => this.#classify(error)
+        classifyError: (error, context) =>
+          this.#classify(error, context?.operationId)
       }
     });
     this.#chat = new ThinkChat({
@@ -1000,6 +1088,19 @@ export class Think<
       }
     });
     this.harness.observe((session, event) => {
+      // A tool's progress, which the harness gives its observers: Think's
+      // `onChunk` hears it as the AI SDK's preliminary tool-result.
+      if (
+        event.type === "chunk" &&
+        event.chunk.type === "tool-output-available" &&
+        event.chunk.preliminary
+      ) {
+        this.#dispatchChunk(
+          streamPartOf(event.chunk, this.#callsOf(event.operationId), (id) =>
+            this.#storedCall(id)
+          )
+        );
+      }
       if (event.type === "prefix-changed") {
         this._emit("chat:prefix:changed", {
           session,
@@ -1840,11 +1941,14 @@ export class Think<
 
   onChatResponse(_result: ChatResponseResult): void | Promise<void> {}
 
-  onChatError(error: unknown): unknown {
+  onChatError(error: unknown, _ctx?: ChatErrorContext): unknown {
     return error;
   }
 
-  classifyChatError(_error: unknown): ChatErrorClassification | void {}
+  classifyChatError(
+    _error: unknown,
+    _ctx?: ChatErrorContext
+  ): ChatErrorClassification | void {}
 
   // ── Messages ──────────────────────────────────────────────────────
 
@@ -2097,6 +2201,49 @@ export class Think<
     Map<string, { toolName: string; input: unknown }>
   >();
 
+  /**
+   * A call the transcript holds already, as one approved before its turn
+   * runs it: its tool and input.
+   */
+  #storedCall(
+    toolCallId: string
+  ): { toolName: string; input: unknown } | undefined {
+    for (let i = this.#transcript.messages.length - 1; i >= 0; i--) {
+      for (const part of this.#transcript.messages[i].parts) {
+        if (isToolUIPart(part) && part.toolCallId === toolCallId) {
+          return { toolName: getToolName(part), input: part.input };
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * A stream part to the extensions' `onChunk` and the subclass's, as
+   * Think gives both the same part.
+   */
+  #dispatchChunk(part: unknown): void {
+    const typed = part as { type?: string; id?: string };
+    // An extension's snapshot names a tool input's call by `toolCallId`.
+    const forExtensions =
+      (typed.type === "tool-input-start" ||
+        typed.type === "tool-input-delta") &&
+      typed.id !== undefined
+        ? { ...typed, toolCallId: typed.id }
+        : part;
+    // In order, one after another, as Think awaits each chunk's hooks.
+    this.#chunkHooks = this.#chunkHooks
+      .then(() =>
+        this.#extensionHooks.chunk({
+          chunk: forExtensions
+        } as unknown as ChunkContext)
+      )
+      .catch((error: unknown) =>
+        console.error("[Think] An extension's onChunk failed", error)
+      );
+    void this.onChunk({ chunk: part } as unknown as ChunkContext);
+  }
+
   #callsOf(operationId: string) {
     let calls = this.#toolCalls.get(operationId);
     if (!calls) this.#toolCalls.set(operationId, (calls = new Map()));
@@ -2108,6 +2255,59 @@ export class Think<
 
   /** The running turn's own `maxSteps`, from its `beforeTurn`. */
   #turnMaxSteps: number | undefined;
+
+  /**
+   * The running operation's workflow prompt, when it asked for structured
+   * output: the turn offers `think_final_answer` with its schema, and the
+   * call's input is the output the workflow is told.
+   */
+  #finalAnswer:
+    | {
+        readonly operationId: string;
+        readonly schema: unknown;
+        name: string;
+        output?: { readonly value: unknown };
+      }
+    | undefined;
+
+  /** Whether `call` is the running workflow turn's final-answer tool. */
+  #isFinalAnswer(call: {
+    readonly operationId: string;
+    readonly toolName: string;
+  }): boolean {
+    const final = this.#finalAnswer;
+    return (
+      final?.operationId === call.operationId && final.name === call.toolName
+    );
+  }
+
+  /** The tools on offer, with the final-answer tool on a workflow turn. */
+  #withFinalAnswer(tools: ToolSet): ToolSet {
+    const final = this.#finalAnswer;
+    if (!final) return tools;
+    // As in Think: a tool of the app's with the name gets a suffixed one.
+    let name = THINK_FINAL_ANSWER_TOOL_NAME;
+    for (let suffix = 1; name in tools; suffix++) {
+      name = `${THINK_FINAL_ANSWER_TOOL_NAME}_${suffix}`;
+    }
+    final.name = name;
+    return {
+      ...tools,
+      [name]: tool({
+        description:
+          "Provide your final answer. The arguments MUST match the required " +
+          "schema. Calling this tool ends the task — call it exactly once " +
+          "when you have everything you need.",
+        inputSchema: jsonSchema(final.schema as never),
+        execute: async (input: unknown) => {
+          final.output = { value: input };
+          // The answer ends the turn: no model call after it.
+          this.#turnMaxSteps = 0;
+          return "Final answer recorded.";
+        }
+      })
+    };
+  }
 
   /** The extensions' `beforeTurn` changes, kept for the operation. */
   #extensionTurn:
@@ -2444,6 +2644,37 @@ export class Think<
       };
     }
     const session = this.harness.session();
+    // As in Think: an overridden `continueLastTurn` runs the continuation,
+    // and its result's status stands, with the turn's message and output.
+    if (wait.continuation && isMethodOverridden(this, "continueLastTurn")) {
+      // SAFETY: Think passes its continuation options, channel included.
+      const returned = await this.continueLastTurn(undefined, {
+        ...(wait.signal && { signal: wait.signal }),
+        ...(wait.channel !== undefined && { channel: wait.channel })
+      } as SaveMessagesOptions);
+      const settled = returned.requestId
+        ? await session.wait(returned.requestId)
+        : undefined;
+      await this.#sync();
+      // As in Think: the reply only for a turn the override says completed;
+      // the structured output whatever it says.
+      const message =
+        returned.status === "completed" &&
+        settled?.status === "done" &&
+        settled.messageId !== undefined
+          ? this.#transcript.messages.find((m) => m.id === settled.messageId)
+          : undefined;
+      const output =
+        settled?.status === "done"
+          ? this.harness.operationOutput(session.id, returned.requestId)
+          : undefined;
+      return {
+        ...returned,
+        continuation: true,
+        ...(message && { message: message as unknown as SessionMessage }),
+        ...(output !== undefined && { output })
+      } as TurnResult;
+    }
     let receipt;
     if (wait.continuation) receipt = await this.#continue(wait.channel);
     else {
@@ -2474,10 +2705,16 @@ export class Think<
       result.status === "done" && result.messageId !== undefined
         ? this.#transcript.messages.find((m) => m.id === result.messageId)
         : undefined;
+    // A `beforeTurn` that asked for structured output gets it parsed.
+    const output =
+      result.status === "done"
+        ? this.harness.operationOutput(session.id, receipt.operationId)
+        : undefined;
     return {
       ...saveResult(result),
       continuation: wait.continuation === true,
-      ...(message && { message: message as unknown as SessionMessage })
+      ...(message && { message: message as unknown as SessionMessage }),
+      ...(output !== undefined && { output })
     };
   }
 
@@ -2646,6 +2883,20 @@ export class Think<
   async #submissionStatus(status: ThinkOperationInspection): Promise<void> {
     const inspection = submissionInspection(status);
     const { submissionId, requestId } = inspection;
+    // A workflow prompt that asks for structured output arms the turn's
+    // final-answer tool before its tools are built.
+    if (status.status === "running") {
+      const schema = workflowPromptContext(inspection.metadata ?? null)?.output
+        ?.schema;
+      this.#finalAnswer =
+        schema === undefined
+          ? undefined
+          : {
+              operationId: status.operationId,
+              schema,
+              name: THINK_FINAL_ANSWER_TOOL_NAME
+            };
+    }
     if (status.status === "queued") {
       this._emit("submission:create", {
         submissionId,
@@ -2656,7 +2907,12 @@ export class Think<
     // The workflow that submitted it is told first, as on Think. A repeated
     // terminal report joins the delivery while it is open.
     if (isTerminalSubmissionStatus(inspection.status)) {
-      sendWorkflowNotification(this.tasks, inspection);
+      const final =
+        this.#finalAnswer?.operationId === status.operationId
+          ? this.#finalAnswer
+          : undefined;
+      if (final) this.#finalAnswer = undefined;
+      sendWorkflowNotification(this.tasks, inspection, final?.output?.value);
     }
     this._emit("submission:status", {
       submissionId,
@@ -2795,7 +3051,14 @@ export class Think<
             // "aborted" is the harness's reason for a stop, and "withdrawn" for
             // a stop that reached the turn while it waited (see `saveResult`).
             if (error === "aborted" || error === "withdrawn") return;
-            const wrapped = this.onChatError(new Error(error));
+            const wrapped = this.#overflowed.delete(operationId)
+              ? this.onChatError(new Error(error), {
+                  requestId: operationId,
+                  stage: "stream",
+                  messagesPersisted: true,
+                  classification: "context_overflow"
+                })
+              : this.onChatError(new Error(error));
             return callback.onError(errorText(wrapped));
           }
         },
@@ -2809,6 +3072,7 @@ export class Think<
       }
     } finally {
       this.#chatClears.delete(operationId);
+      this.#overflowed.delete(operationId);
     }
     await this.#sync();
   }
@@ -3193,6 +3457,9 @@ export class Think<
     // The step before this call ran its tools: it ends now, before this
     // call's hooks, as an AI SDK step ends before the next `prepareStep`.
     const reply = turn.messages.at(-1);
+    // The step that just ended, whose usage the proactive guard reads.
+    const lastUsage =
+      turn.step > 0 ? this.#openSteps.get(turn.operationId)?.usage : undefined;
     if (turn.step > 0 && reply?.role === "assistant") {
       await this.#endStep(turn.operationId, reply);
     }
@@ -3319,6 +3586,9 @@ export class Think<
           abortSignal: context.abortSignal
         }) as unknown as TurnContext
     );
+    if (this.#ownTurn?.operationId === turn.operationId) {
+      this.#ownTurn.stopWhen = config.stopWhen;
+    }
     // Then `beforeStep`, before each model call, as the AI SDK's
     // `prepareStep` runs in Think. Its fields win for this call.
     // A `beforeTurn` that rewrote the messages rewrote them for the whole
@@ -3328,12 +3598,14 @@ export class Think<
       this.#ownTurn.messages = config.messages;
       // A continued reply's parts so far are in the rewritten prompt's
       // source already: a later call adds only what this turn adds.
-      const continued = turn.messages.at(-1);
+      // The reply it continues, though a context reminder may follow it.
+      const continued = [...turn.messages]
+        .reverse()
+        .find((m) => m.role === "assistant");
       this.#ownTurn.replyParts =
-        turn.continuation && continued?.role === "assistant"
-          ? continued.parts.length
-          : 0;
+        turn.continuation && continued ? continued.parts.length : 0;
     }
+    const compacted = await this.#compactBeforeStep(turn, lastUsage, tools);
     const rewritten = this.#ownTurn?.messages;
     // This turn's reply, and what follows it (a context reminder), as the
     // harness projects them for this call.
@@ -3352,8 +3624,9 @@ export class Think<
             ...turn.messages.slice(replyAt + 1)
           ].filter((m) => m.parts.length > 0)
         : [];
-    const turnMessages =
-      rewritten === undefined
+    const turnMessages = compacted
+      ? compacted
+      : rewritten === undefined
         ? undefined
         : added.length === 0
           ? rewritten
@@ -3401,10 +3674,40 @@ export class Think<
     // A narrowing channel limits the tools the model is offered, and a
     // selection cannot bring back a tool it removed.
     const selected = step.activeTools ?? config.activeTools;
-    const activeTools = channel?.tools
+    const chosenTools = channel?.tools
       ? (selected ?? Object.keys(tools)).filter((name) => name in tools)
       : selected;
-    const toolChoice = step.toolChoice ?? config.toolChoice;
+    // A workflow turn that asked for structured output ends by calling the
+    // final-answer tool, as in Think: the prompt says so, and a tool call
+    // is required.
+    const final =
+      this.#finalAnswer?.operationId === turn.operationId
+        ? this.#finalAnswer
+        : undefined;
+    // As in Think: with tools of its own the turn must call one each step,
+    // else the final-answer tool; and on its last permitted step, that one.
+    const lastStep =
+      final !== undefined &&
+      step.toolChoice === undefined &&
+      // The turn's own limit: its override, else its channel's, as Think.
+      turn.step >= (this.#turnMaxSteps ?? this.maxSteps) - 1;
+    const pinned = final && { type: "tool" as const, toolName: final.name };
+    const toolChoice = lastStep
+      ? pinned
+      : (step.toolChoice ??
+        config.toolChoice ??
+        (final
+          ? Object.keys(tools).some((name) => name !== final.name)
+            ? "required"
+            : pinned
+          : undefined));
+    // A turn that names its active tools keeps the final-answer tool on.
+    const activeTools =
+      final && lastStep
+        ? [final.name]
+        : final && chosenTools
+          ? [...chosenTools, final.name]
+          : chosenTools;
     const callSettings = defined({
       topP: config.topP,
       topK: config.topK,
@@ -3420,9 +3723,32 @@ export class Think<
     // As in Think: recorded once the turn is prepared, so a continuation
     // never extends a turn whose preparation threw.
     if (first) this.#lastTurnChannel = this.#turnChannel.channelId;
+    const writer = config.messageMetadata ?? this.messageMetadata;
+    // Whether the turn continues a reply, as Think tells the writer: the
+    // turn's own value, from its first call, not each call's.
+    if (first && this.#ownTurn) {
+      this.#ownTurn.continuation = turn.continuation;
+    }
+    const turnContinuation = this.#ownTurn?.continuation ?? turn.continuation;
+    // The writer hears the reply's finish once, when the harness ends the
+    // turn's stream (`finishMetadata`), with the last call's finish part.
+    if (writer && this.#ownTurn?.operationId === turn.operationId) {
+      this.#ownTurn.finishWrite = (part) =>
+        writer({
+          // SAFETY: the parts are the AI SDK's stream parts.
+          part: part as Parameters<MessageMetadataCallback>[0]["part"],
+          continuation: turnContinuation
+        });
+    }
+    const sentSystem =
+      final && typeof system === "string"
+        ? [system, thinkFinalAnswerInstruction(final.name)]
+            .filter(Boolean)
+            .join("\n\n")
+        : system;
     return {
       model: sent,
-      ...(typeof system === "string" && { system }),
+      ...(typeof sentSystem === "string" && { system: sentSystem }),
       ...(messages && { messages }),
       ...(activeTools && { activeTools: [...activeTools] }),
       ...(toolChoice !== undefined && {
@@ -3443,7 +3769,30 @@ export class Think<
       }),
       // The rest of Think's call settings, as `streamText` takes them.
       ...(Object.keys(callSettings).length > 0 && { callSettings }),
-      sendReasoning: config.sendReasoning ?? this.sendReasoning
+      ...(config.output !== undefined && { output: config.output }),
+      sendReasoning: config.sendReasoning ?? this.sendReasoning,
+      // As in Think: the turn's writer, else the agent's, told whether the
+      // turn continues a reply.
+      ...(writer && {
+        messageMetadata: ({ part }: { readonly part: unknown }) => {
+          // As Think's one stream for the whole turn: the writer hears the
+          // turn's start once, on its first call, and its finish once, on
+          // the call that ends it (not a tool round's).
+          const kind = (part as { type?: string }).type;
+          if (kind === "start" && turn.step > 0) return undefined;
+          if (kind === "finish") {
+            if (this.#ownTurn?.operationId === turn.operationId) {
+              this.#ownTurn.lastFinish = part;
+            }
+            return undefined;
+          }
+          return writer({
+            // SAFETY: the parts are the AI SDK's stream parts.
+            part: part as Parameters<MessageMetadataCallback>[0]["part"],
+            continuation: turnContinuation
+          });
+        }
+      })
     } as ThinkTurnConfig;
   }
 
@@ -3546,20 +3895,289 @@ export class Think<
     }
   }
 
-  #classify(error: unknown): ThinkErrorClass {
-    const classification = this.classifyChatError(error);
-    if (classification === "context_overflow") return "context-overflow";
+  /**
+   * As in Think: with `contextOverflow.reactive`, an overflowing call
+   * compacts the session and the turn runs again, `beforeTurn` included.
+   * Without it, or when compaction can't shorten the history, the
+   * overflow ends the turn.
+   */
+  async #onContextOverflow(
+    operationId: string,
+    signal: AbortSignal
+  ): Promise<boolean> {
+    // A stopped turn is not compacted, nor run again; nor one whose retry
+    // budget is zero, as Think counts it.
+    const config = this.contextOverflow;
+    if (!config?.reactive || signal.aborted) return false;
+    if ((config.maxRetries ?? 1) <= 0) return false;
+    let shortened = false;
+    try {
+      shortened = Boolean(await this.session.compact());
+    } catch (error) {
+      console.warn(
+        `[Think] context-overflow compaction failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    this._emit("chat:context:compacted", {
+      reason: "reactive",
+      shortened,
+      requestId: operationId,
+      attempt: 1
+    });
+    // Stopped while it compacted: the turn ends.
+    if (signal.aborted) return false;
+    if (shortened && this.#ownTurn?.operationId === operationId) {
+      // The retry is the same turn run again: its hooks run again.
+      this.#ownTurn = undefined;
+      this.#extensionTurn = undefined;
+    }
+    return shortened;
+  }
+
+  /**
+   * Think's proactive guard (`contextOverflow.proactive`): when the step
+   * before reported input tokens past the budget, compact the session and
+   * send this call the compacted history with the turn's reply so far.
+   * Best-effort: on any failure the call goes on unchanged.
+   */
+  async #compactBeforeStep(
+    turn: ThinkTurnContext,
+    usage: LanguageModelUsage | undefined,
+    tools: ToolSet
+  ): Promise<ModelMessage[] | undefined> {
+    const guard = this.contextOverflow?.proactive;
+    const own = this.#ownTurn;
+    if (!guard || guard.maxInputTokens <= 0) return undefined;
+    if (own?.operationId !== turn.operationId) return undefined;
+    // The turn's reply, and what the harness projects after it for this
+    // call (the context reminder), found by role, not position.
+    let replyAt = turn.messages.length - 1;
+    while (replyAt >= 0 && turn.messages[replyAt].role !== "assistant") {
+      replyAt--;
+    }
+    const reply = replyAt >= 0 ? turn.messages[replyAt] : undefined;
+    const after = turn.messages.slice(replyAt + 1);
+    // The compacted history, then the live reply (never a stored copy of
+    // it under the same id) and the call's projection after it.
+    const withLive = async (head: UIMessage[]) =>
+      convertToModelMessages(
+        [
+          ...head.filter((m) => m.id !== reply?.id),
+          ...(reply ? [reply] : []),
+          ...after
+        ],
+        { tools, ignoreIncompleteToolCalls: true }
+      );
+    // Once compacted, every later call of the turn sends the compacted
+    // history: the harness's own transcript for the turn predates it.
+    const compactedHead = own.compactedHead;
+    const tried = own.proactive ?? 0;
+    const used = usage?.inputTokens ?? usage?.totalTokens;
+    const due =
+      tried < Math.max(1, guard.maxCompactions ?? 1) &&
+      used != null &&
+      Number.isFinite(used) &&
+      used >= guard.maxInputTokens * (guard.headroom ?? 0.9);
+    if (!due) return compactedHead ? withLive(compactedHead) : undefined;
+    try {
+      // The attempt counts, so a no-op compaction isn't tried every step.
+      own.proactive = tried + 1;
+      // The branch the turn answers, not the session's active one (a
+      // regenerate answers an earlier message).
+      // The turn's leaf before its reply: its question, or the last message
+      // a programmatic input supplied (an assistant's too).
+      const question =
+        replyAt > 0
+          ? turn.messages[replyAt - 1]?.id
+          : turn.messages[turn.messages.length - 1]?.id;
+      const shortened = Boolean(await this.session.compact(question));
+      this._emit("chat:context:compacted", {
+        reason: "proactive",
+        shortened
+      });
+      if (!shortened) {
+        return compactedHead ? withLive(compactedHead) : undefined;
+      }
+      const head = (await this.session.getHistory(question)) as UIMessage[];
+      own.compactedHead = head;
+      return await withLive(head);
+    } catch (error) {
+      console.warn(
+        `[Think] proactive context compaction failed; proceeding without it: ${error instanceof Error ? error.message : String(error)}`
+      );
+      return compactedHead ? withLive(compactedHead) : undefined;
+    }
+  }
+
+  /**
+   * As in Think, a turn's `stopWhen` beside its `maxSteps`: once a step
+   * meets a condition, the turn ends after that step's tools ran.
+   */
+  /**
+   * As in Think, a turn's `stopWhen` beside its `maxSteps`, checked when a
+   * step is settled: at once for a step without tool calls, else once its
+   * server tools have returned (the AI SDK checks after the step's tools).
+   * The steps are given with their usage and finish reason. Once met, the
+   * turn makes no further model call.
+   */
+  async #stepEndedForStop(
+    operationId: string,
+    step: number,
+    message: UIMessage,
+    segment: number,
+    meta: { usage?: LanguageModelUsage; finishReason?: string }
+  ): Promise<void> {
+    const own = this.#ownTurn;
+    if (own?.operationId !== operationId || !own.stopWhen) return;
+    const metas = (own.stepMeta ??= []);
+    metas[step] = meta;
+    // Only the calls the harness will run report back: one that is
+    // settled already (its input didn't parse) or the provider ran is
+    // not waited on.
+    const calls = (
+      stepResultOf(message, segment).toolCalls as Array<{
+        toolCallId: string;
+      }>
+    ).filter((call) => {
+      const part = message.parts.find(
+        (p) => "toolCallId" in p && p.toolCallId === call.toolCallId
+      ) as { state?: string; providerExecuted?: boolean } | undefined;
+      return part?.state === "input-available" && !part.providerExecuted;
+    });
+    if (calls.length === 0) {
+      await this.#checkStopWhen(own, step, message, segment, []);
+      return;
+    }
+    own.pendingStop = {
+      step,
+      message,
+      segment,
+      waiting: new Set(calls.map((call) => call.toolCallId)),
+      results: []
+    };
+  }
+
+  /** A server tool of the step returned: check `stopWhen` once all have. */
+  async #toolSettledForStop(
+    operationId: string,
+    result: {
+      readonly toolCallId: string;
+      readonly toolName: string;
+      readonly input: unknown;
+      readonly ok: boolean;
+      readonly output?: unknown;
+    }
+  ): Promise<void> {
+    const own = this.#ownTurn;
+    const pending = own?.pendingStop;
+    if (own?.operationId !== operationId || !pending) return;
+    if (!pending.waiting.delete(result.toolCallId)) return;
+    if (result.ok) {
+      pending.results.push({
+        type: "tool-result",
+        toolCallId: result.toolCallId,
+        toolName: result.toolName,
+        input: result.input,
+        output: result.output
+      });
+    }
+    if (pending.waiting.size > 0) return;
+    own.pendingStop = undefined;
+    await this.#checkStopWhen(
+      own,
+      pending.step,
+      pending.message,
+      pending.segment,
+      pending.results
+    );
+  }
+
+  async #checkStopWhen(
+    own: {
+      readonly stopWhen?: TurnConfig["stopWhen"];
+      readonly stepMeta?: Array<{
+        usage?: LanguageModelUsage;
+        finishReason?: string;
+      }>;
+    },
+    step: number,
+    message: UIMessage,
+    segment: number,
+    settled: unknown[]
+  ): Promise<void> {
+    if (!own.stopWhen) return;
+    const conditions = Array.isArray(own.stopWhen)
+      ? own.stopWhen
+      : [own.stopWhen];
+    const steps: unknown[] = [];
+    for (let at = segment - step, n = 0; at <= segment; at++, n++) {
+      const result = stepResultOf(message, at);
+      const meta = own.stepMeta?.[n] ?? {};
+      steps.push({
+        ...result,
+        // The step being settled has its tools' results from their calls.
+        ...(at === segment &&
+          settled.length > 0 && {
+            toolResults: [...result.toolResults, ...settled]
+          }),
+        usage: meta.usage,
+        finishReason: meta.finishReason
+      });
+    }
+    // SAFETY: a condition reads the steps' calls, results, usage and finish.
+    const met = await Promise.all(
+      conditions.map((condition) =>
+        condition({ steps } as unknown as Parameters<typeof condition>[0])
+      )
+    );
+    if (met.some(Boolean)) this.#turnMaxSteps = step + 1;
+  }
+
+  #classify(error: unknown, operationId?: string): ThinkErrorClass {
+    // As in Think: the app's classifier wins, hearing the turn it
+    // classifies for; without a verdict from it, what the provider's
+    // error says.
+    let classification: ChatErrorClassification | void = undefined;
+    if (isMethodOverridden(this, "classifyChatError")) {
+      try {
+        classification = this.classifyChatError(error, {
+          ...(operationId !== undefined && { requestId: operationId }),
+          stage: "stream"
+        });
+      } catch (err) {
+        console.warn(
+          `[Think] classifyChatError threw; treating as unclassified: ${err instanceof Error ? err.message : String(err)}`
+        );
+        return "fail";
+      }
+    }
+    const appSaid = classification !== undefined;
+    classification ??= classifyProviderError(error);
+    const overflow = classification === "context_overflow";
+    // The operation's latest failure decides how its caller hears it: an
+    // overflow, or (after a retry that failed otherwise) not.
+    if (operationId !== undefined) {
+      if (overflow) this.#overflowed.add(operationId);
+      else this.#overflowed.delete(operationId);
+    }
+    if (overflow) return "context-overflow";
     // As on Think: a transient or rate-limited error is tried again within
     // chatRecovery's budget. An app's own classification wins; without one,
     // a platform transient (a lost connection) is tried again too.
+    // The app's verdict or, without one, the provider's: a 429 or a 503 is
+    // tried again too.
     if (classification === "transient" || classification === "rate_limit") {
       return "retry";
     }
-    if (classification === undefined && isPlatformTransientError(error)) {
-      return "retry";
-    }
-    return "fail";
+    return !appSaid && isPlatformTransientError(error) ? "retry" : "fail";
   }
+
+  /**
+   * Operations a context overflow ended, until their caller is told, so
+   * it hears the error as an overflow, as on Think. One entry per running
+   * operation at most, deleted when reported or at the turn's end.
+   */
+  readonly #overflowed = new Set<string>();
 
   /** The root session's Sessions handle, which the harness hands over on first use. */
   async #rootHandle(): Promise<Session> {
@@ -4139,9 +4757,30 @@ function systemText(value: unknown): string | undefined {
  */
 function streamPartOf(
   chunk: UIMessageChunk,
-  calls: Map<string, { toolName: string; input: unknown }>
+  calls: Map<string, { toolName: string; input: unknown }>,
+  stored: (
+    toolCallId: string
+  ) => { toolName: string; input: unknown } | undefined
 ): unknown {
+  const named = (toolCallId: string) =>
+    calls.get(toolCallId) ?? stored(toolCallId);
   switch (chunk.type) {
+    case "tool-input-error":
+      // The AI SDK reports a call it couldn't parse as an invalid call.
+      calls.set(chunk.toolCallId, {
+        toolName: chunk.toolName,
+        input: chunk.input
+      });
+      return {
+        type: "tool-call",
+        toolCallId: chunk.toolCallId,
+        toolName: chunk.toolName,
+        input: chunk.input,
+        invalid: true,
+        error: chunk.errorText,
+        ...(chunk.providerExecuted && { providerExecuted: true }),
+        ...(chunk.dynamic && { dynamic: true })
+      };
     case "tool-input-start":
       return {
         type: "tool-input-start",
@@ -4173,7 +4812,7 @@ function streamPartOf(
       return {
         type: "tool-result",
         toolCallId: chunk.toolCallId,
-        ...calls.get(chunk.toolCallId),
+        ...named(chunk.toolCallId),
         output: chunk.output,
         ...(chunk.preliminary && { preliminary: true })
       };
@@ -4181,7 +4820,7 @@ function streamPartOf(
       return {
         type: "tool-error",
         toolCallId: chunk.toolCallId,
-        ...calls.get(chunk.toolCallId),
+        ...named(chunk.toolCallId),
         error: chunk.errorText
       };
     default:

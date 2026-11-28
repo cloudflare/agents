@@ -890,6 +890,38 @@ describe("Think — auto-continuation", () => {
     await closeWS(ws);
   });
 
+  it("names an approved server tool's result in onChunk, though its call streamed in an earlier turn", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    await agent.setServerApprovalToolMode(true);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+    const initialDone = waitForDone(ws, 15000);
+    sendChatRequest(ws, [makeUserMessage("update my trigger")]);
+    await initialDone;
+    const continuationDone = waitForDone(ws, 15000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_APPROVAL,
+        toolCallId: "tc-server-approval-1",
+        approved: true,
+        autoContinue: true
+      })
+    );
+    await continuationDone;
+    const parts = (await agent.getChunkPartsForTest()).map(
+      (json) => JSON.parse(json) as Record<string, unknown>
+    );
+    const result = parts.find(
+      (part) =>
+        part.type === "tool-result" &&
+        part.toolCallId === "tc-server-approval-1"
+    );
+    expect(result).toMatchObject({ toolName: "updateTrigger" });
+    expect(result && "input" in result).toBe(true);
+    await closeWS(ws);
+  });
+
   it("streams and persists output from an approved server tool continuation (#1627)", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

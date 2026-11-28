@@ -38,6 +38,7 @@ const GATE_RUNS_KEY = "test:gate:runs";
 const RELEASE_KEY = "test:gate:release";
 const DANGEROUS_RUNS_KEY = "test:dangerous:runs";
 const MULTIPLY_RUNS_KEY = "test:multiply:runs";
+const CONTINUE_CALLS_KEY = "test:continue-calls";
 const TOOL_ATTEMPTS_KEY = "test:tool-attempts";
 const THROW_AFTER_KEY = "test:throw-after";
 const RECOVERY_PARTIAL_KEY = "test:recovery:partial";
@@ -64,6 +65,7 @@ const LABEL_RUNS_KEY = "label-runs";
 const PENDING_RELEASE_KEY = "pending-release";
 const DANGEROUS_FLAVOR_KEY = "dangerous-flavor";
 const COMPOSE_ABORTED_KEY = "test:compose-aborted";
+const PROGRESS_DONE_KEY = "test:progress-done";
 const NOTE_IN_BEFORE_TURN_KEY = "test:note-in-before-turn";
 const ACTIVE_TOOLS_KEY = "test:active-tools";
 const LATE_EXAMPLES_KEY = "test:late-examples";
@@ -267,6 +269,31 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
           }),
           callers: ["code"] as const
         },
+        // Streams "before", calls dangerous (which parks), then, ignoring
+        // its abort, streams "after".
+        progress_park: tool({
+          description: "Stream progress around a call that needs approval",
+          inputSchema: z.object({}),
+          execute: (_input, options) => {
+            const { invoke, abortSignal } = options as unknown as {
+              invoke: ToolInvoke;
+              abortSignal: AbortSignal;
+            };
+            const kv = this.ctx.storage.kv;
+            return (async function* () {
+              yield "before";
+              const parked = new Promise<void>((resolve) => {
+                if (abortSignal.aborted) resolve();
+                abortSignal.addEventListener("abort", () => resolve());
+              });
+              void invoke("dangerous", {}).catch(() => {});
+              await parked;
+              yield "after";
+              // Resumed once the harness took "after".
+              kv.put(PROGRESS_DONE_KEY, true);
+            })();
+          }
+        }),
         // Calls multiply, then tripled (then gate_safe), through invoke.
         compose: {
           ...tool({
@@ -926,6 +953,14 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
       firstText === "slow then multiply"
     ) {
       parts = callReply([{ name: "multiply", input: { value: 1 } }]);
+    } else if (
+      last?.role === "assistant" &&
+      this.ctx.storage.kv.get<boolean>(CONTINUE_CALLS_KEY) &&
+      !contentText(last?.content).includes("multiplied")
+    ) {
+      // A continuation whose model calls a server tool, once.
+      this.ctx.storage.kv.delete(CONTINUE_CALLS_KEY);
+      parts = callReply([{ name: "multiply", input: { value: 4 } }]);
     } else if (last?.role === "assistant") {
       parts = textReply("continued");
     } else {
@@ -974,6 +1009,8 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
             }
           }
         ]);
+      } else if (text === "progress park") {
+        parts = callReply([{ name: "progress_park", input: {} }]);
       } else if (text === "call tripled") {
         parts = callReply([{ name: "tripled", input: { value: 2 } }]);
       } else if (text === "two tools") {
@@ -1139,6 +1176,12 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   // ── RPC for the tests ────────────────────────────────────────────────────
 
+  /** Continue the session's last reply; its model then calls multiply. */
+  continueCallingTool(session?: string): Promise<ThinkReceipt> {
+    this.ctx.storage.kv.put(CONTINUE_CALLS_KEY, true);
+    return this.harness.session(session).continue();
+  }
+
   submit(
     text: string,
     options: ThinkSubmitOptions & { session?: string } = {}
@@ -1243,6 +1286,26 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   prefixChanges(): { session: string; causes: unknown }[] {
     return this.#prefixChanges;
+  }
+
+  /** Each tool's preliminary outputs, in order. */
+  readonly #progress: unknown[] = [];
+  readonly unobserveProgress = this.harness.observe((_session, event) => {
+    if (
+      event.type === "chunk" &&
+      event.chunk.type === "tool-output-available" &&
+      event.chunk.preliminary === true
+    ) {
+      this.#progress.push(event.chunk.output);
+    }
+  });
+
+  progress(): unknown[] {
+    return this.#progress;
+  }
+
+  progressDone(): boolean {
+    return this.ctx.storage.kv.get<boolean>(PROGRESS_DONE_KEY) ?? false;
   }
 
   /** Edit a message on the Sessions handle, around the harness. */

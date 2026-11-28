@@ -38,6 +38,41 @@ function stepEvent(inputTokens: number, messages: ModelMessage[]) {
 }
 
 describe("ThinkContextOverflow", () => {
+  it("keeps the compacted head on a later step whether or not the AI SDK carried it", async () => {
+    const original: ModelMessage[] = [
+      { role: "user", content: "earlier question" },
+      { role: "assistant", content: "earlier answer" },
+      { role: "user", content: "now" }
+    ];
+    const step1: ModelMessage = { role: "assistant", content: "step 1" };
+    const step2: ModelMessage = { role: "assistant", content: "step 2" };
+    const fresh = () => {
+      const { guard } = overflow({
+        proactive: { maxInputTokens: 10, maxCompactions: 1 }
+      });
+      guard.beginRun(original);
+      return guard;
+    };
+    // Before step 2: compacts, and sends the head with step 1.
+    const guard6 = fresh();
+    const compacted = await guard6.compactBeforeStep(
+      stepEvent(10, [...original, step1])
+    );
+    expect(compacted).toEqual([{ role: "user", content: "summary" }, step1]);
+    // AI SDK 6: step 3 gets the run's original messages again.
+    expect(
+      await guard6.compactBeforeStep(stepEvent(10, [...original, step1, step2]))
+    ).toEqual([{ role: "user", content: "summary" }, step1, step2]);
+    // AI SDK 7: step 3 gets the override, carried; nothing to change.
+    const guard7 = fresh();
+    const head = await guard7.compactBeforeStep(
+      stepEvent(10, [...original, step1])
+    );
+    expect(
+      await guard7.compactBeforeStep(stepEvent(10, [...(head ?? []), step2]))
+    ).toBeUndefined();
+  });
+
   it("is off without config", () => {
     const { guard } = overflow(undefined);
     expect(guard.reactiveEnabled).toBe(false);
@@ -120,11 +155,109 @@ describe("ThinkContextOverflow", () => {
     expect(emitted[0][0]).toBe("chat:request:failed");
   });
 
-  it("compacts before a step over budget and keeps the in-flight tail", async () => {
+  it("keeps a step's tool result that repeats the one its continuation started from", async () => {
     const { guard } = overflow({ proactive: { maxInputTokens: 100 } });
+    const call: ModelMessage = {
+      role: "assistant",
+      content: [
+        {
+          type: "tool-call",
+          toolCallId: "call-1",
+          toolName: "check_status",
+          input: {}
+        }
+      ]
+    };
+    const result: ModelMessage = {
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId: "call-1",
+          toolName: "check_status",
+          output: { type: "text", value: "pending" }
+        }
+      ]
+    };
+    const prompt: ModelMessage[] = [
+      { role: "user", content: "check it" },
+      call,
+      result
+    ];
+    guard.beginRun(prompt);
+    // The step's own call and result, the same as the prompt's last two.
+    const step = [...prompt, structuredClone(call), structuredClone(result)];
+    expect(await guard.compactBeforeStep(stepEvent(95, step))).toEqual([
+      { role: "user", content: "summary" },
+      call,
+      result
+    ]);
+  });
+
+  it("keeps only the step's own messages when beforeStep put context in front of a prompt that repeats its question", async () => {
+    const { guard } = overflow({ proactive: { maxInputTokens: 100 } });
+    const prompt: ModelMessage[] = [
+      { role: "user", content: "Check status" },
+      { role: "assistant", content: "earlier answer" },
+      { role: "user", content: "Check status" }
+    ];
+    const call: ModelMessage = {
+      role: "assistant",
+      content: [
+        {
+          type: "tool-call",
+          toolCallId: "call-1",
+          toolName: "check_status",
+          input: {}
+        }
+      ]
+    };
+    const result: ModelMessage = {
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId: "call-1",
+          toolName: "check_status",
+          output: { type: "text", value: "ok" }
+        }
+      ]
+    };
+    guard.beginRun(prompt);
+    // A beforeStep put per-step context in front; the copies are new objects.
+    const step = [
+      { role: "system", content: "per-step context" } as ModelMessage,
+      ...structuredClone(prompt),
+      call,
+      result
+    ];
+    expect(await guard.compactBeforeStep(stepEvent(95, step))).toEqual([
+      { role: "user", content: "summary" },
+      call,
+      result
+    ]);
+  });
+
+  it("finds the run's prompt for a guard turned on after the run began", async () => {
+    let config: ContextOverflowConfig | undefined = undefined;
     const head: ModelMessage = { role: "user", content: "old" };
     const step: ModelMessage = { role: "assistant", content: "in flight" };
-    guard.beginRun(1);
+    const { guard } = overflow(undefined, { config: () => config });
+    guard.beginRun([head]);
+    config = { proactive: { maxInputTokens: 100 } };
+    // A beforeStep put context in front: the run's prompt is still found, so
+    // only the step's own message follows the compacted head.
+    const prepended = { role: "system", content: "ctx" } as ModelMessage;
+    expect(
+      await guard.compactBeforeStep(stepEvent(95, [prepended, head, step]))
+    ).toEqual([{ role: "user", content: "summary" }, step]);
+  });
+
+  it("compacts before a step over budget and keeps the in-flight tail", async () => {
+    const { guard, emitted } = overflow({ proactive: { maxInputTokens: 100 } });
+    const head: ModelMessage = { role: "user", content: "old" };
+    const step: ModelMessage = { role: "assistant", content: "in flight" };
+    guard.beginRun([head]);
     expect(await guard.compactBeforeStep(stepEvent(50, [head, step]))).toBe(
       undefined
     );
@@ -132,11 +265,17 @@ describe("ThinkContextOverflow", () => {
       { role: "user", content: "summary" },
       step
     ]);
-    // The default cap is one compaction per run.
+    // The default cap is one compaction per run: a later step doesn't
+    // compact again, but still gets the compacted head when its messages
+    // aren't the override (as on AI SDK 6).
+    expect(await guard.compactBeforeStep(stepEvent(95, [head, step]))).toEqual([
+      { role: "user", content: "summary" },
+      step
+    ]);
     expect(
-      await guard.compactBeforeStep(stepEvent(95, [head, step]))
-    ).toBeUndefined();
-    guard.beginRun(1);
+      emitted.filter(([type]) => type === "chat:context:compacted")
+    ).toHaveLength(1);
+    guard.beginRun([head]);
     expect(await guard.compactBeforeStep(stepEvent(95, [head, step]))).toEqual([
       { role: "user", content: "summary" },
       step

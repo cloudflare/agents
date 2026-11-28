@@ -327,6 +327,20 @@ export type ThinkTurnConfig = {
   readonly callSettings?: ThinkCallSettings;
   /** @internal Whether reasoning reaches the stream; default true. */
   readonly sendReasoning?: boolean;
+  /**
+   * @internal Metadata for the reply from the model's stream parts, as
+   * the AI SDK's `toUIMessageStream({ messageMetadata })` takes it. It is
+   * merged onto the reply's metadata.
+   */
+  readonly messageMetadata?: (options: {
+    readonly part: { readonly type: string };
+  }) => Record<string, unknown> | undefined;
+  /**
+   * @internal The AI SDK's structured output spec (`Output.object(...)`),
+   * passed to `streamText`. The last model call's parsed output is the
+   * operation's `output`; one that does not parse fails the operation.
+   */
+  readonly output?: unknown;
 };
 
 /**
@@ -469,6 +483,42 @@ export type ThinkHarnessHooks = {
   ) => void | Promise<void>;
   /** For each UI chunk the model streams. */
   readonly onChunk?: (context: ThinkChunkContext) => void;
+  /**
+   * @internal The reply as it is stored, for a host that keeps some of its
+   * parts out of the transcript. A reply left with no parts is not stored.
+   */
+  readonly storedReply?: (message: UIMessage) => UIMessage;
+  /**
+   * @internal Metadata for the reply's finish, asked once as the turn's
+   * stream ends (an answer, or a wait for a client or an approval).
+   */
+  readonly finishMetadata?: (context: {
+    readonly session: ThinkSessionId;
+    readonly operationId: string;
+  }) =>
+    | Record<string, unknown>
+    | undefined
+    | Promise<Record<string, unknown> | undefined>;
+  /**
+   * @internal The turn's model loop ended with an answer. Throw to fail the
+   * operation with the error's message instead.
+   */
+  readonly beforeTurnEnd?: (context: {
+    readonly session: ThinkSessionId;
+    readonly operationId: string;
+    readonly message?: UIMessage;
+  }) => void | Promise<void>;
+  /**
+   * @internal A model call overflowed the context window. Return whether
+   * room was made, so the call is tried again; without this hook the
+   * harness compacts the session and tries again.
+   */
+  readonly onContextOverflow?: (context: {
+    readonly session: ThinkSessionId;
+    readonly operationId: string;
+    /** Aborts when the operation is stopped. */
+    readonly signal: AbortSignal;
+  }) => Promise<boolean>;
   /** After an operation settles. */
   readonly onTurnEnd?: (context: ThinkTurnEndContext) => void | Promise<void>;
   /** Observe a model call's error, before it is classified. */
@@ -477,7 +527,11 @@ export type ThinkHarnessHooks = {
     context: ThinkHookContext
   ) => void | Promise<void>;
   /** Classify a model call's error. Default: everything is `fail`. */
-  readonly classifyError?: (error: unknown) => ThinkErrorClass;
+  readonly classifyError?: (
+    error: unknown,
+    /** @internal The model call's operation, for a host that stops it. */
+    context?: { readonly session: ThinkSessionId; readonly operationId: string }
+  ) => ThinkErrorClass;
   /**
    * Decide what to do with an interrupted model call. Default: `continue`
    * while within `recovery.maxAttempts`.

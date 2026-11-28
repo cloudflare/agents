@@ -106,20 +106,25 @@ export async function executeTool(
     return { ok: false, errorText: "The tool has no execute function" };
   }
   try {
-    const result: unknown = await execute(input, {
+    const returned: unknown = execute(input, {
       toolCallId: options.toolCallId,
       messages: options.messages,
       abortSignal: options.abortSignal,
       context: undefined,
       ...(options.invoke && { invoke: options.invoke })
     } as Parameters<typeof execute>[1]);
+    // As in the AI SDK: what `execute` returns as an async iterable streams;
+    // a promise of one is its last value, with no progress. An extension's
+    // tool resolves to its outputs once it knows they stream, so it streams.
+    const streams = isAsyncIterable(returned) || resolvesToStream(tool);
+    const result: unknown = await returned;
     if (!isAsyncIterable(result)) return { ok: true, output: result };
+    // As in the AI SDK, each value a streaming tool yields is reported as
+    // it comes; the last is also its result.
     let last: unknown;
-    let seen = false;
     for await (const output of result) {
-      if (seen) options.onPreliminary(last);
+      if (streams) options.onPreliminary(output);
       last = output;
-      seen = true;
     }
     return { ok: true, output: last };
   } catch (error) {
@@ -128,4 +133,18 @@ export async function executeTool(
       errorText: error instanceof Error ? error.message : String(error)
     };
   }
+}
+
+/**
+ * Marks a tool whose `execute` resolves to its outputs when they stream
+ * (an extension's, across its boundary), so `executeTool` streams them.
+ *
+ * @internal
+ */
+export const RESOLVES_TO_STREAM = Symbol.for("agents.harness.resolvesToStream");
+
+function resolvesToStream(tool: Tool): boolean {
+  return (
+    (tool as { [RESOLVES_TO_STREAM]?: boolean })[RESOLVES_TO_STREAM] === true
+  );
 }

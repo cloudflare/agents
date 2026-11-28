@@ -215,8 +215,14 @@ function createMockToolModel(
  * reaches. Keys its behavior off the model-call count (not prompt inspection)
  * so a mid-turn recompaction does not change which step it is on.
  */
+const RESUME_ARMED_KEY = "test:resume-armed";
+const RESUME_STEP_KEY = "test:resume-step";
+const RESUME_RESET_KEY = "test:resume-reset";
+
 function createTwoToolThenTextModel(
-  onCall?: (options: unknown) => void
+  onCall?: (options: unknown) => void,
+  /** The step of each call, when the test keeps it across a reset. */
+  stepOf?: () => number
 ): LanguageModel {
   let callCount = 0;
   return {
@@ -230,10 +236,12 @@ function createTwoToolThenTextModel(
     doStream(options: Record<string, unknown>) {
       onCall?.(options);
       callCount++;
-      const step = callCount;
+      const step = stepOf ? stepOf() : callCount;
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
+          // A call the test resets the isolate in: it never answers.
+          if (step < 0) return;
           if (step <= 2) {
             const id = `tc${step}`;
             controller.enqueue({
@@ -599,7 +607,9 @@ function extractToolPairing(options: unknown): {
 function createOverflowThenOkModel(
   onCall?: (options: unknown) => void,
   alwaysOverflow = false,
-  emitPartialBeforeOverflow = false
+  emitPartialBeforeOverflow = false,
+  /** After the overflow, the retry fails for another reason. */
+  otherErrorOnRetry = false
 ): LanguageModel {
   return {
     specificationVersion: "v3",
@@ -635,6 +645,14 @@ function createOverflowThenOkModel(
               error: new Error(
                 "AI_APICallError: prompt is too long: 213450 tokens > 200000 maximum"
               )
+            });
+            controller.close();
+            return;
+          }
+          if (otherErrorOnRetry) {
+            controller.enqueue({
+              type: "error",
+              error: new Error("the provider rejected the tool schema")
             });
             controller.close();
             return;
@@ -832,8 +850,9 @@ export class OverflowRecoveryTestAgent extends Think {
   modelCalls = 0;
   proactiveMode = false;
   proactiveMultiFire = false;
-  stepMessages?: "append" | ModelMessage[];
+  stepMessages?: "append" | "prepend" | ModelMessage[];
   compactionNoOp = false;
+  otherErrorOnRetry = false;
   compactionThrows = false;
   alwaysOverflow = false;
   emitPartialBeforeOverflow = false;
@@ -856,6 +875,8 @@ export class OverflowRecoveryTestAgent extends Think {
     headHasHistory: boolean;
   }> = [];
   private _model?: LanguageModel;
+  /** A restarted isolate arms what the test armed before its reset. */
+  private readonly _armedOnStart = this.#armFromStorage();
 
   override maxSteps = 3;
 
@@ -866,6 +887,17 @@ export class OverflowRecoveryTestAgent extends Think {
   override beforeStep(
     ctx: PrepareStepContext
   ): (StepConfig & { messages: ModelMessage[] }) | void {
+    if (this.stepMessages === "prepend") {
+      return {
+        messages: [
+          { role: "user", content: "Prepended per-step context" },
+          ...ctx.messages.filter(
+            (m) =>
+              !(m.role === "user" && m.content === "Prepended per-step context")
+          )
+        ]
+      };
+    }
     if (this.stepMessages === "append") {
       return {
         messages: [
@@ -933,13 +965,19 @@ export class OverflowRecoveryTestAgent extends Think {
         : this.combinedProactiveReactive
           ? createProactiveThenReactiveModel(onCall)
           : this.proactiveMultiFire
-            ? createTwoToolThenTextModel(onCall)
+            ? createTwoToolThenTextModel(
+                onCall,
+                this.ctx.storage.kv.get<boolean>(RESUME_ARMED_KEY)
+                  ? () => this.#resumeStep()
+                  : undefined
+              )
             : this.proactiveMode
               ? createMockToolModel(onCall)
               : createOverflowThenOkModel(
                   onCall,
                   this.alwaysOverflow,
-                  this.emitPartialBeforeOverflow
+                  this.emitPartialBeforeOverflow,
+                  this.otherErrorOnRetry
                 );
     }
     return this._model;
@@ -968,6 +1006,7 @@ export class OverflowRecoveryTestAgent extends Think {
   override configureSession(session: Session): Session {
     return session.onCompaction(async (messages) => {
       this.compactionCount++;
+      this.compactedBranches.push(messages.map((m) => m.id));
       // A stop that lands while the history is being compacted.
       if (this.abortDuringCompaction) this.abortAllRequests();
       if (this.compactionThrows) throw new Error("Test compaction failed");
@@ -1012,9 +1051,16 @@ export class OverflowRecoveryTestAgent extends Think {
       noOpCompaction?: boolean;
       alwaysOverflow?: boolean;
       emitPartialBeforeOverflow?: boolean;
+      maxRetries?: number;
+      otherErrorOnRetry?: boolean;
     }
   ): Promise<OverflowChatResult> {
-    this.contextOverflow = { reactive: enabled };
+    this.contextOverflow = {
+      reactive: enabled,
+      ...(opts?.maxRetries !== undefined && { maxRetries: opts.maxRetries })
+    };
+    this.otherErrorOnRetry = opts?.otherErrorOnRetry ?? false;
+    this._model = undefined;
     this.compactionNoOp = opts?.noOpCompaction ?? false;
     this.alwaysOverflow = opts?.alwaysOverflow ?? false;
     this.emitPartialBeforeOverflow = opts?.emitPartialBeforeOverflow ?? false;
@@ -1224,7 +1270,13 @@ export class OverflowRecoveryTestAgent extends Think {
    * completion proves the second splice did not corrupt the prompt (e.g. drop a
    * tool result or duplicate the recompacted head).
    */
-  async testProactiveMultiFire(message: string): Promise<OverflowChatResult> {
+  async testProactiveMultiFire(
+    message: string,
+    maxCompactions = 2,
+    endWithAssistant = false,
+    stepMessages?: "prepend"
+  ): Promise<OverflowChatResult> {
+    this.stepMessages = stepMessages;
     this.proactiveMode = true;
     this.proactiveMultiFire = true;
     this.compactionNoOp = false;
@@ -1241,7 +1293,7 @@ export class OverflowRecoveryTestAgent extends Think {
     // step 3. proactive.maxCompactions: 2 lets it compact on both (independent
     // of the reactive maxRetries budget).
     this.contextOverflow = {
-      proactive: { maxInputTokens: 10, maxCompactions: 2 }
+      proactive: { maxInputTokens: 10, maxCompactions }
     };
 
     await this.session.appendMessage({
@@ -1254,9 +1306,42 @@ export class OverflowRecoveryTestAgent extends Think {
       role: "assistant",
       parts: [{ type: "text", text: "earlier answer" }]
     });
+    // A longer history than the compacted head, for a prompt beforeStep
+    // rewrites.
+    if (stepMessages === "prepend") {
+      for (let n = 0; n < 3; n++) {
+        await this.session.appendMessage({
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text: `older question ${n}` }]
+        });
+        await this.session.appendMessage({
+          id: crypto.randomUUID(),
+          role: "assistant",
+          parts: [{ type: "text", text: `older answer ${n}` }]
+        });
+      }
+    }
 
     const cb = new TestCollectingCallback();
-    await this.chat(message, cb);
+    // Programmatic input may end with an assistant message of its own.
+    await this.chat(
+      endWithAssistant
+        ? [
+            {
+              id: "supplied-question",
+              role: "user",
+              parts: [{ type: "text", text: message }]
+            },
+            {
+              id: "supplied-assistant",
+              role: "assistant",
+              parts: [{ type: "text", text: "a supplied answer" }]
+            }
+          ]
+        : message,
+      cb
+    );
     return {
       done: cb.doneCalled,
       error: cb.errorMessage,
@@ -1267,6 +1352,84 @@ export class OverflowRecoveryTestAgent extends Think {
       beforeTurnContinuations: this.beforeTurnContinuations,
       promptIncludedSeedMarker: this.promptIncludedSeedMarker
     };
+  }
+
+  /**
+   * The proactive guard armed for a tool, tool, text turn that compacts
+   * once, for turns a client starts; a fresh model per turn.
+   */
+  async armProactiveForTest(): Promise<void> {
+    this.proactiveMode = true;
+    this.proactiveMultiFire = true;
+    this.compactionNoOp = false;
+    this.contextOverflow = {
+      proactive: { maxInputTokens: 10, maxCompactions: 1 }
+    };
+    this._model = undefined;
+  }
+
+  async getMessageIdsForTest(): Promise<Array<{ id: string; role: string }>> {
+    return this.messages.map((m) => ({ id: m.id, role: m.role }));
+  }
+
+  /**
+   * The armed guard and a reset before the turn's second model call, kept
+   * in storage so the restarted isolate resumes the same turn.
+   */
+  async armResumeForTest(): Promise<void> {
+    this.ctx.storage.kv.put(RESUME_ARMED_KEY, true);
+    this.#armFromStorage();
+  }
+
+  /** Seed an earlier exchange, then chat, with the armed config as is. */
+  async chatArmedForTest(message: string): Promise<void> {
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [{ type: "text", text: "earlier question" }]
+    });
+    await this.session.appendMessage({
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [{ type: "text", text: "earlier answer" }]
+    });
+    await this.chat(message, new TestCollectingCallback());
+  }
+
+  #armFromStorage(): boolean {
+    if (!this.ctx.storage.kv.get<boolean>(RESUME_ARMED_KEY)) return false;
+    this.proactiveMode = true;
+    this.proactiveMultiFire = true;
+    this.compactionNoOp = false;
+    this.contextOverflow = {
+      proactive: { maxInputTokens: 10, maxCompactions: 1 }
+    };
+    this._model = undefined;
+    return true;
+  }
+
+  /** The model's step: counted in storage; a reset cuts the second call once. */
+  #resumeStep(): number {
+    const kv = this.ctx.storage.kv;
+    const step = (kv.get<number>(RESUME_STEP_KEY) ?? 0) + 1;
+    if (step === 2 && !kv.get<boolean>(RESUME_RESET_KEY)) {
+      kv.put(RESUME_RESET_KEY, true);
+      // What the turn wrote so far is on disk, as a moment later in a real
+      // reset; then the isolate goes, mid-call.
+      void this.ctx.storage
+        .sync()
+        .then(() => this.ctx.abort("test: forced reset"));
+      return -1;
+    }
+    kv.put(RESUME_STEP_KEY, step);
+    return step;
+  }
+
+  /** The ids of each branch a compaction was given. */
+  compactedBranches: string[][] = [];
+
+  async getCompactedBranches(): Promise<string[][]> {
+    return this.compactedBranches;
   }
 
   /**

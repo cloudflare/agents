@@ -629,11 +629,12 @@ export function chatTurnDefinition(
       out: StreamWriter,
       message: UIMessage | undefined
     ): Promise<string | undefined> => {
-      if (!message || message.parts.length === 0) {
+      const stored =
+        message && (host.hooks?.sanitizeForPersistence?.(message) ?? message);
+      if (!stored || stored.parts.length === 0) {
         out.close({ discard: true });
         return undefined;
       }
-      const stored = host.hooks?.sanitizeForPersistence?.(message) ?? message;
       const sync = session.__DO_NOT_USE_WILL_BREAK__sync();
       let after: (() => Promise<void>) | undefined;
       try {
@@ -742,8 +743,16 @@ export function chatTurnDefinition(
           ? { ...baseMessage, parts: baseMessage.parts.slice(0, base.parts) }
           : undefined
       );
-      if (built && built.parts.length > 0) {
-        partial = repairCutOffTools(built, host.hooks, run.clientTools ?? []);
+      // The partial is stored as a reply is: what the host keeps out of
+      // the transcript stays out after a recovery too.
+      const sanitized =
+        built && (host.hooks?.sanitizeForPersistence?.(built) ?? built);
+      if (sanitized && sanitized.parts.length > 0) {
+        partial = repairCutOffTools(
+          sanitized,
+          host.hooks,
+          run.clientTools ?? []
+        );
         await session.upsertMessage(partial as never, placement);
       }
       // Drop what this run streamed: a reply it continues goes back to how

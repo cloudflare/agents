@@ -103,9 +103,60 @@ export class ThinkContextOverflow {
    * Start a model run whose assembled messages number `baseline`. Resets
    * the proactive compaction cap.
    */
-  beginRun(baseline: number): void {
+  beginRun(messages: readonly ModelMessage[]): void {
+    const baseline = messages.length;
     this.#baseline = baseline;
+    this.#runBaseline = baseline;
+    // Kept by reference (the run holds the same array), whether or not the
+    // guard is on now: the guard's setting is read at each step, so one
+    // turned on mid-run still finds the run's boundary. Replaced at the next
+    // run.
+    this.#runPrompt = messages;
+    this.#compactedHead = undefined;
     this.#proactiveCompactions = 0;
+  }
+
+  /** Where the run's own steps begin in the messages it started with. */
+  #runBaseline = 0;
+
+  /** The messages the run started with: its steps follow them. */
+  #runPrompt: readonly ModelMessage[] = [];
+
+  /** The head the last proactive compaction of this run built, if any. */
+  #compactedHead: ModelMessage[] | undefined;
+
+  /**
+   * Whether the step's messages already start with the compacted head: AI
+   * SDK 7 carries a step's `messages` override into later steps; AI SDK 6
+   * gives each step the run's original messages and its steps again.
+   */
+  #carried(messages: readonly ModelMessage[]): boolean {
+    const head = this.#compactedHead;
+    return !head || startsWith(messages, head);
+  }
+
+  /**
+   * This run's in-flight steps. Where the step's messages hold the
+   * compacted head or the run's own prompt whole (at the start, or after
+   * what a `beforeStep` put in front of it), what follows it. Where a
+   * `beforeStep` rewrote it, what follows the first copy of the prompt's
+   * last message: a step's own messages come after it, so one that repeats
+   * it is never taken for the boundary.
+   */
+  #inFlight(messages: readonly ModelMessage[]): ModelMessage[] {
+    const head = this.#compactedHead;
+    const prompt = this.#runPrompt;
+    for (const known of head ? [head, prompt] : [prompt]) {
+      const at = indexOfRun(messages, known);
+      if (at >= 0) return messages.slice(at + known.length);
+    }
+    const last = prompt.at(-1);
+    if (last !== undefined) {
+      const key = JSON.stringify(last);
+      const at = messages.findIndex((m) => JSON.stringify(m) === key);
+      if (at >= 0) return messages.slice(at + 1);
+    }
+    return messages.slice(head ? this.#baseline : this.#runBaseline);
   }
 
   /**
@@ -240,17 +291,23 @@ export class ThinkContextOverflow {
   ): Promise<ModelMessage[] | undefined> {
     const guard = this.#options.config()?.proactive;
     if (!guard || guard.maxInputTokens <= 0) return undefined;
+    // Once compacted, a later step sends the compacted head too: on AI SDK
+    // 6, where the override isn't carried, it is spliced in again.
+    const keep = (): ModelMessage[] | undefined =>
+      this.#compactedHead && !this.#carried(event.messages)
+        ? [...this.#compactedHead, ...this.#inFlight(event.messages)]
+        : undefined;
     // The proactive cap is independent of the reactive budget, so an app can
     // use either layer alone and tune each freely.
     if (this.#proactiveCompactions >= Math.max(1, guard.maxCompactions ?? 1))
-      return undefined;
+      return keep();
 
     const prev = event.steps?.at(-1);
     const used = prev?.usage?.inputTokens ?? prev?.usage?.totalTokens;
-    if (used == null || !Number.isFinite(used)) return undefined;
+    if (used == null || !Number.isFinite(used)) return keep();
 
     const headroom = guard.headroom ?? 0.9;
-    if (used < guard.maxInputTokens * headroom) return undefined;
+    if (used < guard.maxInputTokens * headroom) return keep();
 
     try {
       // Count the ATTEMPT (not just successful shortenings) before compacting.
@@ -259,17 +316,16 @@ export class ThinkContextOverflow {
       // emitting `chat:context:compacted` — on every step.
       this.#proactiveCompactions++;
       const shortened = await this.compact("proactive");
-      if (!shortened) return undefined;
+      if (!shortened) return keep();
 
       // Rebuild the compacted head, then splice this turn's in-flight steps
       // (which are not yet persisted to the session) back onto the tail.
+      const tail = this.#inFlight(event.messages);
       const head = await this.#options.rebuildMessages();
-      const tail = event.messages.slice(this.#baseline);
-      // Re-baseline so a second guard fire this turn keeps the new tail. This
-      // relies on the AI SDK carrying the returned `messages` override into
-      // the next step's `event.messages` (locked by the "fires twice in one
-      // turn" test in assistant-agent-loop.test.ts).
+      // Re-baseline so a second guard fire this turn keeps the new tail, and
+      // keep the head for later steps on an AI SDK that doesn't carry it.
       this.#baseline = head.length;
+      this.#compactedHead = head;
       return [...head, ...tail];
     } catch (err) {
       console.warn(
@@ -278,4 +334,47 @@ export class ThinkContextOverflow {
       return undefined;
     }
   }
+}
+
+/**
+ * Where `run` first appears whole and in order in `messages`, or -1. An empty
+ * run is never found: it marks no boundary.
+ */
+function indexOfRun(
+  messages: readonly ModelMessage[],
+  run: readonly ModelMessage[]
+): number {
+  if (run.length === 0) return -1;
+  if (startsWith(messages, run)) return 0;
+  const first = JSON.stringify(run[0]);
+  for (let at = 1; at + run.length <= messages.length; at++) {
+    if (
+      (messages[at] === run[0] || JSON.stringify(messages[at]) === first) &&
+      startsWith(messages.slice(at), run)
+    ) {
+      return at;
+    }
+  }
+  return -1;
+}
+
+/** Whether `messages` starts with `prefix`: the same objects, or equal JSON. */
+function startsWith(
+  messages: readonly ModelMessage[],
+  prefix: readonly ModelMessage[]
+): boolean {
+  if (messages.length < prefix.length) return false;
+  if (prefix.every((message, at) => messages[at] === message)) return true;
+  // Cheap checks before the JSON: the first and last of the prefix.
+  const end = prefix.length - 1;
+  if (
+    end >= 0 &&
+    (JSON.stringify(messages[0]) !== JSON.stringify(prefix[0]) ||
+      JSON.stringify(messages[end]) !== JSON.stringify(prefix[end]))
+  ) {
+    return false;
+  }
+  return (
+    JSON.stringify(messages.slice(0, prefix.length)) === JSON.stringify(prefix)
+  );
 }

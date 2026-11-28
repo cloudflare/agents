@@ -1,5 +1,6 @@
 import { env, exports } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { runDurableObjectAlarm } from "cloudflare:test";
+import { describe, expect, it, vi } from "vitest";
 import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
 import { defaultContextOverflowClassifier } from "../think";
@@ -260,6 +261,8 @@ describe("Think — agentic loop", () => {
         message: string,
         enabled: boolean,
         opts?: {
+          maxRetries?: number;
+          otherErrorOnRetry?: boolean;
           noOpCompaction?: boolean;
           alwaysOverflow?: boolean;
           emitPartialBeforeOverflow?: boolean;
@@ -269,7 +272,17 @@ describe("Think — agentic loop", () => {
         alwaysOverflow?: boolean
       ): Promise<OverflowResult>;
       testProactive(message: string): Promise<OverflowResult>;
-      testProactiveMultiFire(message: string): Promise<OverflowResult>;
+      testProactiveMultiFire(
+        message: string,
+        maxCompactions?: number,
+        endWithAssistant?: boolean,
+        stepMessages?: "prepend"
+      ): Promise<OverflowResult>;
+      getCompactedBranches(): Promise<string[][]>;
+      armProactiveForTest(): Promise<void>;
+      armResumeForTest(): Promise<void>;
+      chatArmedForTest(message: string): Promise<void>;
+      getMessageIdsForTest(): Promise<Array<{ id: string; role: string }>>;
       testProactiveNoOp(message: string): Promise<OverflowResult>;
       testChatAbortDuringRecovery(message: string): Promise<OverflowResult>;
       testProgrammaticAbortDuringRecovery(
@@ -300,6 +313,7 @@ describe("Think — agentic loop", () => {
         Array<{
           toolCalls: string[];
           toolResults: string[];
+          prompt: string;
           hasSummary: boolean;
           headHasHistory: boolean;
         }>
@@ -843,6 +857,152 @@ describe("Think — agentic loop", () => {
       ]);
     });
 
+    it("keeps a resumed reply's new tool result when the guard compacts it", async () => {
+      const name = crypto.randomUUID();
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        name
+      )) as unknown as OverflowAgent;
+      await agent.armResumeForTest();
+      // The reset lands before the turn's second model call.
+      await agent.chatArmedForTest("use the echo tool").catch(() => {});
+      const restarted = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        name
+      )) as unknown as OverflowAgent & {
+        getTranscriptSummary(): Promise<Array<{ role: string; text: string }>>;
+      };
+      await vi.waitFor(
+        async () => {
+          await runDurableObjectAlarm(
+            restarted as unknown as DurableObjectStub
+          ).catch(() => {});
+          const transcript = await restarted.getTranscriptSummary();
+          expect(
+            transcript.some((m) => m.text === "done after two tools")
+          ).toBe(true);
+        },
+        { timeout: 20_000 }
+      );
+      // The call after the resumed tool round has that round's result.
+      const prompts = await restarted.getProactiveStepPrompts();
+      const last = prompts.at(-1);
+      expect(last?.toolResults).toContain("tc2");
+    }, 30_000);
+
+    it("compacts a regenerate on the branch it answers, not the active one", async () => {
+      const room = crypto.randomUUID();
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        room
+      )) as unknown as OverflowAgent;
+      const res = await exports.default.fetch(
+        `http://example.com/agents/overflow-recovery-test-agent/${room}`,
+        { headers: { Upgrade: "websocket" } }
+      );
+      const ws = res.webSocket as WebSocket;
+      ws.accept();
+      const turn = (body: Record<string, unknown>) =>
+        new Promise<void>((resolve) => {
+          const handler = (e: MessageEvent) => {
+            const msg = JSON.parse(e.data as string) as Record<string, unknown>;
+            if (msg.type === "cf_agent_use_chat_response" && msg.done) {
+              ws.removeEventListener("message", handler);
+              resolve();
+            }
+          };
+          ws.addEventListener("message", handler);
+          ws.send(
+            JSON.stringify({
+              type: "cf_agent_use_chat_request",
+              id: crypto.randomUUID(),
+              init: { method: "POST", body: JSON.stringify(body) }
+            })
+          );
+        });
+      const question = {
+        id: "regen-question",
+        role: "user",
+        parts: [{ type: "text", text: "use the echo tool" }]
+      };
+      await agent.armProactiveForTest();
+      await turn({ messages: [question] });
+      const first = (await agent.getMessageIdsForTest()).find(
+        (m) => m.role === "assistant"
+      )?.id;
+      expect(first).toBeDefined();
+      // The regenerate compacts too: on the question's branch, which
+      // doesn't hold the first answer.
+      await agent.armProactiveForTest();
+      await turn({ messages: [question], trigger: "regenerate-message" });
+      const branches = await agent.getCompactedBranches();
+      expect(branches.length).toBeGreaterThanOrEqual(2);
+      expect(branches.at(-1)).not.toContain(first);
+      ws.close();
+    });
+
+    it("compacts the branch a programmatic input ending with an assistant message leaves", async () => {
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        crypto.randomUUID()
+      )) as unknown as OverflowAgent;
+      const result = await agent.testProactiveMultiFire(
+        "use the echo tool",
+        1,
+        true
+      );
+      expect(result.done).toBe(true);
+      const [branch] = await agent.getCompactedBranches();
+      // The supplied assistant message is part of the turn's branch.
+      expect(branch).toContain("supplied-assistant");
+    });
+
+    it("doesn't compact with a retry budget of zero", async () => {
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        crypto.randomUUID()
+      )) as unknown as OverflowAgent;
+      const result = await agent.testChat("trigger overflow", true, {
+        maxRetries: 0
+      });
+      expect(result.compactionCount).toBe(0);
+      expect(result.error).toBeDefined();
+    });
+
+    it("reports a retry that fails for another reason as that error, not an overflow", async () => {
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        crypto.randomUUID()
+      )) as unknown as OverflowAgent & {
+        getOverflowStats(): Promise<{ errorClassification?: string }>;
+      };
+      const result = await agent.testChat("trigger overflow", true, {
+        otherErrorOnRetry: true
+      });
+      expect(result.compactionCount).toBe(1);
+      expect(result.error).toContain("tool schema");
+      expect(result.errorClassification).not.toBe("context_overflow");
+    });
+
+    it("keeps sending the compacted history after the guard's budget is spent", async () => {
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        crypto.randomUUID()
+      )) as unknown as OverflowAgent;
+      // One compaction, before step 2; step 3 is past the budget.
+      const result = await agent.testProactiveMultiFire("use the echo tool", 1);
+      expect(result.done).toBe(true);
+      expect(result.compactionEvents).toBe(1);
+      const prompts = await agent.getProactiveStepPrompts();
+      expect(prompts.length).toBe(3);
+      // Step 3 still sends the compacted head, with both tool steps.
+      expect(prompts[2].hasSummary).toBe(true);
+      // The compacted-away question is gone, not just a summary added.
+      expect(prompts[2].prompt).not.toContain("earlier question");
+      expect(prompts[2].toolCalls.length).toBe(2);
+      expect(prompts[2].toolResults.length).toBe(2);
+    });
+
     it("proactive guard fires twice in one turn (maxCompactions:2) without corrupting the spliced prompt", async () => {
       const room = crypto.randomUUID();
       const agent = (await getAgentByName(
@@ -907,6 +1067,34 @@ describe("Think — agentic loop", () => {
       expect([...prompts[2].toolResults].sort()).toEqual(
         [...prompts[2].toolCalls].sort()
       );
+    });
+
+    it("keeps every tool call with its result when beforeStep rewrites the compacted prompt's start", async () => {
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        crypto.randomUUID()
+      )) as unknown as OverflowAgent;
+
+      // Three steps, the guard compacting before the second and the third;
+      // beforeStep puts a message before the prompt on every step.
+      const result = await agent.testProactiveMultiFire(
+        "use the echo tool",
+        1,
+        false,
+        "prepend"
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.done).toBe(true);
+      expect(result.compactionEvents).toBe(1);
+      const prompts = await agent.getProactiveStepPrompts();
+      expect(prompts.length).toBe(3);
+      expect(prompts[2].toolCalls.length).toBe(2);
+      expect([...prompts[2].toolResults].sort()).toEqual(
+        [...prompts[2].toolCalls].sort()
+      );
+      // The turn's question once: the steps after it are this turn's, and
+      // nothing of the head is taken for one of them.
+      expect(prompts[2].prompt.split("use the echo tool").length - 1).toBe(1);
     });
 
     it.each([false, true])(

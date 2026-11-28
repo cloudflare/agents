@@ -724,5 +724,14 @@
       "file": "channel-recovery.test.ts",
       "test": "recovery × channels, after a real reset > re-applies a channel's policy to a turn a reset cut off"
     }
+  },
+  {
+    "file": "turn-metadata.test.ts",
+    "test": "turn metadata > strips reserved metadata keys from client-supplied messages at intake",
+    "reason": "Writes through Think's private intake seam `_persistIncomingMessage`, without a request.",
+    "successor": {
+      "file": "turn-metadata.test.ts",
+      "test": "turn metadata > strips reserved metadata keys a client's chat request sends"
+    }
   }
 ]

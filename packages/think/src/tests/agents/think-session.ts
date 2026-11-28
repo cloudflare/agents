@@ -3115,6 +3115,26 @@ export class ThinkTestAgent extends Think {
   }
 
   /** Like `setTurnConfigOutputText`, with an `Output.object` spec. */
+  /** A schema whose transform makes the answer a bigint. */
+  async setTurnConfigOutputBigInt(): Promise<void> {
+    this._turnConfigOverride = {
+      output: Output.object({
+        schema: z.object({
+          answer: z.string().transform((value) => BigInt(value))
+        }),
+        name: "Answer"
+      }),
+      activeTools: []
+    };
+  }
+
+  /** A wait-mode turn's output answer, as its type and its text. */
+  async runTurnOutputAnswerForTest(input: string): Promise<string> {
+    const result = await this.runTurn({ input });
+    const answer = (result as { output?: { answer?: unknown } }).output?.answer;
+    return `${typeof answer} ${String(answer)}`;
+  }
+
   async setTurnConfigOutputObject(): Promise<void> {
     this._turnConfigOverride = {
       output: Output.object({
@@ -9511,7 +9531,12 @@ function createDurablePauseMockModel(
 // arguments. Mirrors how a real model terminates a structured workflow turn by
 // calling the synthetic final-answer tool — exercises the #1685 capture path
 // without a network round-trip.
-function createFinalAnswerMockModel(args: unknown): LanguageModel {
+function createFinalAnswerMockModel(
+  args: unknown,
+  onCall?: (call: { toolChoice: unknown; tools: string[] }) => void,
+  /** Waits after the final-answer call streamed, before the finish. */
+  hold?: ChunkHoldForTest | null
+): LanguageModel {
   return {
     specificationVersion: "v3",
     provider: "test",
@@ -9525,6 +9550,10 @@ function createFinalAnswerMockModel(args: unknown): LanguageModel {
         toolChoice?: { type?: string; toolName?: string };
         tools?: Array<{ name?: string }>;
       };
+      onCall?.({
+        toolChoice: opts.toolChoice,
+        tools: (opts.tools ?? []).map((t) => String(t.name))
+      });
       const toolName =
         opts.toolChoice?.type === "tool" && opts.toolChoice.toolName
           ? opts.toolChoice.toolName
@@ -9535,7 +9564,7 @@ function createFinalAnswerMockModel(args: unknown): LanguageModel {
       const input = JSON.stringify(args);
       const id = "final-answer-call";
       const stream = new ReadableStream({
-        start(controller) {
+        async start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
           controller.enqueue({ type: "tool-input-start", id, toolName });
           controller.enqueue({ type: "tool-input-delta", id, delta: input });
@@ -9546,6 +9575,10 @@ function createFinalAnswerMockModel(args: unknown): LanguageModel {
             toolName,
             input
           });
+          if (hold) {
+            hold.reached = true;
+            await hold.released;
+          }
           controller.enqueue({
             type: "finish",
             finishReason: v3FinishReason("tool-calls"),
@@ -9822,6 +9855,9 @@ export class ThinkToolsTestAgent extends Think {
     }
     if (this._repairToolCalls) {
       return createToolCallingMockModel('```json\n{"message":"repaired"}\n```');
+    }
+    if (this._invalidToolInput) {
+      return createToolCallingMockModel("not json at all");
     }
     if (
       this._echoExecuteMode === "validated-output" ||
@@ -10911,8 +10947,31 @@ export class ThinkToolsTestAgent extends Think {
     this._turnStopCondition = hasToolCall("echo");
   }
 
+  /** Stop once a step's results hold echo's output. */
+  async stopOnEchoResultForTest(): Promise<void> {
+    this._turnStopCondition = ({ steps }) =>
+      steps
+        .at(-1)
+        ?.toolResults.some((result) =>
+          String(result.output).startsWith("echo")
+        ) ?? false;
+  }
+
+  /** Stop once the steps' token usage reaches a budget. */
+  async stopOnTokenBudgetForTest(budget: number): Promise<void> {
+    this._turnStopCondition = ({ steps }) =>
+      steps.reduce((total, step) => total + (step.usage.totalTokens ?? 0), 0) >=
+      budget;
+  }
+
   private _turnStopCondition: TurnConfig["stopWhen"];
   private _repairToolCalls = false;
+  private _invalidToolInput = false;
+
+  /** The model calls echo with input that doesn't parse. */
+  async useInvalidToolInputForTest(): Promise<void> {
+    this._invalidToolInput = true;
+  }
 
   /** Enables deterministic malformed tool-call repair inside the test agent. */
   async enableToolCallRepairForTest(): Promise<void> {
@@ -11023,7 +11082,8 @@ export class ThinkToolsTestAgent extends Think {
             ...("toolName" in part && { toolName: part.toolName }),
             ...("input" in part && { input: part.input }),
             ...("output" in part && { output: part.output }),
-            ...("delta" in part && { delta: true })
+            ...("delta" in part && { delta: true }),
+            ...("invalid" in part && { invalid: part.invalid })
           }
         : { type: part.type }
     );
@@ -11195,6 +11255,18 @@ export class ThinkContinueOverrideTestAgent extends ThinkTestAgent {
   private _delayBeforeSuperMs = 0;
   private _forcedStatus: SaveMessagesResult["status"] | null = null;
 
+  private _continueChannels: (string | null)[] = [];
+
+  /** The channel each call to the override was given. */
+  async continueChannelsForTest(): Promise<(string | null)[]> {
+    return this._continueChannels;
+  }
+
+  /** A continuation through `runTurn` on `channel`. */
+  async runTurnContinuationOnChannelForTest(channel: string): Promise<string> {
+    return (await this.runTurn({ continuation: true, channel })).status;
+  }
+
   async configureContinueOverrideForTest(options: {
     delayBeforeSuperMs?: number;
     forcedStatus?: SaveMessagesResult["status"];
@@ -11212,6 +11284,9 @@ export class ThinkContinueOverrideTestAgent extends ThinkTestAgent {
         setTimeout(resolve, this._delayBeforeSuperMs)
       );
     }
+    this._continueChannels.push(
+      (options as { channel?: string } | undefined)?.channel ?? null
+    );
     const result = await super.continueLastTurn(body, options);
     return this._forcedStatus
       ? { ...result, status: this._forcedStatus }
@@ -11232,6 +11307,17 @@ const HOLD_AFTER_RESET_KEY = "test:hold-chunks-after-reset";
 export class ThinkProgrammaticTestAgent extends Think {
   protected static override submissionRecoveryStaleMs = 15 * 60 * 1000;
 
+  // A channel that permits one step, for a structured turn's pin.
+  override configureChannels() {
+    return {
+      brief: {
+        kind: "web" as const,
+        ingress: { transport: "websocket" as const },
+        maxTurns: 1
+      }
+    };
+  }
+
   /**
    * A test can hold the next onChatRecovery (to cut the recovery attempt
    * there with a reset, as the platform does). Kept in storage, across resets.
@@ -11240,6 +11326,10 @@ export class ThinkProgrammaticTestAgent extends Think {
     _ctx: ChatRecoveryContext
   ): Promise<ChatRecoveryOptions> {
     const kv = this.ctx.storage.kv;
+    // Recovery gives up and keeps the partial (`giveUpRecoveryForTest`).
+    if (kv.get<boolean>("test:give-up-recovery")) {
+      return { persist: true, continue: false };
+    }
     if (kv.get<boolean>("test:hold-recovery")) {
       kv.delete("test:hold-recovery");
       kv.put("test:recovery-held", true);
@@ -11418,7 +11508,11 @@ export class ThinkProgrammaticTestAgent extends Think {
       );
     }
     if (this._finalAnswerResponse !== undefined) {
-      return createFinalAnswerMockModel(this._finalAnswerResponse);
+      return createFinalAnswerMockModel(
+        this._finalAnswerResponse,
+        (call) => this._finalAnswerCalls.push(call),
+        this._chunkHold
+      );
     }
     // A hold kept for the isolate after a reset: taken once, by the first
     // model call of that isolate.
@@ -11776,7 +11870,41 @@ export class ThinkProgrammaticTestAgent extends Think {
     };
   }
 
-  override async beforeTurn(ctx: TurnContext): Promise<void> {
+  private _afterToolNames: string[] = [];
+
+  override afterToolCall(ctx: ToolCallResultContext): void {
+    this._afterToolNames.push(ctx.toolName);
+  }
+
+  private _beforeToolNames: string[] = [];
+
+  override beforeToolCall(ctx: ToolCallContext): void {
+    this._beforeToolNames.push(ctx.toolName);
+  }
+
+  /** The tools `beforeToolCall` heard of, in order. */
+  async getBeforeToolNamesForTest(): Promise<string[]> {
+    return this._beforeToolNames;
+  }
+
+  /** The tools `afterToolCall` heard of, in order. */
+  async getAfterToolNamesForTest(): Promise<string[]> {
+    return this._afterToolNames;
+  }
+
+  /** Recovery gives up after a reset, keeping the partial (in storage). */
+  async giveUpRecoveryForTest(): Promise<void> {
+    this.ctx.storage.kv.put("test:give-up-recovery", true);
+  }
+
+  private _turnConfigForTest: TurnConfig | null = null;
+
+  /** Every turn's `beforeTurn` returns this config. */
+  async setTurnConfigOverride(config: TurnConfig | null): Promise<void> {
+    this._turnConfigForTest = config;
+  }
+
+  override async beforeTurn(ctx: TurnContext): Promise<TurnConfig | void> {
     const gate = this._turnGate;
     if (gate && !ctx.continuation) {
       this._turnGate = null;
@@ -11824,6 +11952,7 @@ export class ThinkProgrammaticTestAgent extends Think {
           error instanceof Error ? error.message : String(error);
       }
     }
+    return this._turnConfigForTest ?? undefined;
   }
 
   private async _runNestedAdmissionForTest(
@@ -12133,6 +12262,14 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   // Make the next turn(s) terminate by calling the structured-output
   // `think_final_answer` tool with `args` as its arguments (issue #1685).
+  private _finalAnswerCalls: Array<{ toolChoice: unknown; tools: string[] }> =
+    [];
+
+  /** The tool choice and tool names each final-answer model call got. */
+  async getFinalAnswerCallsForTest(): Promise<string> {
+    return JSON.stringify(this._finalAnswerCalls);
+  }
+
   async setFinalAnswerResponseForTest(args: unknown): Promise<void> {
     this._finalAnswerResponse = args;
   }
@@ -12434,6 +12571,25 @@ export class ThinkProgrammaticTestAgent extends Think {
         {
           id: crypto.randomUUID(),
           role: "user" as const,
+          parts: [{ type: "text" as const, text }]
+        }
+      ],
+      options
+    );
+  }
+
+  /** A submission whose user message came in on `channel`. */
+  async testSubmitOnChannel(
+    text: string,
+    channel: string,
+    options?: { submissionId?: string; metadata?: Record<string, unknown> }
+  ): Promise<SubmitMessagesResult> {
+    return this.submitMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user" as const,
+          metadata: { channel },
           parts: [{ type: "text" as const, text }]
         }
       ],
@@ -18291,6 +18447,24 @@ export class ThinkRewriteContextTestAgent extends ThinkToolsTestAgent {
   override beforeTurn(ctx: TurnContext): TurnConfig | void {
     if (this._keepHistory) return { messages: ctx.messages };
     return super.beforeTurn(ctx);
+  }
+
+  private _metadataCalls: Array<{ type: string; continuation: boolean }> = [];
+
+  /** The agent's writer records each start and finish part it's given. */
+  async logMessageMetadataForTest(): Promise<void> {
+    this.messageMetadata = ({ part, continuation }) => {
+      if (part.type === "start" || part.type === "finish") {
+        this._metadataCalls.push({ type: part.type, continuation });
+      }
+      return undefined;
+    };
+  }
+
+  async getMessageMetadataCallsForTest(): Promise<
+    Array<{ type: string; continuation: boolean }>
+  > {
+    return this._metadataCalls;
   }
 
   private _hiddenReasoning = false;

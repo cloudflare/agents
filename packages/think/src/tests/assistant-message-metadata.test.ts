@@ -356,4 +356,33 @@ describe("Think — server-authored assistant-message metadata", () => {
       ws.close(1000);
     }
   );
+
+  it("calls the writer once for the turn's start and once for its finish, around a tool round", async () => {
+    const agent = await getAgentByName(
+      env.ThinkRewriteContextTestAgent,
+      `meta-once-${crypto.randomUUID()}`
+    );
+    await agent.logMessageMetadataForTest();
+    const result = await agent.testChat("call the tool");
+    expect(result.done).toBe(true);
+    // One tool round, then the answer: still one start and one finish,
+    // neither of them a continuation.
+    expect(await agent.getMessageMetadataCallsForTest()).toEqual([
+      { type: "start", continuation: false },
+      { type: "finish", continuation: false }
+    ]);
+  });
+
+  it("writes the finish metadata on a reply that pauses for an approval", async () => {
+    const room = crypto.randomUUID();
+    const agent = await getAgentByName(env.ThinkClientToolsAgent, room);
+    await agent.setMessageMetadataMode(true);
+    await agent.setServerApprovalToolMode(true);
+    const ws = await connectWS(room);
+    await runTurn(ws, "update my trigger");
+    const paused = await waitForAssistant(agent);
+    // The reply ended waiting for the approval; it still got its finish.
+    expect(paused.metadata).toMatchObject({ source: "server" });
+    ws.close();
+  });
 });

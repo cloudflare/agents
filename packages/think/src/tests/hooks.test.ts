@@ -1997,6 +1997,25 @@ describe("Think — extension observation hooks", () => {
 // ── onChunk ─────────────────────────────────────────────────────
 
 describe("Think — onChunk hook", () => {
+  it("gets a call whose input doesn't parse as the AI SDK's invalid tool-call", async () => {
+    const agent = await freshToolAgent(
+      `hook-chunk-invalid-${crypto.randomUUID()}`
+    );
+    await agent.useInvalidToolInputForTest();
+    await agent.testChat("Call echo");
+    const parts = JSON.parse(await agent.getChunkPartLog()) as Array<
+      Record<string, unknown>
+    >;
+    expect(parts.map((part) => part.type)).not.toContain("tool-input-error");
+    expect(parts).toContainEqual(
+      expect.objectContaining({
+        type: "tool-call",
+        toolName: "echo",
+        invalid: true
+      })
+    );
+  });
+
   it("gets a tool's call and result as the AI SDK's stream parts, named", async () => {
     const agent = await freshToolAgent(
       `hook-chunk-parts-${crypto.randomUUID()}`
@@ -2037,6 +2056,43 @@ describe("Think — maxSteps property", () => {
     const agent = await freshToolAgent("hook-maxsteps");
     const result = await agent.testChat("Test");
     expect(result.done).toBe(true);
+  });
+
+  it("checks stopWhen after the step's tools returned", async () => {
+    const agent = await freshToolAgent(
+      `hook-stop-result-${crypto.randomUUID()}`
+    );
+    await agent.stopOnEchoResultForTest();
+    const result = await agent.testChat("Call echo");
+    expect(result.done).toBe(true);
+    // The echo step's result met it: no model call after the tool.
+    expect(await agent.getBeforeStepLog()).toHaveLength(1);
+    expect(await agent.getAfterToolCallLog()).toHaveLength(1);
+  });
+
+  it("gives stopWhen each step's token usage", async () => {
+    const agent = await freshToolAgent(
+      `hook-stop-usage-${crypto.randomUUID()}`
+    );
+    await agent.stopOnTokenBudgetForTest(1);
+    const result = await agent.testChat("Call echo");
+    expect(result.done).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(await agent.getBeforeStepLog()).toHaveLength(1);
+  });
+
+  it("checks stopWhen after a step whose only tool call doesn't parse", async () => {
+    const agent = await freshToolAgent(
+      `hook-stop-invalid-${crypto.randomUUID()}`
+    );
+    await agent.useInvalidToolInputForTest();
+    await agent.stopOnTokenBudgetForTest(1);
+    const result = await agent.testChat("Call echo");
+    expect(result.done).toBe(true);
+    // The first step met the budget: no model call after it, though no
+    // server tool ran.
+    expect(await agent.getBeforeStepLog()).toHaveLength(1);
+    expect(await agent.getAfterToolCallLog()).toHaveLength(0);
   });
 
   it("composes TurnConfig stopWhen with the maxSteps bound", async () => {
@@ -2466,6 +2522,15 @@ describe("Think — beforeTurn config overrides", () => {
     expect(JSON.parse(result.outputJson ?? "null")).toEqual({ answer: "42" });
   });
 
+  it("returns structured output a schema transform made a bigint", async () => {
+    const agent = await freshAgent(`bt-output-bigint-${crypto.randomUUID()}`);
+    await agent.setResponse(JSON.stringify({ answer: "42" }));
+    await agent.setTurnConfigOutputBigInt();
+    expect(await agent.runTurnOutputAnswerForTest("What is the answer?")).toBe(
+      "bigint 42"
+    );
+  });
+
   it("errors a wait-mode turn whose structured output does not parse (#2263)", async () => {
     const agent = await freshAgent(`bt-output-bad-${crypto.randomUUID()}`);
     await agent.setResponse("not json");
@@ -2523,6 +2588,16 @@ describe("Think — beforeTurn config overrides", () => {
     expect(invalid.outputJson).toBeUndefined();
   });
 
+  it("gives an overridden continueLastTurn the channel runTurn's continuation names", async () => {
+    const agent = await getAgentByName(
+      env.ThinkContinueOverrideTestAgent,
+      `bt-override-channel-${crypto.randomUUID()}`
+    );
+    await agent.runTurnWaitForTest("What is the answer?");
+    await agent.runTurnContinuationOnChannelForTest("voice");
+    expect(await agent.continueChannelsForTest()).toEqual(["voice"]);
+  });
+
   it("keeps the status an overridden continueLastTurn returns", async () => {
     const agent = await getAgentByName(
       env.ThinkContinueOverrideTestAgent,
@@ -2538,6 +2613,8 @@ describe("Think — beforeTurn config overrides", () => {
 
     expect(result.status).toBe("error");
     expect(JSON.parse(result.outputJson ?? "null")).toEqual({ answer: "42" });
+    // A turn the override reports failed carries no reply, as on Think.
+    expect(result.messageText).toBeUndefined();
   });
 
   it("keeps structured output for overlapping overridden continuations", async () => {

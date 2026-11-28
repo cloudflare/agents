@@ -92,6 +92,13 @@ type ThinkSubmissionTestStub = {
   getRecoveryToolExecutionsForTest(): Promise<number>;
   getMessagesForTest(): Promise<UIMessage[]>;
   setFinalAnswerResponseForTest(args: unknown): Promise<void>;
+  getFinalAnswerCallsForTest(): Promise<string>;
+  giveUpRecoveryForTest(): Promise<void>;
+  holdChunksAfterForTest(after: number): Promise<void>;
+  isChunkStreamHeldForTest(): Promise<boolean>;
+  getAfterToolNamesForTest(): Promise<string[]>;
+  getBeforeToolNamesForTest(): Promise<string[]>;
+  setTurnConfigOverride(config: Record<string, unknown> | null): Promise<void>;
   persistAssistantMessageForTest(msg: UIMessage): Promise<void>;
   setLastBodyForTest(body: Record<string, unknown>): Promise<void>;
   setSubmissionRecoveryStaleMsForTest(ms: number): Promise<void>;
@@ -118,6 +125,11 @@ type ThinkSubmissionTestStub = {
       idempotencyKey?: string;
       metadata?: Record<string, unknown>;
     }
+  ): Promise<SubmitMessagesResult>;
+  testSubmitOnChannel(
+    text: string,
+    channel: string,
+    options?: { submissionId?: string; metadata?: Record<string, unknown> }
   ): Promise<SubmitMessagesResult>;
   cancelQueuedRunningSubmissionBeforeSlotForTest(options?: {
     submissionId?: string;
@@ -433,6 +445,50 @@ function textParts(messages: Array<{ parts?: unknown[] }>): string[] {
       return [];
     })
   );
+}
+
+async function finalAnswerCalls(
+  agent: Awaited<ReturnType<typeof freshAgent>>,
+  id: string,
+  channel?: string
+) {
+  await agent.setFinalAnswerResponseForTest({ title: "t" });
+  const submit = (options: Parameters<typeof agent.testSubmitMessages>[1]) =>
+    channel
+      ? agent.testSubmitOnChannel("answer", channel, options)
+      : agent.testSubmitMessages("answer", options);
+  const accepted = await submit({
+    submissionId: `sub-${id}`,
+    metadata: {
+      [workflowPromptMetadataKey]: {
+        workflow: {
+          name: "TEST_WORKFLOW",
+          id: `workflow-${id}`,
+          stepName: "draft-report",
+          eventType: `think-prompt-${id}`
+        },
+        output: {
+          schema: {
+            type: "object",
+            properties: { title: { type: "string" } },
+            required: ["title"],
+            additionalProperties: false
+          }
+        },
+        fingerprint: "fingerprint"
+      }
+    }
+  });
+  const settled = await waitForSubmission(
+    agent,
+    accepted.submissionId,
+    (submission) => submission.status === "completed"
+  );
+  expect(settled.status).toBe("completed");
+  return JSON.parse(await agent.getFinalAnswerCallsForTest()) as Array<{
+    toolChoice: unknown;
+    tools: string[];
+  }>;
 }
 
 describe("Think durable submissions", () => {
@@ -2330,6 +2386,175 @@ describe("Think durable submissions", () => {
       }
     });
   });
+
+  it("stores no final-answer part from a reply cut off after its final-answer call", async () => {
+    const name = crypto.randomUUID();
+    const agent = await freshAgent(name);
+    await agent.giveUpRecoveryForTest();
+    await agent.setFinalAnswerResponseForTest({ title: "cut" });
+    await agent.holdChunksAfterForTest(0);
+    await agent.testSubmitMessages("answer, then be cut off", {
+      submissionId: "sub-final-cut",
+      metadata: {
+        [workflowPromptMetadataKey]: {
+          workflow: {
+            name: "TEST_WORKFLOW",
+            id: "workflow-final-cut",
+            stepName: "draft-report",
+            eventType: "think-prompt-final-cut"
+          },
+          output: {
+            schema: {
+              type: "object",
+              properties: { title: { type: "string" } },
+              required: ["title"],
+              additionalProperties: false
+            }
+          },
+          fingerprint: "fingerprint"
+        }
+      }
+    });
+    await vi.waitFor(
+      async () => expect(await agent.isChunkStreamHeldForTest()).toBe(true),
+      { timeout: 10_000 }
+    );
+    await agent.resetIsolateForTest().catch(() => {});
+    const restarted = await freshAgent(name);
+    // Recovery gives up and keeps the partial, which had only the call.
+    await vi.waitFor(
+      async () => {
+        const submission =
+          await restarted.inspectSubmissionForTest("sub-final-cut");
+        expect(submission).toBeDefined();
+        expect(submission?.status).not.toBe("running");
+        expect(submission?.status).not.toBe("pending");
+      },
+      { timeout: 20_000 }
+    );
+    const messages = await restarted.getStoredMessages();
+    // The question is kept; the partial held only the final-answer call,
+    // so nothing of it is.
+    expect(messages.some((m) => m.role === "user")).toBe(true);
+    expect(JSON.stringify(messages)).not.toContain("think_final_answer");
+  }, 40_000);
+
+  it("keeps the final-answer call from the tool hooks", async () => {
+    const agent = await freshAgent();
+    await finalAnswerCalls(agent, "hidden-hooks");
+    expect(await agent.getAfterToolNamesForTest()).not.toContain(
+      "think_final_answer"
+    );
+    expect(await agent.getBeforeToolNamesForTest()).not.toContain(
+      "think_final_answer"
+    );
+  }, 30_000);
+
+  it("keeps the final-answer tool on when a turn names its active tools", async () => {
+    const agent = await freshAgent();
+    await agent.setTurnConfigOverride({ activeTools: [] });
+    const calls = await finalAnswerCalls(agent, "active-tools");
+    expect(calls[0].tools).toEqual(["think_final_answer"]);
+  }, 30_000);
+
+  it("pins a structured turn's last permitted step to the final-answer tool", async () => {
+    const agent = await freshAgent();
+    await agent.setTurnConfigOverride({ maxSteps: 1 });
+    const calls = await finalAnswerCalls(agent, "last-step");
+    expect(calls[0].toolChoice).toMatchObject({
+      type: "tool",
+      toolName: "think_final_answer"
+    });
+  }, 30_000);
+
+  it("pins the last step its channel permits to the final-answer tool", async () => {
+    const agent = await freshAgent();
+    const calls = await finalAnswerCalls(agent, "channel-last-step", "brief");
+    expect(calls[0].toolChoice).toMatchObject({
+      type: "tool",
+      toolName: "think_final_answer"
+    });
+  }, 30_000);
+
+  it("requires a tool call on a structured turn with tools of its own", async () => {
+    const agent = await freshAgent();
+    await agent.setFinalAnswerResponseForTest({ title: "Pinned" });
+    const accepted = await agent.testSubmitMessages("answer", {
+      submissionId: "sub-pinned-final",
+      metadata: {
+        [workflowPromptMetadataKey]: {
+          workflow: {
+            name: "TEST_WORKFLOW",
+            id: "workflow-pinned",
+            stepName: "draft-report",
+            eventType: "think-prompt-pinned"
+          },
+          output: {
+            schema: {
+              type: "object",
+              properties: { title: { type: "string" } },
+              required: ["title"],
+              additionalProperties: false
+            }
+          },
+          fingerprint: "fingerprint"
+        }
+      }
+    });
+    const settled = await waitForSubmission(
+      agent,
+      accepted.submissionId,
+      (submission) => submission.status === "completed"
+    );
+    expect(settled.status).toBe("completed");
+    const calls = JSON.parse(
+      await agent.getFinalAnswerCallsForTest()
+    ) as Array<{
+      toolChoice: unknown;
+      tools: string[];
+    }>;
+    expect(calls[0].tools).toContain("think_final_answer");
+    // It may work with its tools first, then answer.
+    expect(calls[0].toolChoice).toEqual({ type: "required" });
+  }, 30_000);
+
+  it("fails a structured workflow turn that ends without its final answer", async () => {
+    const agent = await freshAgent();
+    // A plain-text answer: the model never calls the final-answer tool.
+    await agent.testSubmitMessages("answer in text", {
+      submissionId: "sub-no-final-answer",
+      metadata: {
+        [workflowPromptMetadataKey]: {
+          workflow: {
+            name: "TEST_WORKFLOW",
+            id: "workflow-no-answer",
+            stepName: "draft-report",
+            eventType: "think-prompt-no-answer"
+          },
+          output: {
+            schema: {
+              type: "object",
+              properties: { title: { type: "string" } },
+              required: ["title"],
+              additionalProperties: false
+            }
+          },
+          fingerprint: "fingerprint"
+        }
+      }
+    });
+    const event = await waitForWorkflowEvent(
+      agent,
+      (entry) => entry.event.type === "think-prompt-no-answer"
+    );
+    expect(event.event.payload).toMatchObject({
+      submissionId: "sub-no-final-answer",
+      status: "error",
+      error: expect.stringMatching(
+        /without calling the think_final_answer tool/
+      )
+    });
+  }, 30_000);
 
   it("delivers a structured output that fits a workflow event, and fails one that does not with the reason", async () => {
     const agent = await freshAgent();
