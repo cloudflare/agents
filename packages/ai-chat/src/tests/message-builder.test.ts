@@ -1041,6 +1041,113 @@ describe("applyChunkToParts", () => {
     });
   });
 
+  describe("toolMetadata", () => {
+    const toolMetadata = { placement: "answer" };
+    const find = (parts: MessageParts) =>
+      parts[0] as unknown as Record<string, unknown>;
+
+    it("is kept from tool-input-start through tool-input-available", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "c1",
+        toolName: "search",
+        toolMetadata
+      });
+      expect(find(parts).toolMetadata).toEqual(toolMetadata);
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "c1",
+        toolName: "search",
+        input: {},
+        toolMetadata: { placement: "steps" }
+      });
+      expect(find(parts).toolMetadata).toEqual({ placement: "steps" });
+    });
+
+    it("is kept on a new tool-input-available and tool-input-error part", () => {
+      const a = makeParts();
+      applyChunkToParts(a, {
+        type: "tool-input-available",
+        toolCallId: "c1",
+        toolName: "search",
+        input: {},
+        toolMetadata
+      });
+      expect(find(a).toolMetadata).toEqual(toolMetadata);
+      const b = makeParts();
+      applyChunkToParts(b, {
+        type: "tool-input-error",
+        toolCallId: "c1",
+        toolName: "search",
+        input: {},
+        errorText: "bad",
+        toolMetadata
+      });
+      expect(find(b).toolMetadata).toEqual(toolMetadata);
+    });
+
+    it("is retained when a later chunk omits it", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "c1",
+        toolName: "search",
+        toolMetadata
+      });
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "c1",
+        toolName: "search",
+        input: {}
+      });
+      expect(find(parts).state).toBe("input-available");
+      expect(find(parts).toolMetadata).toEqual(toolMetadata);
+
+      const errored = makeParts();
+      applyChunkToParts(errored, {
+        type: "tool-input-start",
+        toolCallId: "c1",
+        toolName: "search",
+        toolMetadata
+      });
+      applyChunkToParts(errored, {
+        type: "tool-input-error",
+        toolCallId: "c1",
+        toolName: "search",
+        input: {},
+        errorText: "bad"
+      });
+      expect(find(errored).state).toBe("output-error");
+      expect(find(errored).toolMetadata).toEqual(toolMetadata);
+    });
+
+    it("is added by a late tool-input-available while the approval stays pending", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "c1",
+        toolName: "search"
+      });
+      applyChunkToParts(parts, {
+        type: "tool-approval-request",
+        toolCallId: "c1",
+        approvalId: "ap1"
+      });
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "c1",
+        toolName: "search",
+        input: { q: "x" },
+        toolMetadata
+      });
+      expect(find(parts).state).toBe("approval-requested");
+      expect(find(parts).approval).toEqual({ id: "ap1" });
+      expect(find(parts).input).toEqual({ q: "x" });
+      expect(find(parts).toolMetadata).toEqual(toolMetadata);
+    });
+  });
+
   describe("tool provider metadata (callProviderMetadata, providerExecuted, title)", () => {
     it("tool-input-available preserves callProviderMetadata from providerMetadata", () => {
       const parts = makeParts();
