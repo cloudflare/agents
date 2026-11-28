@@ -36,10 +36,14 @@ import type { TaskJson } from "../../tasks/types";
 import type { ThinkExtension } from "./extensions/types";
 
 /**
- * @internal An extension a host installs with the harness, by name.
+ * An extension shipped for ThinkHarness, made by its function (such as
+ * `codemode()` from `agents/harness/think/extensions`).
+ *
+ * @experimental
  */
 export type ThinkShippedExtension = {
   readonly name: string;
+  /** @internal */
   readonly extension: ThinkExtension;
   /** Load it after the harness's own instead of ahead of them. */
   readonly after?: boolean;
@@ -563,7 +567,7 @@ export type ThinkHarnessOptions<TOOLS extends ToolSet = ToolSet> = {
    */
   readonly tasks?: Tasks;
   /**
-   * @internal Shipped extensions the host installs, in order, ahead of the
+   * @experimental Shipped extensions to install, in order, ahead of the
    * harness's own (the context's tools, then these options), or after them
    * when marked `after`. A later extension's tool of the same name replaces
    * an earlier one's in place.

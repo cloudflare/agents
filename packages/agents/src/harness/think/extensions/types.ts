@@ -104,8 +104,17 @@ export interface Draft<Value, Entry> {
   keys(): IterableIterator<string>;
 }
 
+/** Who may call a tool: the model, other tools' code (`invoke`), or both. @internal */
+export type ToolCaller = "model" | "code";
+
 /** @internal */
-export type ToolDraft = Draft<ExtensionTool, ToolEntry>;
+export interface ToolDraft extends Draft<ExtensionTool, ToolEntry> {
+  /**
+   * Say who may call a tool that is already set, whoever set it: its
+   * owner keeps running it. Returns false when there is no such tool.
+   */
+  setCallers(name: string, callers: readonly ToolCaller[]): boolean;
+}
 /** @internal */
 export type PromptDraft = Draft<PromptSection, PromptEntry>;
 
@@ -208,6 +217,15 @@ export type ToolOutcome =
   | { readonly ok: true; readonly output: unknown }
   | { readonly ok: false; readonly errorText: string };
 
+/**
+ * Call another tool through the harness, from a tool's `execute` (its
+ * options' `invoke`): a recorded step under the calling one, with the
+ * tool hooks. A tool whose `callers` leaves out `"code"` refuses.
+ *
+ * @internal
+ */
+export type ToolInvoke = (tool: string, input: unknown) => Promise<ToolOutcome>;
+
 /** A validated input, or why it is not valid. @internal */
 export type Validation =
   | { readonly success: true; readonly value: unknown }
@@ -226,13 +244,15 @@ export interface ExtensionHandle<M extends HookMap = ExtensionHooks> {
   build(drafts: Drafts, build: BuildContext): Promise<Drafts>;
   /**
    * Run a tool. A streaming tool's outputs go to `onOutput` as it yields
-   * them, awaited in order, and its last is also the outcome's.
+   * them, awaited in order, and its last is also the outcome's. `invoke`,
+   * when the harness gives one, is the tool's `options.invoke`.
    */
   execute(
     tool: string,
     input: unknown,
     call: ToolCall,
-    onOutput: (output: unknown) => void | Promise<void>
+    onOutput: (output: unknown) => void | Promise<void>,
+    invoke?: ToolInvoke
   ): Promise<ToolOutcome>;
   /** Abort a running call's `abortSignal`, with `reason`. */
   cancel(call: Pick<ToolCall, "id" | "session">, reason?: unknown): void;

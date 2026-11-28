@@ -14,7 +14,9 @@
       {
         "name": "THINK_HARNESS_FACET_CHILD",
         "class_name": "ThinkHarnessFacetChild"
-      }
+      },
+      { "name": "THINK_CODEMODE", "class_name": "ThinkCodemodeObject" },
+      { "name": "CODEMODE_SANDBOX", "class_name": "CodemodeSandbox" }
     ]
   },
   "migrations": [
@@ -25,6 +27,8 @@
     {
       "tag": "v2",
       "new_sqlite_classes": ["ThinkHarnessFacetRoot", "ThinkHarnessFacetChild"]
-    }
+    },
+    { "tag": "v3", "new_sqlite_classes": ["ThinkCodemodeObject"] },
+    { "tag": "v4", "new_sqlite_classes": ["CodemodeSandbox"] }
   ]
 }

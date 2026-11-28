@@ -6,6 +6,7 @@ import {
   streamText,
   type LanguageModelUsage,
   type ModelMessage,
+  type Tool,
   type ToolSet,
   type UIMessage,
   type UIMessageChunk
@@ -32,7 +33,9 @@ import type {
   TaskJson,
   TaskRecord,
   TaskStatus,
-  TaskStep
+  TaskStep,
+  TaskStepAttempt,
+  TaskValue
 } from "../../tasks/types";
 import {
   createToolsFromClientSchemas,
@@ -103,12 +106,14 @@ import { contextExtension, optionsExtension, resolve } from "./extensions/own";
 import { loadInProcess } from "./extensions/in-process";
 import { ReleasedRecords, type OperationInput } from "./records";
 import {
+  callableBy,
   executeTool,
   isServerTool,
   modelTools,
   toolNeedsApproval,
   type ToolOutcome
 } from "./tools";
+import type { ToolInvoke } from "./extensions/types";
 import {
   hasContent,
   isToolCallPart,
@@ -238,8 +243,72 @@ const TOOL_STEP = { retries: { limit: 1 }, timeout: 2 ** 31 - 1 } as const;
 const INPUT_CUT_OFF_ERROR =
   "The tool call's input was cut off before it was complete, so the tool did not run.";
 
+/** The Sessions annotation that keeps what parked tools called. */
+const PARKED_KIND = "think:parked-calls";
+
+/** A tool parked for an approval: the calls it made, and the one waiting. */
+type ParkedCall = {
+  readonly calls: Readonly<Record<string, ToolOutcome>>;
+  readonly pending: {
+    readonly toolCallId: string;
+    readonly toolName: string;
+    readonly input: unknown;
+  };
+  /**
+   * Calls still running when the tool parked. Each one's outcome is added
+   * to `calls` when it settles; one still here when the approval reruns
+   * the tool has an unknown outcome.
+   */
+  readonly inflight?: readonly string[];
+  /** This park, among the parks of one call: a late outcome is for it only. */
+  readonly generation?: string;
+  /**
+   * Calls answered as interrupted because they were still running at an
+   * earlier park. Each is the same invocation, so its late outcome replaces
+   * the interruption in any later park.
+   */
+  readonly provisional?: readonly string[];
+};
+
+/** What the `invoke`s under one tool call share. */
+type InvokeScope = {
+  readonly signal: AbortSignal;
+  /** Results kept from before a park, by call id. */
+  readonly seed: Readonly<Record<string, ToolOutcome>>;
+  /** The call an approval was given for: its position, tool and input. */
+  readonly approved?: ParkedCall["pending"];
+  /** Results this run, by call id. */
+  readonly made: Record<string, ToolOutcome>;
+  parked?: ParkedCall["pending"];
+  /** Aborts the calling tool once it parks. */
+  readonly parking: AbortController;
+  readonly park: () => void;
+  /** Calls still running, which a park waits for before it keeps them. */
+  readonly running: Map<string, Promise<unknown>>;
+  /** Calls whose outcome was unknown when the approval reran the tool. */
+  readonly unknown?: ReadonlySet<string>;
+  /** Calls answered as interrupted for now (`ParkedCall.provisional`). */
+  readonly provisional: Set<string>;
+  /** Each call's outcome as kept, once it settled (none: it reruns). */
+  readonly settled: Map<string, ToolOutcome | undefined>;
+  /** Where the park kept its calls, once it parked. */
+  kept?: {
+    readonly session: string;
+    readonly messageId: string;
+    readonly toolCallId: string;
+    readonly generation: string;
+  };
+};
+
+/** What a call made after its tool parked gets. */
+const PARKED_ERROR = "The call is waiting for an approval.";
+
 const INTERRUPTED_TOOL_ERROR =
   "The tool call was interrupted before it finished, because the agent restarted. It may or may not have taken effect.";
+
+/** A call cut short because another call of its tool waited for approval. */
+const PARK_CUT_ERROR =
+  "The tool call was interrupted before it finished, because another call waited for approval. It may or may not have taken effect.";
 
 /** The operation a session is running in this isolate. */
 /** A session's tools, its client's included, and its options' prompt. */
@@ -618,6 +687,94 @@ async function continued(
 function replyIdOf(chunks: readonly UIMessageChunk[]): string | undefined {
   const start = chunks.find((chunk) => chunk.type === "start");
   return start?.type === "start" ? start.messageId : undefined;
+}
+
+/**
+ * What a call's park keeps of its outcome: all of it, unless the park cut
+ * it short. Then a tool safe to rerun runs again (nothing kept), and any
+ * other is interrupted, since what it did is unknown.
+ */
+function keptOutcome(
+  outcome: ToolOutcome,
+  scope: InvokeScope,
+  tool: Tool,
+  toolCallId: string,
+  call: string
+): KeptOutcome | undefined {
+  // A call the parked one was made under is suspended by it, not cut short:
+  // it runs again on the approved path, its finished calls answered.
+  if (isAncestorOf(toolCallId, scope.parked?.toolCallId)) return undefined;
+  if (outcome.ok || !scope.parking.signal.aborted) return { ...outcome, call };
+  return toolRecovery(tool) === "rerun"
+    ? undefined
+    : { ok: false, errorText: PARK_CUT_ERROR, call };
+}
+
+/** An outcome as a park or a step keeps it: with the call it was for. */
+type KeptOutcome = ToolOutcome & {
+  /** The call's tool and input (`callKey`). */
+  readonly call?: string;
+};
+
+/** The outcome a script is given, without what it was kept with. */
+function givenOutcome(kept: KeptOutcome): ToolOutcome {
+  const { call: _call, ...outcome } = kept;
+  return outcome as ToolOutcome;
+}
+
+/** Whether call `of` was made under `call`, by its path. */
+function isAncestorOf(call: string, of: string | undefined): boolean {
+  return of !== undefined && of.startsWith(`${call}/`);
+}
+
+/**
+ * Which call an outcome was for: its tool and the SHA-256 of its input as
+ * canonical JSON (keys sorted), so the same input in another key order is
+ * the same call, and two inputs never share one by chance.
+ */
+async function callKey(toolName: string, input: unknown): Promise<string> {
+  let text: string;
+  try {
+    text = canonicalJson(asJson(input));
+  } catch {
+    text = "unserializable";
+  }
+  const bytes = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))
+  );
+  let hex = "";
+  for (const byte of bytes) hex += byte.toString(16).padStart(2, "0");
+  return `${toolName}#${hex}`;
+}
+
+/** JSON with every object's keys in order. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const entries = Object.keys(value)
+      .sort()
+      .map(
+        (key) =>
+          `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`
+      );
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/** A call made where the run before made another: not run, not answered. */
+const DIVERGED_CALL_ERROR =
+  "This call was not run: the tool made its calls in a different order than the run before, and the call it made here then was another one.";
+
+/** A short digest of a value's JSON (FNV-1a), to tell two inputs apart. */
+function digestOf(value: unknown): string {
+  const text = JSON.stringify(value) ?? "";
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 /** A value as JSON round-trips it; `undefined` stays itself. */
@@ -1357,18 +1514,33 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   ): Promise<ThinkPendingApproval[]> {
     const leaf = await this.#handle(session).getLatestLeaf();
     if (leaf?.role !== "assistant") return [];
-    return asUIMessage(leaf).parts.flatMap((part) =>
-      isToolCallPart(part) && part.state === "approval-requested"
-        ? [
-            {
-              approvalId: part.approval.id,
-              toolCallId: part.toolCallId,
-              toolName: toolNameOf(part),
-              input: part.input
-            }
-          ]
-        : []
-    );
+    const parts = asUIMessage(leaf).parts;
+    // A tool parked for a call inside it (`<callId>/<n>`): the call that
+    // waits is the one to decide, so it is listed by its own tool and input.
+    const parked = parts.some(
+      (part) =>
+        isToolCallPart(part) &&
+        part.state === "approval-requested" &&
+        part.approval.id.includes("/")
+    )
+      ? await this.#parkedCalls(session, leaf.id)
+      : {};
+    return parts.flatMap((part) => {
+      if (!isToolCallPart(part) || part.state !== "approval-requested") {
+        return [];
+      }
+      const pending = Object.hasOwn(parked, part.toolCallId)
+        ? parked[part.toolCallId]?.pending
+        : undefined;
+      return [
+        {
+          approvalId: part.approval.id,
+          toolCallId: pending?.toolCallId ?? part.toolCallId,
+          toolName: pending?.toolName ?? toolNameOf(part),
+          input: pending ? pending.input : part.input
+        }
+      ];
+    });
   }
 
   /**
@@ -1561,16 +1733,16 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     }
     // The copied turns keep the context they were sent with, so the fork's
     // next request opens with the same prompt as the session it came from.
-    const records = await source.internal_annotations(
-      CONTEXT_RECORD_KIND,
-      rows.map((row) => row.id)
-    );
-    for (const [messageId, value] of records) {
-      await target.internal_setAnnotation(
-        CONTEXT_RECORD_KIND,
-        messageId,
-        value
+    // And a tool parked for an approval keeps what it called, so the
+    // fork's answer to it doesn't make those calls again.
+    for (const kind of [CONTEXT_RECORD_KIND, PARKED_KIND]) {
+      const records = await source.internal_annotations(
+        kind,
+        rows.map((row) => row.id)
       );
+      for (const [messageId, value] of records) {
+        await target.internal_setAnnotation(kind, messageId, value);
+      }
     }
     return fork;
   }
@@ -2008,6 +2180,21 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         if (!answered) {
           unanswered = "not_waiting";
           break;
+        }
+        // A refused approval inside a tool's call (`<callId>/<n>`): what
+        // the parked tool kept goes, since it will not run again.
+        if (
+          answer.type === "approval" &&
+          !answer.approved &&
+          answer.approvalId.includes("/")
+        ) {
+          const refused = answered.parts.find(
+            (part) =>
+              isToolCallPart(part) && part.approval?.id === answer.approvalId
+          );
+          if (refused && isToolCallPart(refused)) {
+            await this.#unpark(session, answered.id, refused.toolCallId);
+          }
         }
         const latest = history.at(-1);
         const continues =
@@ -2622,6 +2809,323 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
   }
 
   /**
+   * A tool call's `invoke`: each call is a recorded step under the calling
+   * one (`<parent>/<n>`), so a call that runs again after a reset gets the
+   * results its earlier calls recorded, in order. It runs the tool hooks
+   * and the tool's recovery rule, as a call from the model does. A call
+   * that needs approval parks the calling tool instead (`scope.park`): the
+   * calls made so far are kept, and when the approval is given the calling
+   * tool runs again from the top, answered from them, and the approved
+   * call runs.
+   */
+  #invoker(
+    turn: TurnContext,
+    stepIndex: number,
+    tools: ToolSet,
+    messages: ModelMessage[],
+    parent: string,
+    scope: InvokeScope
+  ): ToolInvoke {
+    const { run, session, operationId } = turn;
+    const maxAttempts =
+      this.#options.recovery?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    let invoked = 0;
+    return async (toolName, input) => {
+      const toolCallId = `${parent}/${++invoked}`;
+      scope.signal.throwIfAborted();
+      const key = await callKey(toolName, input);
+      const kept: KeptOutcome | undefined = Object.hasOwn(
+        scope.seed,
+        toolCallId
+      )
+        ? scope.seed[toolCallId]
+        : undefined;
+      if (kept) {
+        scope.made[toolCallId] = kept;
+        // Kept for another call at this position: that one's, not this.
+        if (kept.call !== undefined && kept.call !== key) {
+          return { ok: false, errorText: DIVERGED_CALL_ERROR };
+        }
+        return givenOutcome(kept);
+      }
+      // Still running at the park and never settled: what it did is
+      // unknown. Only a tool safe to rerun runs again.
+      if (
+        scope.unknown?.has(toolCallId) &&
+        !isAncestorOf(toolCallId, scope.approved?.toolCallId)
+      ) {
+        const known = Object.hasOwn(tools, toolName)
+          ? tools[toolName]
+          : undefined;
+        if (!known || toolRecovery(known) !== "rerun") {
+          const interrupted: KeptOutcome = {
+            ok: false,
+            errorText: PARK_CUT_ERROR,
+            call: key
+          };
+          scope.made[toolCallId] = interrupted;
+          scope.provisional.add(toolCallId);
+          return givenOutcome(interrupted);
+        }
+      }
+      // Parked: the calling tool is aborted; nothing after it runs.
+      if (scope.parked) throw new Error(PARKED_ERROR);
+      const tool = Object.hasOwn(tools, toolName) ? tools[toolName] : undefined;
+      if (!tool || !isServerTool(tools, toolName)) {
+        return { ok: false, errorText: `Tool "${toolName}" is not available.` };
+      }
+      if (!callableBy(tool, "code")) {
+        return {
+          ok: false,
+          errorText: `Tool "${toolName}" can't be called from another tool.`
+        };
+      }
+      // A script's input is checked against the tool's schema, as the AI
+      // SDK checks the model's.
+      if (tool.inputSchema !== undefined) {
+        const checked = await asSchema(tool.inputSchema).validate?.(input);
+        if (checked && !checked.success) {
+          return {
+            ok: false,
+            errorText: `Invalid input for tool "${toolName}": ${checked.error.message}`
+          };
+        }
+        if (checked) input = checked.value;
+      }
+      // The approval is for this exact call: the same position, tool and
+      // input. A rerun that calls something else there asks again.
+      const approved = scope.approved;
+      if (
+        approved?.toolCallId !== toolCallId ||
+        approved.toolName !== toolName ||
+        JSON.stringify(asJson(approved.input)) !== JSON.stringify(asJson(input))
+      ) {
+        const needsApproval =
+          (await this.#options.toolApproval?.({
+            session,
+            toolName,
+            toolCallId,
+            input
+          })) ||
+          (await toolNeedsApproval(tool, input, { toolCallId, messages }));
+        if (needsApproval) {
+          scope.parked = { toolCallId, toolName, input };
+          scope.park();
+          scope.parking.abort(new Error(PARKED_ERROR));
+          throw new Error(PARKED_ERROR);
+        }
+      }
+      const step = run.do(
+        `tool:${stepIndex}:${toolCallId}`,
+        TOOL_STEP,
+        // SAFETY: an outcome is the tool's JSON result or its error text,
+        // as the transcript stores it.
+        (async ({ attempt, signal }: TaskStepAttempt): Promise<KeptOutcome> => {
+          if (
+            attempt > 1 &&
+            (toolRecovery(tool) === "report" || attempt - 1 >= maxAttempts)
+          ) {
+            return { ok: false, errorText: INTERRUPTED_TOOL_ERROR };
+          }
+          let runInput = input;
+          const decision = await this.#extensions.hook("beforeToolCall", {
+            session,
+            operationId,
+            toolCallId,
+            toolName,
+            input,
+            attempt
+          });
+          let outcome: ToolOutcome;
+          if (decision?.action === "block") {
+            outcome = { ok: false, errorText: decision.reason };
+          } else if (decision?.action === "substitute") {
+            outcome = { ok: true, output: asJson(decision.output) };
+          } else {
+            if (decision?.action === "run" && decision.input !== undefined) {
+              runInput = decision.input;
+            }
+            outcome = await executeTool(tool, runInput, {
+              toolCallId,
+              messages,
+              // A park aborts every tool under the calling one, nested too.
+              abortSignal: AbortSignal.any([
+                signal,
+                scope.signal,
+                scope.parking.signal
+              ]),
+              onPreliminary: () => {},
+              invoke: this.#invoker(
+                turn,
+                stepIndex,
+                tools,
+                messages,
+                toolCallId,
+                scope
+              )
+            });
+            if (outcome.ok)
+              outcome = { ok: true, output: asJson(outcome.output) };
+          }
+          await this.#extensions.hook("afterToolCall", {
+            session,
+            operationId,
+            toolCallId,
+            toolName,
+            input: runInput,
+            attempt,
+            ...outcome
+          });
+          // Kept here, in the same turn of the event loop as the check
+          // below, so a park's snapshot has it or its edit follows the park.
+          const kept = keptOutcome(outcome, scope, tool, toolCallId, key);
+          scope.settled.set(toolCallId, kept);
+          // Settled after its sibling parked: what that park kept gets it,
+          // here, since the run that started it has ended. A later park of
+          // the same call replaced it, and keeps its own outcome.
+          const at = scope.kept;
+          if (at) {
+            await this.#parkedEdit(at.session, at.messageId, async () => {
+              const stored = await this.#parkedCalls(at.session, at.messageId);
+              const call = stored[at.toolCallId];
+              // Its own park, or a later one that answered it as
+              // interrupted for now: the same invocation, so this is its
+              // outcome. Any other later park reran it, and keeps its own.
+              const provisional = call?.provisional?.includes(toolCallId);
+              if (
+                !call ||
+                (call.generation !== at.generation && !provisional)
+              ) {
+                return;
+              }
+              stored[at.toolCallId] = {
+                ...call,
+                calls: kept
+                  ? { ...call.calls, [toolCallId]: kept }
+                  : call.calls,
+                inflight: (call.inflight ?? []).filter(
+                  (id) => id !== toolCallId
+                ),
+                ...(call.provisional && {
+                  provisional: call.provisional.filter(
+                    (id) => id !== toolCallId
+                  )
+                })
+              };
+              await this.#handle(at.session).internal_setAnnotation(
+                PARKED_KIND,
+                at.messageId,
+                JSON.stringify(stored)
+              );
+            });
+          }
+          // The step keeps which call it ran, so a replay that reaches this
+          // position with another call doesn't take its result.
+          return { ...outcome, call: key };
+        }) as unknown as (attempt: TaskStepAttempt) => Promise<TaskValue>
+      );
+      scope.running.set(toolCallId, step);
+      try {
+        const recorded = (await step) as unknown as KeptOutcome;
+        if (recorded.call !== undefined && recorded.call !== key) {
+          // The step's call ran: what it did is kept for its position, so
+          // a park after this carries it, and it never runs again.
+          scope.made[toolCallId] = recorded;
+          return { ok: false, errorText: DIVERGED_CALL_ERROR };
+        }
+        const outcome = givenOutcome(recorded);
+        // A call the park cut short: a tool safe to rerun runs again after
+        // the approval; any other is reported interrupted, since what it did
+        // is unknown.
+        const kept = keptOutcome(outcome, scope, tool, toolCallId, key);
+        if (kept) scope.made[toolCallId] = kept;
+        return outcome;
+      } finally {
+        scope.running.delete(toolCallId);
+      }
+    };
+  }
+
+  /** Keep what a parked tool called, for the run after its approval. */
+  async #park(
+    session: ThinkSessionId,
+    messageId: string,
+    toolCallId: string,
+    call: ParkedCall
+  ): Promise<void> {
+    await this.#parkedEdit(session, messageId, async () => {
+      const stored = await this.#parkedCalls(session, messageId);
+      stored[toolCallId] = call;
+      await this.#handle(session).internal_setAnnotation(
+        PARKED_KIND,
+        messageId,
+        JSON.stringify(stored)
+      );
+    });
+  }
+
+  /** One message's parked-call edits, one after another, by message. */
+  readonly #parkedEdits = new Map<string, Promise<void>>();
+
+  /**
+   * Run `edit` after the message's earlier parked-call edits: tools of one
+   * step park at once, and each read-modify-write must see the last.
+   */
+  async #parkedEdit(
+    session: ThinkSessionId,
+    messageId: string,
+    edit: () => Promise<void>
+  ): Promise<void> {
+    const key = JSON.stringify([session, messageId]);
+    const before = this.#parkedEdits.get(key) ?? Promise.resolve();
+    const done = before.then(edit, edit);
+    const settled = done.catch(() => {});
+    this.#parkedEdits.set(key, settled);
+    try {
+      await done;
+    } finally {
+      // The last edit in line clears the entry, so the map stays bounded.
+      if (this.#parkedEdits.get(key) === settled) {
+        this.#parkedEdits.delete(key);
+      }
+    }
+  }
+
+  /** Forget what a parked tool kept, once its approval is used. */
+  async #unpark(
+    session: ThinkSessionId,
+    messageId: string,
+    toolCallId: string
+  ): Promise<void> {
+    await this.#parkedEdit(session, messageId, async () => {
+      const stored = await this.#parkedCalls(session, messageId);
+      if (!Object.hasOwn(stored, toolCallId)) return;
+      delete stored[toolCallId];
+      const handle = this.#handle(session);
+      if (Object.keys(stored).length === 0) {
+        await handle.internal_deleteAnnotation(PARKED_KIND, messageId);
+      } else {
+        await handle.internal_setAnnotation(
+          PARKED_KIND,
+          messageId,
+          JSON.stringify(stored)
+        );
+      }
+    });
+  }
+
+  /** What a tool parked for an approval kept, by its call id, if any. */
+  async #parkedCalls(
+    session: ThinkSessionId,
+    messageId: string
+  ): Promise<Record<string, ParkedCall>> {
+    const stored = (
+      await this.#handle(session).internal_annotations(PARKED_KIND, [messageId])
+    ).get(messageId);
+    return stored ? (JSON.parse(stored) as Record<string, ParkedCall>) : {};
+  }
+
+  /**
    * Run a model step's server tool calls, each as a durable step of the
    * turn's run, and stream their results. A call that needs approval is
    * asked for instead. Returns the reply with the results in it.
@@ -2651,7 +3155,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     const toRun: ToolCallPart[] = [];
     for (const part of calls) {
       const toolName = toolNameOf(part);
-      const tool = Object.hasOwn(tools, toolName) ? tools[toolName] : undefined;
+      const tool = offeredTool(tools, toolName);
       if (tool && part.state === "input-available") {
         const needsApproval =
           (await this.#options.toolApproval?.({
@@ -2702,15 +3206,24 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     // Each call's result is streamed as it finishes, so a reset after one
     // of several leaves the finished ones in the reply.
     const finished: { toolCallId: string; outcome: ToolOutcome }[] = [];
+    // Calls that parked for an approval inside them.
+    const parkedCalls: { toolCallId: string; approvalId: string }[] = [];
     let wake = () => {};
     let left = toRun.length;
     const all = Promise.all(
       toRun.map(async (part) => {
         const toolName = toolNameOf(part);
-        const tool = Object.hasOwn(tools, toolName)
-          ? tools[toolName]
-          : undefined;
+        const tool = offeredTool(tools, toolName);
         const { toolCallId } = part;
+        // Parked for an approval inside it: what it called before is
+        // answered from what it kept, and the approved call runs.
+        // Read in line with the edits, so a sibling that settled late is in.
+        let kept: ParkedCall | undefined;
+        if (part.state === "approval-responded" && part.approval.approved) {
+          await this.#parkedEdit(session, current.id, async () => {
+            kept = (await this.#parkedCalls(session, current.id))[toolCallId];
+          });
+        }
         try {
           // SAFETY: the step returns what the function below returns.
           const recorded = (await turn.run.do(
@@ -2765,10 +3278,38 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
               if (decision?.action === "run" && decision.input !== undefined) {
                 input = decision.input;
               }
-              const outcome = await executeTool(tool, input, {
+              let markParked = () => {};
+              const parked = new Promise<undefined>((resolve) => {
+                markParked = () => resolve(undefined);
+              });
+              const parking = new AbortController();
+              const scope: InvokeScope = {
+                signal,
+                seed: kept?.calls ?? {},
+                ...(kept?.inflight &&
+                  kept.inflight.length > 0 && {
+                    unknown: new Set(kept.inflight)
+                  }),
+                ...(kept && { approved: kept.pending }),
+                made: {},
+                parking,
+                park: markParked,
+                running: new Map(),
+                settled: new Map(),
+                provisional: new Set(kept?.provisional)
+              };
+              const running = executeTool(tool, input, {
                 toolCallId,
                 messages: modelMessages,
-                abortSignal: signal,
+                abortSignal: AbortSignal.any([signal, parking.signal]),
+                invoke: this.#invoker(
+                  turn,
+                  stepIndex,
+                  tools,
+                  modelMessages,
+                  toolCallId,
+                  scope
+                ),
                 onPreliminary: (output) =>
                   this.#events.emit(session, {
                     type: "chunk",
@@ -2781,6 +3322,57 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                     }
                   })
               });
+              // A tool that parks is aborted; what it returns is dropped.
+              running.catch(() => {});
+              const outcome = await Promise.race([running, parked]);
+              if (!outcome || scope.parked) {
+                const pending = scope.parked;
+                if (!pending) throw new Error("A tool parked without a call");
+                // The approval is asked at once. Calls its siblings still
+                // run are kept as running; each adds its outcome when it
+                // settles (the park aborted them).
+                // The snapshot and `scope.kept` are taken together: a call
+                // that settles after this adds itself behind the park.
+                const calls: Record<string, ToolOutcome> = {
+                  ...scope.seed,
+                  ...scope.made
+                };
+                for (const [id, settled] of scope.settled) {
+                  if (settled) calls[id] = settled;
+                }
+                // A call the parked one was made under is no sibling: it
+                // runs again on the approved path.
+                const inflight = [...scope.running.keys()].filter(
+                  (id) =>
+                    !scope.settled.has(id) &&
+                    !isAncestorOf(id, pending.toolCallId)
+                );
+                const generation = crypto.randomUUID();
+                scope.kept = {
+                  session,
+                  messageId: current.id,
+                  toolCallId,
+                  generation
+                };
+                await this.#park(session, current.id, toolCallId, {
+                  calls,
+                  pending,
+                  generation,
+                  ...(inflight.length > 0 && { inflight }),
+                  ...(scope.provisional.size > 0 && {
+                    provisional: [...scope.provisional]
+                  })
+                });
+                // The approval names the exact call it asks for, so an
+                // answer to an earlier request (other input at the same
+                // position) doesn't answer this one.
+                return {
+                  parked: pending.toolCallId,
+                  approval: `approval:${pending.toolCallId}#${digestOf(pending.input)}`
+                } as TaskJson;
+              }
+              // Run to the end: what it kept is no longer needed.
+              if (kept) await this.#unpark(session, current.id, toolCallId);
               // Journaled as JSON: an output's own `toJSON` decides its form.
               return {
                 input: asJson(input),
@@ -2790,12 +3382,17 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                   : outcome
               } as TaskJson;
             }
-          )) as unknown as {
-            outcome: ToolOutcome;
-            input: unknown;
-            attempt?: number;
-          };
+          )) as unknown as
+            | { outcome: ToolOutcome; input: unknown; attempt?: number }
+            | { parked: string; approval?: string };
           if (signal.aborted) return;
+          if ("parked" in recorded) {
+            parkedCalls.push({
+              toolCallId,
+              approvalId: recorded.approval ?? `approval:${recorded.parked}`
+            });
+            return;
+          }
           await this.#extensions.hook("afterToolCall", {
             session,
             operationId,
@@ -2845,6 +3442,26 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
     }
     // A step that ended the attempt (a reset, a suspension) ends it here.
     await all;
+    if (signal.aborted) return current;
+    for (const { toolCallId, approvalId } of parkedCalls) {
+      current = withToolPart(
+        current,
+        toolCallId,
+        (part) =>
+          // SAFETY: the new state is set with exactly the fields it requires.
+          ({
+            ...part,
+            state: "approval-requested",
+            approval: { id: approvalId }
+          }) as ToolCallPart
+      );
+      turn.live.reply = current;
+      yield {
+        type: "tool-approval-request",
+        approvalId,
+        toolCallId
+      } as UIMessageChunk;
+    }
     return current;
   }
 
@@ -3686,6 +4303,15 @@ function toolHash(tool: ToolSet[string] | undefined): Promise<string> {
     toolHashes.set(tool, made);
   }
   return made;
+}
+
+/** The tool the model may call by this name: one it was offered. */
+function offeredTool(
+  tools: ToolSet,
+  name: string
+): ToolSet[string] | undefined {
+  const tool = Object.hasOwn(tools, name) ? tools[name] : undefined;
+  return tool && callableBy(tool, "model") ? tool : undefined;
 }
 
 function toolRecovery(tool: object): ToolRecovery {

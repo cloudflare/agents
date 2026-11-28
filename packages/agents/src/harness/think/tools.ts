@@ -5,6 +5,7 @@
  * calls, and the harness decides how to run, approve, or recover each one.
  */
 import type { ModelMessage, Tool, ToolSet } from "ai";
+import type { ToolInvoke } from "./extensions/types";
 
 /** The model-facing copy of a tool set, restricted to `activeTools` if given. */
 export function modelTools(
@@ -15,6 +16,7 @@ export function modelTools(
   const offered: ToolSet = {};
   for (const [name, tool] of Object.entries(tools)) {
     if (active && !active.has(name)) continue;
+    if (!callableBy(tool, "model")) continue;
     if (tool.type === "provider") {
       offered[name] = tool;
       continue;
@@ -24,13 +26,24 @@ export function modelTools(
       needsApproval: _needsApproval,
       ...definition
     } = tool;
-    // A tool's `recovery` field is the harness's, not the model's.
+    // A tool's `recovery` and `callers` fields are the harness's, not the
+    // model's.
     if ("recovery" in definition) delete definition.recovery;
+    if ("callers" in definition) delete definition.callers;
     // SAFETY: a tool without `execute` and `needsApproval` is still a tool
     // of the same kind; both fields are optional on every Tool variant.
     offered[name] = definition as ToolSet[string];
   }
   return offered;
+}
+
+/**
+ * Whether the model, or another tool's code (`invoke`), may call this
+ * tool: its `callers` field, `["model", "code"]` when it has none.
+ */
+export function callableBy(tool: Tool, caller: "model" | "code"): boolean {
+  const callers = (tool as { callers?: unknown }).callers;
+  return !Array.isArray(callers) || callers.includes(caller);
 }
 
 /** Whether the harness runs this tool, as opposed to a client or provider. */
@@ -84,6 +97,8 @@ export async function executeTool(
     readonly messages: ModelMessage[];
     readonly abortSignal: AbortSignal;
     readonly onPreliminary: (output: unknown) => void;
+    /** Given to the tool as its options' `invoke`. */
+    readonly invoke?: ToolInvoke;
   }
 ): Promise<ToolOutcome> {
   const execute = tool.execute;
@@ -95,8 +110,9 @@ export async function executeTool(
       toolCallId: options.toolCallId,
       messages: options.messages,
       abortSignal: options.abortSignal,
-      context: undefined
-    });
+      context: undefined,
+      ...(options.invoke && { invoke: options.invoke })
+    } as Parameters<typeof execute>[1]);
     if (!isAsyncIterable(result)) return { ok: true, output: result };
     let last: unknown;
     let seen = false;

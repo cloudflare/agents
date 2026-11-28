@@ -18,6 +18,10 @@ import { Tasks } from "../../../tasks/tasks";
 import type { Session } from "../../../sessions/handle";
 import { WebSockets } from "../../../websockets/websockets";
 import { ThinkChat } from "../chat";
+import type { ToolInvoke } from "../extensions/types";
+import { codemode, sandboxExecutor } from "../extensions/index";
+export { CodemodeSandbox } from "../extensions/codemode";
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import {
   classifyContextOverflow,
   SteerNotSupportedError,
@@ -45,6 +49,21 @@ const BEFORE_TURN_CALLS_KEY = "test:before-turn:calls";
 /** `operationChunks` and `followOperation` lengths at each `beforeTurn`. */
 const OPERATION_CHUNKS_KEY = "test:before-turn:operation-chunks";
 const SYSTEM_KEY = "test:system";
+const CODE_COUNT_KEY = "test:code-count";
+const SANDBOXED_KEY = "test:sandboxed";
+const TRIPLED_KEY = "test:tripled";
+const RELAY_ABORTED_KEY = "relay-aborted";
+const ABORTABLE_RUNS_KEY = "abortable-runs";
+const WRITE_RUNS_KEY = "write-runs";
+const READ_RUNS_KEY = "read-runs";
+const RECEIPT_RUNS_KEY = "receipt-runs";
+const RECEIPT_HOPS_KEY = "receipt-hops";
+const PENDING_RUNS_KEY = "pending-runs";
+const ORDER_RUNS_KEY = "order-runs";
+const LABEL_RUNS_KEY = "label-runs";
+const PENDING_RELEASE_KEY = "pending-release";
+const DANGEROUS_FLAVOR_KEY = "dangerous-flavor";
+const COMPOSE_ABORTED_KEY = "test:compose-aborted";
 const NOTE_IN_BEFORE_TURN_KEY = "test:note-in-before-turn";
 const ACTIVE_TOOLS_KEY = "test:active-tools";
 const LATE_EXAMPLES_KEY = "test:late-examples";
@@ -235,6 +254,381 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
           inputSchema: z.object({}),
           execute: () => this.#gate()
         }),
+        // Offered to other tools' code only.
+        tripled: {
+          ...tool({
+            description: "Triple a number",
+            inputSchema: z.object({ value: z.number() }),
+            execute: async ({ value }) => {
+              const kv = this.ctx.storage.kv;
+              kv.put(TRIPLED_KEY, (kv.get<number>(TRIPLED_KEY) ?? 0) + 1);
+              return value * 3;
+            }
+          }),
+          callers: ["code"] as const
+        },
+        // Calls multiply, then tripled (then gate_safe), through invoke.
+        compose: {
+          ...tool({
+            description: "Multiply by three, then triple",
+            inputSchema: z.object({
+              gate: z.boolean().optional(),
+              approve: z.boolean().optional(),
+              parallel: z.boolean().optional(),
+              relay: z.boolean().optional(),
+              abortable: z.boolean().optional(),
+              write: z.boolean().optional(),
+              receipt: z.boolean().optional(),
+              rounds: z.boolean().optional(),
+              pending: z.boolean().optional(),
+              order: z.boolean().optional(),
+              orderGate: z.boolean().optional(),
+              orderGateApprove: z.boolean().optional(),
+              keyOrder: z.boolean().optional()
+            }),
+            execute: async (
+              {
+                gate,
+                approve,
+                parallel,
+                relay,
+                abortable,
+                write,
+                receipt,
+                rounds,
+                pending,
+                order,
+                orderGate,
+                orderGateApprove,
+                keyOrder
+              },
+              options
+            ) => {
+              const { invoke } = options as unknown as { invoke: ToolInvoke };
+              // A write that commits and returns its receipt when aborted.
+              if (receipt) {
+                const writing = invoke("receipt_write", {});
+                while (!this.ctx.storage.kv.get<number>(RECEIPT_RUNS_KEY)) {
+                  await new Promise((resolve) => setTimeout(resolve, 5));
+                }
+                const [written, done] = await Promise.all([
+                  writing,
+                  invoke("dangerous", {})
+                ]);
+                if (!written.ok) return written.errorText;
+                return done.ok ? `${written.output}` : done.errorText;
+              }
+              // Two calls whose order flips on the rerun, then an approval
+              // (or, with `orderGate`, the gate an eviction cuts short).
+              // The same input, its keys in another order on the rerun.
+              if (keyOrder) {
+                const kv = this.ctx.storage.kv;
+                const runs = (kv.get<number>(ORDER_RUNS_KEY) ?? 0) + 1;
+                kv.put(ORDER_RUNS_KEY, runs);
+                const paired = await invoke(
+                  "pair",
+                  runs === 1 ? { x: "1", y: "2" } : { y: "2", x: "1" }
+                );
+                const done = await invoke("dangerous", {});
+                if (!done.ok) return done.errorText;
+                return paired.ok ? `pair ${paired.output}` : paired.errorText;
+              }
+              if (order || orderGate || orderGateApprove) {
+                const kv = this.ctx.storage.kv;
+                const runs = (kv.get<number>(ORDER_RUNS_KEY) ?? 0) + 1;
+                kv.put(ORDER_RUNS_KEY, runs);
+                const [first, second] = runs === 1 ? ["a", "b"] : ["b", "a"];
+                const one = await invoke("label", { label: first });
+                const two = await invoke("label", { label: second });
+                const last =
+                  orderGate || orderGateApprove
+                    ? await invoke("gate_safe", {})
+                    : await invoke("dangerous", {});
+                if (!last.ok) return last.errorText;
+                // Then an approval, after the eviction.
+                if (orderGateApprove) {
+                  const done = await invoke("dangerous", {});
+                  if (!done.ok) return done.errorText;
+                }
+                const said = (o: typeof one) => (o.ok ? o.output : o.errorText);
+                return `${first}: ${said(one)}; ${second}: ${said(two)}`;
+              }
+              // A write still running at the first approval, then a second
+              // approval.
+              if (pending) {
+                const kv = this.ctx.storage.kv;
+                const before = kv.get<number>(PENDING_RUNS_KEY) ?? 0;
+                const writing = invoke("pending_write", {});
+                let answered = false;
+                const settle = () => {
+                  answered = true;
+                };
+                void writing.then(settle, settle);
+                while (
+                  !answered &&
+                  (kv.get<number>(PENDING_RUNS_KEY) ?? 0) <= before
+                ) {
+                  await new Promise((resolve) => setTimeout(resolve, 5));
+                }
+                const [written, first] = await Promise.all([
+                  writing,
+                  invoke("dangerous", { flavor: "one" })
+                ]);
+                if (!first.ok) return first.errorText;
+                const second = await invoke("dangerous", { flavor: "two" });
+                if (!second.ok) return second.errorText;
+                return written.ok ? `${written.output}` : written.errorText;
+              }
+              // A read beside one approval, then a second approval.
+              if (rounds) {
+                // The read has started (or was answered) before its
+                // sibling asks.
+                const kv = this.ctx.storage.kv;
+                const before = kv.get<number>(READ_RUNS_KEY) ?? 0;
+                const reading = invoke("versioned_read", {});
+                let answered = false;
+                const settle = () => {
+                  answered = true;
+                };
+                void reading.then(settle, settle);
+                while (
+                  !answered &&
+                  (kv.get<number>(READ_RUNS_KEY) ?? 0) <= before
+                ) {
+                  await new Promise((resolve) => setTimeout(resolve, 5));
+                }
+                const [read, first] = await Promise.all([
+                  reading,
+                  invoke("dangerous", { flavor: "one" })
+                ]);
+                if (!first.ok) return first.errorText;
+                const second = await invoke("dangerous", { flavor: "two" });
+                if (!second.ok) return second.errorText;
+                return read.ok ? `read ${read.output}` : read.errorText;
+              }
+              // A write the park cuts short.
+              if (write) {
+                const writing = invoke("abortable_write", {});
+                while (!this.ctx.storage.kv.get<number>(WRITE_RUNS_KEY)) {
+                  await new Promise((resolve) => setTimeout(resolve, 5));
+                }
+                const [written, done] = await Promise.all([
+                  writing,
+                  invoke("dangerous", {})
+                ]);
+                if (!written.ok) return written.errorText;
+                return done.ok ? done.output : done.errorText;
+              }
+              // A sibling that stops when the park aborts it.
+              if (abortable) {
+                const slow = invoke("abortable_slow", {});
+                while (!this.ctx.storage.kv.get<number>(ABORTABLE_RUNS_KEY)) {
+                  await new Promise((resolve) => setTimeout(resolve, 5));
+                }
+                const [slowed, done] = await Promise.all([
+                  slow,
+                  invoke("dangerous", {})
+                ]);
+                if (!slowed.ok) return slowed.errorText;
+                return done.ok ? done.output : done.errorText;
+              }
+              // A write still running when its sibling asks for approval.
+              if (parallel) {
+                const writing = invoke("gate_safe", {});
+                // The write has started before its sibling asks.
+                while (!this.ctx.storage.kv.get<number>(GATE_RUNS_KEY)) {
+                  await new Promise((resolve) => setTimeout(resolve, 5));
+                }
+                const [written, done] = await Promise.all([
+                  writing,
+                  invoke("dangerous", {})
+                ]);
+                if (!written.ok) return written.errorText;
+                return done.ok ? done.output : done.errorText;
+              }
+              // The call that asks for approval is made by a nested tool.
+              if (relay) {
+                const relayed = await invoke("relay", {});
+                return relayed.ok ? relayed.output : relayed.errorText;
+              }
+              const multiplied = await invoke("multiply", { value: 1 });
+              if (!multiplied.ok) return multiplied.errorText;
+              const tripled = await invoke("tripled", {
+                value: multiplied.output
+              });
+              if (!tripled.ok) return tripled.errorText;
+              if (gate) {
+                const gated = await invoke("gate_safe", {});
+                if (!gated.ok) return gated.errorText;
+              }
+              if (approve) {
+                options.abortSignal?.addEventListener("abort", () =>
+                  this.ctx.storage.kv.put(COMPOSE_ABORTED_KEY, true)
+                );
+                const flavor =
+                  this.ctx.storage.kv.get<string>(DANGEROUS_FLAVOR_KEY);
+                const done = await invoke(
+                  "dangerous",
+                  flavor === undefined ? {} : { flavor }
+                );
+                return done.ok ? done.output : done.errorText;
+              }
+              return tripled.output;
+            }
+          }),
+          recovery: "rerun" as const
+        },
+        // Code-only: waits for the release, or stops when aborted.
+        abortable_slow: {
+          ...tool({
+            description: "Wait, unless aborted",
+            inputSchema: z.object({}),
+            execute: async (_input, options) => {
+              const kv = this.ctx.storage.kv;
+              kv.put(
+                ABORTABLE_RUNS_KEY,
+                (kv.get<number>(ABORTABLE_RUNS_KEY) ?? 0) + 1
+              );
+              while (!kv.get(RELEASE_KEY)) {
+                if (options.abortSignal?.aborted)
+                  throw new Error("slow aborted");
+                await new Promise((resolve) => setTimeout(resolve, 5));
+              }
+              return "slow done";
+            }
+          }),
+          callers: ["code"] as const,
+          // Safe to run again: a park that cuts it short reruns it.
+          recovery: "rerun" as const
+        },
+        // Code-only, not safe to rerun: commits, and returns its receipt
+        // as soon as it's aborted.
+        receipt_write: {
+          ...tool({
+            description: "Write and return a receipt",
+            inputSchema: z.object({}),
+            execute: async (_input, options) => {
+              const kv = this.ctx.storage.kv;
+              kv.put(
+                RECEIPT_RUNS_KEY,
+                (kv.get<number>(RECEIPT_RUNS_KEY) ?? 0) + 1
+              );
+              await new Promise<void>((resolve) => {
+                if (options.abortSignal?.aborted) resolve();
+                options.abortSignal?.addEventListener("abort", () => resolve());
+              });
+              // Settles this many microtasks after the abort: a test walks
+              // it across the park.
+              const hops = kv.get<number>(RECEIPT_HOPS_KEY) ?? 0;
+              for (let i = 0; i < hops; i++) {
+                await (i % 2
+                  ? Promise.resolve()
+                  : new Promise((resolve) => setTimeout(resolve, 0)));
+              }
+              return "receipt";
+            }
+          }),
+          callers: ["code"] as const
+        },
+        // Code-only: joins its two fields, counted with the labels.
+        pair: {
+          ...tool({
+            description: "Join two strings",
+            inputSchema: z.object({ x: z.string(), y: z.string() }),
+            execute: async ({ x, y }) => {
+              const kv = this.ctx.storage.kv;
+              kv.put(LABEL_RUNS_KEY, (kv.get<number>(LABEL_RUNS_KEY) ?? 0) + 1);
+              return `${x}${y}`;
+            }
+          }),
+          callers: ["code"] as const
+        },
+        // Code-only: says the label it was given, and counts its runs.
+        label: {
+          ...tool({
+            description: "Say a label",
+            inputSchema: z.object({ label: z.string() }),
+            execute: async ({ label }) => {
+              const kv = this.ctx.storage.kv;
+              kv.put(LABEL_RUNS_KEY, (kv.get<number>(LABEL_RUNS_KEY) ?? 0) + 1);
+              return `label ${label}`;
+            }
+          }),
+          callers: ["code"] as const
+        },
+        // Code-only, not safe to rerun: a write that runs on past a park
+        // until released.
+        pending_write: {
+          ...tool({
+            description: "Write, when released",
+            inputSchema: z.object({}),
+            execute: async () => {
+              const kv = this.ctx.storage.kv;
+              kv.put(
+                PENDING_RUNS_KEY,
+                (kv.get<number>(PENDING_RUNS_KEY) ?? 0) + 1
+              );
+              while (!kv.get(PENDING_RELEASE_KEY)) {
+                await new Promise((resolve) => setTimeout(resolve, 5));
+              }
+              return "pending receipt";
+            }
+          }),
+          callers: ["code"] as const
+        },
+        // Code-only, safe to rerun: read n waits for its own release, and
+        // returns `v<n>`.
+        versioned_read: {
+          ...tool({
+            description: "Read a version",
+            inputSchema: z.object({}),
+            execute: async () => {
+              const kv = this.ctx.storage.kv;
+              const n = (kv.get<number>(READ_RUNS_KEY) ?? 0) + 1;
+              kv.put(READ_RUNS_KEY, n);
+              while (!kv.get(`read-release:${n}`)) {
+                await new Promise((resolve) => setTimeout(resolve, 5));
+              }
+              return `v${n}`;
+            }
+          }),
+          callers: ["code"] as const,
+          recovery: "rerun" as const
+        },
+        // Code-only, not safe to rerun: a write the park may cut short.
+        abortable_write: {
+          ...tool({
+            description: "Write, unless aborted",
+            inputSchema: z.object({}),
+            execute: async (_input, options) => {
+              const kv = this.ctx.storage.kv;
+              kv.put(WRITE_RUNS_KEY, (kv.get<number>(WRITE_RUNS_KEY) ?? 0) + 1);
+              while (!kv.get(RELEASE_KEY)) {
+                if (options.abortSignal?.aborted)
+                  throw new Error("write aborted");
+                await new Promise((resolve) => setTimeout(resolve, 5));
+              }
+              return "written";
+            }
+          }),
+          callers: ["code"] as const
+        },
+        // Code-only: calls dangerous, and notes when it's aborted.
+        relay: {
+          ...tool({
+            description: "Call dangerous",
+            inputSchema: z.object({}),
+            execute: async (_input, options) => {
+              const { invoke } = options as unknown as { invoke: ToolInvoke };
+              options.abortSignal?.addEventListener("abort", () =>
+                this.ctx.storage.kv.put(RELAY_ABORTED_KEY, true)
+              );
+              const done = await invoke("dangerous", {});
+              return done.ok ? done.output : done.errorText;
+            }
+          }),
+          callers: ["code"] as const
+        },
         // Gone from the tools once a test removes it.
         ...(!this.ctx.storage.kv.get<boolean>(NO_GATE_SAFE_KEY) && {
           gate_safe: {
@@ -250,7 +644,7 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         ...(!this.ctx.storage.kv.get<boolean>(NO_DANGEROUS_KEY) && {
           dangerous: tool({
             description: "Needs approval",
-            inputSchema: z.object({}),
+            inputSchema: z.object({ flavor: z.string().optional() }),
             needsApproval: true,
             execute: async () => {
               const runs =
@@ -554,6 +948,34 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
         parts = callReply([
           { name: "multiply", input: { value: 5 }, id: "constructor" }
         ]);
+      } else if (text === "compose approve twice") {
+        parts = callReply([
+          { name: "compose", input: { approve: true }, id: "compose-1" },
+          { name: "compose", input: { approve: true }, id: "compose-2" }
+        ]);
+      } else if (text.startsWith("compose")) {
+        parts = callReply([
+          {
+            name: "compose",
+            input: {
+              gate: text === "compose gate",
+              approve: text === "compose approve",
+              parallel: text === "compose parallel",
+              relay: text === "compose relay",
+              abortable: text === "compose abortable",
+              write: text === "compose write",
+              receipt: text === "compose receipt",
+              rounds: text === "compose rounds",
+              pending: text === "compose pending",
+              order: text === "compose order",
+              orderGate: text === "compose order gate",
+              orderGateApprove: text === "compose order gate approve",
+              keyOrder: text === "compose key order"
+            }
+          }
+        ]);
+      } else if (text === "call tripled") {
+        parts = callReply([{ name: "tripled", input: { value: 2 } }]);
       } else if (text === "two tools") {
         parts = callReply([
           { name: "multiply", input: { value: 2 } },
@@ -840,6 +1262,106 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
 
   returnMessagesFromBeforeTurn(messages: ModelMessage[]): void {
     this.ctx.storage.kv.put(RETURNED_MESSAGES_KEY, messages);
+  }
+
+  pendingApprovals(session?: string) {
+    return this.harness.pendingApprovals(this.harness.session(session).id);
+  }
+
+  composeAborted(): boolean {
+    return this.ctx.storage.kv.get<boolean>(COMPOSE_ABORTED_KEY) ?? false;
+  }
+
+  labelRuns(): number {
+    return this.ctx.storage.kv.get<number>(LABEL_RUNS_KEY) ?? 0;
+  }
+
+  dangerousCount(): number {
+    return this.ctx.storage.kv.get<number>(DANGEROUS_RUNS_KEY) ?? 0;
+  }
+
+  pendingRuns(): number {
+    return this.ctx.storage.kv.get<number>(PENDING_RUNS_KEY) ?? 0;
+  }
+
+  releasePending(): void {
+    this.ctx.storage.kv.put(PENDING_RELEASE_KEY, true);
+  }
+
+  setReceiptHops(hops: number): void {
+    this.ctx.storage.kv.put(RECEIPT_HOPS_KEY, hops);
+  }
+
+  receiptRuns(): number {
+    return this.ctx.storage.kv.get<number>(RECEIPT_RUNS_KEY) ?? 0;
+  }
+
+  /** Resolve once the versioned read has started `runs` times. */
+  async readStarted(runs: number): Promise<void> {
+    for (let i = 0; i < 300; i++) {
+      if ((this.ctx.storage.kv.get<number>(READ_RUNS_KEY) ?? 0) >= runs) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error("The read never started");
+  }
+
+  releaseRead(n: number): void {
+    this.ctx.storage.kv.put(`read-release:${n}`, true);
+  }
+
+  writeRuns(): number {
+    return this.ctx.storage.kv.get<number>(WRITE_RUNS_KEY) ?? 0;
+  }
+
+  /** The calls the parked tools kept, across every annotation. */
+  parkedKept(): number {
+    let n = 0;
+    for (const row of this.ctx.storage.sql.exec<{ value: string }>(
+      "SELECT value FROM cf_agents_session_annotations WHERE kind = 'think:parked-calls'"
+    )) {
+      for (const call of Object.values(
+        JSON.parse(row.value) as Record<string, { calls: object }>
+      )) {
+        n += Object.keys(call.calls).length;
+      }
+    }
+    return n;
+  }
+
+  abortableRuns(): number {
+    return this.ctx.storage.kv.get<number>(ABORTABLE_RUNS_KEY) ?? 0;
+  }
+
+  relayAborted(): boolean {
+    return this.ctx.storage.kv.get<boolean>(RELAY_ABORTED_KEY) ?? false;
+  }
+
+  setDangerousFlavor(flavor: string): void {
+    this.ctx.storage.kv.put(DANGEROUS_FLAVOR_KEY, flavor);
+  }
+
+  /** The parked calls kept, across every message and session. */
+  parkedCalls(): number {
+    let n = 0;
+    for (const row of this.ctx.storage.sql.exec<{ value: string }>(
+      "SELECT value FROM cf_agents_session_annotations WHERE kind = 'think:parked-calls'"
+    )) {
+      n += Object.keys(JSON.parse(row.value) as object).length;
+    }
+    return n;
+  }
+
+  /** Messages with what a parked tool kept. */
+  parkedAnnotations(): number {
+    return this.ctx.storage.sql
+      .exec<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM cf_agents_session_annotations WHERE kind = 'think:parked-calls'"
+      )
+      .one().n;
+  }
+
+  tripledRuns(): number {
+    return this.ctx.storage.kv.get<number>(TRIPLED_KEY) ?? 0;
   }
 
   addLateTool(): void {
@@ -2200,6 +2722,187 @@ function summarize(messages: readonly UIMessage[]): string[] {
     });
     return `${message.role}: ${pieces.join(" ")}`;
   });
+}
+
+/** ThinkHarness with codemode installed last, over a Worker executor. */
+export class ThinkCodemodeObject extends DurableObject<Cloudflare.Env> {
+  readonly prompts: PromptMessage[][] = [];
+  readonly offered: string[][] = [];
+  readonly harness = new ThinkHarness({
+    system: "You are a test.",
+    model: new MockLanguageModelV4({
+      doStream: async ({ prompt, tools }) => {
+        // SAFETY: the mock's prompt is the provider's message list.
+        const messages = prompt as unknown as PromptMessage[];
+        this.prompts.push(messages);
+        this.offered.push((tools ?? []).map((offered) => offered.name));
+        const last = messages.filter((m) => m.role !== "system").at(-1);
+        const parts =
+          last?.role === "tool"
+            ? textReply(`tool said: ${toolResultText(last.content)}`)
+            : callReply([
+                {
+                  name: "code",
+                  input: { code: contentText(last?.content) }
+                }
+              ]);
+        return {
+          stream: new ReadableStream<StreamPart>({
+            start(controller) {
+              for (const part of parts) controller.enqueue(part);
+              controller.close();
+            }
+          })
+        };
+      }
+    }),
+    tools: () => ({
+      multiply: tool({
+        description: "Multiply by three",
+        inputSchema: z.object({ value: z.number() }),
+        execute: async ({ value }) => value * 3
+      }),
+      count: tool({
+        description: "Count the calls",
+        inputSchema: z.object({}),
+        execute: async () => {
+          const kv = this.ctx.storage.kv;
+          const n = (kv.get<number>(CODE_COUNT_KEY) ?? 0) + 1;
+          kv.put(CODE_COUNT_KEY, n);
+          return n;
+        }
+      }),
+      wait_here: {
+        ...tool({
+          description: "Wait until released; safe to rerun",
+          inputSchema: z.object({}),
+          execute: async () => {
+            const kv = this.ctx.storage.kv;
+            kv.put(GATE_RUNS_KEY, (kv.get<number>(GATE_RUNS_KEY) ?? 0) + 1);
+            while (!kv.get(RELEASE_KEY)) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            return "released";
+          }
+        }),
+        recovery: "rerun" as const
+      },
+      dangerous: tool({
+        description: "Needs approval",
+        inputSchema: z.object({}),
+        needsApproval: true,
+        execute: async () => "ran"
+      }),
+      // Two names that sanitize alike.
+      "get-file": tool({
+        description: "Get a file (dashed)",
+        inputSchema: z.object({}),
+        execute: async () => "dashed"
+      }),
+      get_file: tool({
+        description: "Get a file (underscored)",
+        inputSchema: z.object({}),
+        execute: async () => "underscored"
+      }),
+      ask: tool({
+        description: "Ask the user (direct)",
+        inputSchema: z.object({ question: z.string() }),
+        execute: async ({ question }) => question
+      })
+    }),
+    // Installed as an app installs it, from the public entry.
+    extensions: [
+      codemode({
+        // In this isolate, or in the sandbox object once a test says so.
+        executor: {
+          execute: (code, providers) =>
+            (this.ctx.storage.kv.get<boolean>(SANDBOXED_KEY)
+              ? sandboxExecutor(
+                  this.env.CODEMODE_SANDBOX,
+                  this.ctx.id.toString()
+                )
+              : new DynamicWorkerExecutor({
+                  loader: (this.env as unknown as { LOADER: WorkerLoader })
+                    .LOADER
+                })
+            ).execute(code, providers)
+        },
+        direct: ["ask"]
+      })
+    ]
+  });
+  readonly lifecycle = Lifecycle.install(this).use(this.harness);
+
+  async prompt(text: string) {
+    const response = await this.harness.session().prompt(text);
+    return { ...response, messages: summarize(response.messages) };
+  }
+
+  submit(text: string): Promise<ThinkReceipt> {
+    return this.harness.session().submit(text);
+  }
+
+  wait(operationId: string): Promise<ThinkOperationResult> {
+    return this.harness.session().wait(operationId);
+  }
+
+  lastOffered(): string[] {
+    return this.offered.at(-1) ?? [];
+  }
+
+  answer(answer: ToolAnswer): Promise<ThinkReceipt> {
+    return this.harness.session().submit(answer);
+  }
+
+  /** The last message's tool parts, as `name state approvalId`. */
+  async lastParts(): Promise<string[]> {
+    const last = (await this.harness.session().messages()).at(-1);
+    return (last?.parts ?? []).flatMap((part) =>
+      "toolCallId" in part
+        ? [
+            `${part.type} ${part.state} ${
+              "approval" in part && part.approval ? part.approval.id : ""
+            }`.trim()
+          ]
+        : []
+    );
+  }
+
+  lastSystem(): string {
+    const prompt = this.prompts.at(-1) ?? [];
+    return prompt
+      .filter((m) => m.role === "system")
+      .map((m) => contentText(m.content) || String(m.content))
+      .join("\n");
+  }
+
+  counted(): number {
+    return this.ctx.storage.kv.get<number>(CODE_COUNT_KEY) ?? 0;
+  }
+
+  useSandbox(): void {
+    this.ctx.storage.kv.put(SANDBOXED_KEY, true);
+  }
+
+  async waitStarted(runs: number): Promise<void> {
+    for (let i = 0; i < 300; i++) {
+      if ((this.ctx.storage.kv.get<number>(GATE_RUNS_KEY) ?? 0) >= runs) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error("wait_here never started");
+  }
+
+  waitRuns(): number {
+    return this.ctx.storage.kv.get<number>(GATE_RUNS_KEY) ?? 0;
+  }
+
+  release(): void {
+    this.ctx.storage.kv.put(RELEASE_KEY, true);
+  }
+
+  alarmTime(): Promise<number | null> {
+    return this.ctx.storage.getAlarm();
+  }
 }
 
 export default {

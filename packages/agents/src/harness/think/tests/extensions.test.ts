@@ -322,6 +322,100 @@ describe("extensions: the build", () => {
     expect(ran).toEqual(["late"]);
   });
 
+  it("lets a later extension make another's tool code-only, which its owner still runs", async () => {
+    const ran: string[] = [];
+    const manager = new ExtensionManager(harnessHookRules);
+    manager.load(
+      "owner",
+      loadInProcess("owner", (ctx) =>
+        ctx.tools.transform((tools) => {
+          tools.set("x", {
+            ...tool({
+              description: "x",
+              inputSchema: z.object({}),
+              execute: async () => {
+                ran.push("owner");
+                return "from the owner";
+              }
+            })
+          });
+        })
+      )
+    );
+    manager.load(
+      "later",
+      loadInProcess("later", (ctx) =>
+        ctx.tools.transform((tools) => {
+          expect(tools.setCallers("x", ["code"])).toBe(true);
+          expect(tools.setCallers("missing", ["code"])).toBe(false);
+        })
+      )
+    );
+    const { tools } = await manager.build("");
+    expect(Object.keys(modelTools(tools, undefined))).toEqual([]);
+    expect((tools.x as { callers?: unknown }).callers).toEqual(["code"]);
+    expect(
+      await tools.x?.execute?.(
+        {},
+        { toolCallId: "c", messages: [], context: undefined }
+      )
+    ).toBe("from the owner");
+    expect(ran).toEqual(["owner"]);
+  });
+
+  it("changes the callers of one name only when two names share a tool", async () => {
+    const shared = tool({
+      description: "shared",
+      inputSchema: z.object({}),
+      execute: async () => "ok"
+    });
+    const manager = new ExtensionManager(harnessHookRules);
+    manager.load(
+      "owner",
+      loadInProcess("owner", (ctx) =>
+        ctx.tools.transform((tools) => {
+          tools.set("lookup", shared);
+          tools.set("search", shared);
+        })
+      )
+    );
+    manager.load(
+      "later",
+      loadInProcess("later", (ctx) =>
+        ctx.tools.transform((tools) => {
+          tools.setCallers("search", ["code"]);
+        })
+      )
+    );
+    const { tools } = await manager.build("");
+    // lookup stays the model's; only search became code-only.
+    expect(Object.keys(modelTools(tools, undefined))).toEqual(["lookup"]);
+  });
+
+  it("keeps a tool's schema when the extension that set it changes its callers at once", async () => {
+    const manager = new ExtensionManager(harnessHookRules);
+    manager.load(
+      "owner",
+      loadInProcess("owner", (ctx) =>
+        ctx.tools.transform((tools) => {
+          tools.set("x", {
+            ...tool({
+              description: "x",
+              inputSchema: z.object({ value: z.number() }),
+              execute: async () => "ok"
+            })
+          });
+          // In the same transform, before the schema has resolved.
+          tools.setCallers("x", ["code"]);
+        })
+      )
+    );
+    const { tools } = await manager.build("");
+    const schema = (tools.x as { inputSchema?: { jsonSchema?: unknown } })
+      .inputSchema;
+    expect(JSON.stringify(schema?.jsonSchema ?? schema)).toContain("value");
+  });
+
   it("keeps a tool callable on the build it came from after a later build drops it", async () => {
     let offered = true;
     const manager = new ExtensionManager(harnessHookRules);

@@ -1,0 +1,451 @@
+/**
+ * Codemode as an extension: the model writes a script, and the tools are
+ * functions it calls.
+ *
+ * Installed last (`after`), it makes every server tool before it callable
+ * by code only, except those in `direct`, and adds one `code` tool whose
+ * definition never changes. The functions are listed in a remind block,
+ * so loading or unloading an extension changes neither the tools sent nor
+ * the recorded prompt: the model gets one reminder.
+ *
+ * A function call is the harness's `invoke`: a recorded step under the
+ * `code` call, with the tool hooks and the called tool's recovery rule.
+ * `code` is a `rerun` tool, so a script cut off by a reset runs again and
+ * each call it already made is answered from its step, in the order the
+ * calls were made. The script runs on an `Executor` from
+ * `@cloudflare/codemode`, which keeps nothing.
+ *
+ * Exported from `agents/harness/think/extensions` (`codemode()`), its own
+ * entry, so a harness without `@cloudflare/codemode` never loads it.
+ */
+import { DurableObject } from "cloudflare:workers";
+import {
+  DynamicWorkerExecutor,
+  generateTypesFromJsonSchema,
+  normalizeCode,
+  sanitizeToolName,
+  truncateResult,
+  type ExecuteResult,
+  type Executor,
+  type ResolvedProvider
+} from "@cloudflare/codemode";
+import { jsonSchema, type JSONSchema7 } from "ai";
+import type { ThinkExtension, ToolInvoke } from "./types";
+import type { ThinkShippedExtension } from "../types";
+
+/** @internal */
+/**
+ * Options for {@link codemode}.
+ *
+ * @experimental
+ */
+export type CodemodeOptions = {
+  /** Runs the scripts. */
+  readonly executor: Executor;
+  /** Tools the model keeps calling directly, besides `code`. */
+  readonly direct?: readonly string[];
+  /**
+   * About how many tokens the function list may take in the prompt.
+   * Default 4000. What doesn't fit is found with `codemode.search`.
+   */
+  readonly maxCatalogTokens?: number;
+};
+
+/** The `code` tool's name. @internal */
+export const CODE_TOOL = "code";
+
+/** The remind block that lists the functions. @internal */
+export const CODEMODE_CATALOG = "codemode";
+
+const DEFAULT_CATALOG_TOKENS = 4000;
+
+const CODE_DESCRIPTION = [
+  "Run a JavaScript async arrow function, and get what it returns.",
+  "The tools you can call from it are async functions, one namespace per",
+  'extension, each taking one object: `await workspace.read({ path: "a.txt" })`.',
+  'They are listed, with their types, in the system prompt under "Functions',
+  'for code". `await codemode.search("query")` finds others by name or',
+  'description, and `await codemode.describe("namespace.name")` gives one\'s',
+  "types. A function whose tool fails throws its error text. The script has",
+  "no network. Return a value rather than printing it."
+].join(" ");
+
+const CODE_INPUT: JSONSchema7 = {
+  type: "object",
+  properties: {
+    code: {
+      type: "string",
+      description: "The script: `async () => { ...; return result; }`"
+    }
+  },
+  required: ["code"]
+};
+
+/** A tool as the type generator takes it. */
+type Described = Parameters<typeof generateTypesFromJsonSchema>[0][string];
+
+/** One function a script can call. */
+type Fn = {
+  readonly tool: string;
+  readonly namespace: string;
+  readonly name: string;
+  readonly description: string;
+  /** Its declaration, as one namespace with only it. */
+  readonly declaration: string;
+};
+
+/** The functions and the catalog for one set of tools. */
+type Catalog = { readonly fns: readonly Fn[]; readonly text: string };
+
+/** The namespace an extension's tools are on: the harness's own are `tools`. */
+function namespaceOf(owner: string): string {
+  return sanitizeToolName(owner === "options" ? "tools" : owner);
+}
+
+function declare(
+  namespace: string,
+  tools: Parameters<typeof generateTypesFromJsonSchema>[0]
+): string {
+  return generateTypesFromJsonSchema(tools).replace(
+    /declare const codemode:/,
+    `declare const ${namespace}:`
+  );
+}
+
+/**
+ * The catalog within `budget` tokens (about four characters each). Each
+ * namespace places its cheapest function before any places a second, and
+ * every namespace is named even when none of its functions fits.
+ */
+function catalogOf(
+  fns: readonly Fn[],
+  entries: ReadonlyMap<string, Described>,
+  budget: number
+): string {
+  const byNamespace = new Map<string, Fn[]>();
+  for (const fn of fns) {
+    const list = byNamespace.get(fn.namespace) ?? [];
+    list.push(fn);
+    byNamespace.set(fn.namespace, list);
+  }
+  for (const list of byNamespace.values()) {
+    list.sort((a, b) => a.declaration.length - b.declaration.length);
+  }
+  const chosen = new Map<string, Fn[]>(
+    [...byNamespace.keys()].map((namespace) => [namespace, []])
+  );
+  let left = budget * 4;
+  for (let round = 0; ; round++) {
+    let placed = false;
+    for (const [namespace, list] of byNamespace) {
+      const fn = list[round];
+      if (!fn || fn.declaration.length > left) continue;
+      chosen.get(namespace)?.push(fn);
+      left -= fn.declaration.length;
+      placed = true;
+    }
+    if (!placed) break;
+  }
+  const sections: string[] = [];
+  for (const [namespace, list] of chosen) {
+    const all = byNamespace.get(namespace) ?? [];
+    const tools = Object.fromEntries(
+      list.flatMap((fn) => {
+        const entry = entries.get(fn.tool);
+        return entry ? [[fn.name, entry] as const] : [];
+      })
+    );
+    const missing = all.length - list.length;
+    sections.push(
+      (list.length > 0
+        ? declare(namespace, tools)
+        : `declare const ${namespace}: {};`) +
+        (missing > 0
+          ? `\n// ${namespace}: ${missing} more, found with codemode.search`
+          : "")
+    );
+  }
+  return sections.join("\n\n");
+}
+
+/** What a script's run gives the model: a header, the script, what it did. */
+function report(
+  code: string,
+  ran: ExecuteResult,
+  calls: readonly string[]
+): unknown {
+  const lines = [
+    ran.error !== undefined
+      ? `The script failed: ${ran.error}`
+      : "The script returned.",
+    "",
+    "```js",
+    code,
+    "```",
+    ""
+  ];
+  if (ran.error === undefined) {
+    // A BigInt is reported as its digits, not as a serialization error.
+    const result = JSON.stringify(ran.result, (_key, value: unknown) =>
+      typeof value === "bigint" ? value.toString() : value
+    );
+    lines.push(`Result: ${result ?? "undefined"}`);
+  }
+  lines.push(`Calls: ${calls.length > 0 ? calls.join(", ") : "none"}`);
+  if (ran.logs && ran.logs.length > 0) lines.push("Logs:", ...ran.logs);
+  return truncateResult(lines.join("\n"));
+}
+
+/**
+ * The sandbox object: a Durable Object that runs scripts in a dynamic
+ * Worker it loads itself, so a script busy computing holds this object,
+ * not the agent. The app exports the class from its Worker entry and
+ * declares it (a binding and a migration); it keeps nothing.
+ *
+ * @experimental
+ */
+export class CodemodeSandbox extends DurableObject<{ LOADER: WorkerLoader }> {
+  /** Run a script; its functions are stubs back to the caller. */
+  run(
+    code: string,
+    providers: ResolvedProvider[],
+    timeout?: number
+  ): Promise<ExecuteResult> {
+    return new DynamicWorkerExecutor({
+      loader: this.env.LOADER,
+      ...(timeout !== undefined && { timeout })
+    }).execute(code, providers);
+  }
+}
+
+/**
+ * An executor that runs each script in the agent's sandbox object, one
+ * per agent (by `name`), instead of in this isolate.
+ *
+ * @experimental
+ */
+export function sandboxExecutor(
+  sandbox: DurableObjectNamespace<CodemodeSandbox>,
+  name: string,
+  options: { readonly timeout?: number } = {}
+): Executor {
+  return {
+    async execute(code, providers) {
+      if (!Array.isArray(providers)) {
+        throw new Error("The sandbox executor takes resolved providers");
+      }
+      const stub = sandbox.get(sandbox.idFromName(name));
+      // The providers' functions cross as stubs, so the sandbox's calls
+      // come back here, to the harness.
+      return (await stub.run(
+        code,
+        providers,
+        options.timeout
+      )) as ExecuteResult;
+    }
+  };
+}
+
+/**
+ * Code Mode for ThinkHarness: the model gets one `code` tool, and the other
+ * tools become functions its script calls, each a recorded step with the
+ * tool hooks and approvals. Install it with
+ * `extensions: [codemode({ executor })]`.
+ *
+ * @experimental The API may change between releases.
+ */
+export function codemode(options: CodemodeOptions): ThinkShippedExtension {
+  // After the harness's own, so it sees every tool the session has.
+  return {
+    name: "codemode",
+    extension: codemodeTransforms(options),
+    after: true
+  };
+}
+
+/** Codemode's tool and prompt transforms. @internal */
+export function codemodeTransforms(options: CodemodeOptions): ThinkExtension {
+  const direct = new Set(options.direct ?? []);
+  const budget = options.maxCatalogTokens ?? DEFAULT_CATALOG_TOKENS;
+  // Between one build's tools and prompt transforms, by session. Each
+  // entry is taken by its prompt transform, so the map holds at most the
+  // builds running at once.
+  const catalogs = new Map<string, string>();
+  // The last catalog made, by the tools it was made from: a build with the
+  // same tools does no type generation.
+  let last: { key: string; catalog: Catalog } | undefined;
+  return (ctx) => {
+    ctx.tools.transform((tools, { session }) => {
+      const entries = new Map<string, Described>();
+      const owners = new Map<string, string>();
+      for (const name of [...tools.keys()]) {
+        if (name === CODE_TOOL || direct.has(name)) continue;
+        const entry = tools.get(name);
+        if (!entry?.execute) continue;
+        tools.setCallers(name, ["code"]);
+        const description = entry.definition.description;
+        entries.set(name, {
+          ...(typeof description === "string" && { description }),
+          inputSchema: entry.inputSchema,
+          ...(entry.outputSchema && { outputSchema: entry.outputSchema })
+        });
+        owners.set(name, entry.owner);
+      }
+      const key = JSON.stringify([budget, [...entries], [...owners]]);
+      if (last?.key !== key) {
+        // Two tools whose names sanitize alike (`get-file`, `get_file`)
+        // both stay callable: a later one gets a numbered name.
+        const taken = new Set<string>();
+        const fns: Fn[] = [...entries].map(([tool, entry]) => {
+          const namespace = namespaceOf(owners.get(tool) ?? "tools");
+          let name = sanitizeToolName(tool);
+          for (let n = 2; taken.has(`${namespace}.${name}`); n++) {
+            name = `${sanitizeToolName(tool)}_${n}`;
+          }
+          taken.add(`${namespace}.${name}`);
+          return {
+            tool,
+            namespace,
+            name,
+            description:
+              typeof entry.description === "string" ? entry.description : "",
+            declaration: declare(namespace, { [name]: entry })
+          };
+        });
+        last = {
+          key,
+          catalog: { fns, text: catalogOf(fns, entries, budget) }
+        };
+      }
+      const catalog = last.catalog;
+      catalogs.set(session, catalog.text);
+      tools.set(CODE_TOOL, {
+        description: CODE_DESCRIPTION,
+        inputSchema: jsonSchema<{ code: string }>(CODE_INPUT),
+        recovery: "rerun",
+        execute: async (input: { code: string }, callOptions: unknown) => {
+          const invoke = (callOptions as { invoke?: ToolInvoke }).invoke;
+          if (!invoke) {
+            return "The harness gives this tool no way to call others.";
+          }
+          const calls: string[] = [];
+          const providers = new Map<string, ResolvedProvider>();
+          for (const fn of catalog.fns) {
+            const provider = providers.get(fn.namespace) ?? {
+              name: fn.namespace,
+              fns: {}
+            };
+            provider.fns[fn.name] = async (args: unknown) => {
+              calls.push(`${fn.namespace}.${fn.name}`);
+              const outcome = await invoke(fn.tool, args ?? {});
+              if (!outcome.ok) throw new Error(outcome.errorText);
+              return outcome.output;
+            };
+            providers.set(fn.namespace, provider);
+          }
+          // Read-only lookups over the catalog, answered here: no step.
+          const lookup: ResolvedProvider = {
+            name: "codemode",
+            fns: {
+              search: async (query: unknown) => {
+                const words = String(query ?? "")
+                  .toLowerCase()
+                  .split(/\s+/)
+                  .filter(Boolean);
+                return catalog.fns
+                  .filter((fn) => {
+                    const text =
+                      `${fn.namespace}.${fn.name} ${fn.description}`.toLowerCase();
+                    return words.every((word) => text.includes(word));
+                  })
+                  .slice(0, 20)
+                  .map((fn) => ({
+                    name: `${fn.namespace}.${fn.name}`,
+                    description: fn.description
+                  }));
+              },
+              describe: async (name: unknown) =>
+                catalog.fns.find(
+                  (fn) => `${fn.namespace}.${fn.name}` === String(name)
+                )?.declaration ?? null
+            }
+          };
+          // An arrow function ends without its statement's semicolon,
+          // which the executor would wrap inside its call.
+          const code = withoutFinalSemicolon(normalizeCode(input.code));
+          const ran = await options.executor.execute(code, [
+            ...providers.values(),
+            lookup
+          ]);
+          return report(input.code, ran, calls);
+        }
+      });
+    });
+    ctx.prompt.transform((prompt, { session }) => {
+      const catalog = catalogs.get(session);
+      catalogs.delete(session);
+      if (!catalog) return;
+      prompt.set(CODEMODE_CATALOG, {
+        text: `Functions for code (call them from the \`${CODE_TOOL}\` tool):\n\n\`\`\`ts\n${catalog}\n\`\`\``,
+        whenChanged: "remind",
+        description: "The functions the code tool's scripts can call"
+      });
+    });
+  };
+}
+
+/**
+ * The script without the semicolon that ends it, and the comments after
+ * it. One scan forward that skips strings, template literals, regular
+ * expressions and comments, so neither a `//` in a URL nor a `*` + `/` in
+ * a comment is taken for what it isn't, and no script makes it slow (it
+ * runs on the agent, before the sandbox's time limit).
+ */
+export function withoutFinalSemicolon(code: string): string {
+  // The last character outside a comment that isn't whitespace.
+  let last = -1;
+  for (let i = 0; i < code.length; i++) {
+    const char = code[i] ?? "";
+    const next = code[i + 1];
+    if (char === "/" && next === "/") {
+      const line = code.indexOf("\n", i);
+      if (line < 0) break;
+      i = line;
+    } else if (char === "/" && next === "*") {
+      const close = code.indexOf("*/", i + 2);
+      if (close < 0) break;
+      i = close + 1;
+    } else if (
+      char === '"' ||
+      char === "'" ||
+      char === "`" ||
+      (char === "/" && startsRegExp(code[last]))
+    ) {
+      i = literalEnd(code, i);
+      last = i;
+    } else if (!/\s/.test(char)) {
+      last = i;
+    }
+  }
+  return code[last] === ";" ? code.slice(0, last) : code;
+}
+
+/** Whether a `/` after this character starts a regular expression. */
+function startsRegExp(before: string | undefined): boolean {
+  return before === undefined || "(,=:[!&|?{};+-*%<>~^".includes(before);
+}
+
+/** Where the string, template or regular expression at `start` ends. */
+function literalEnd(code: string, start: number): number {
+  const quote = code[start];
+  let inClass = false;
+  for (let i = start + 1; i < code.length; i++) {
+    const char = code[i];
+    if (char === "\\") i++;
+    else if (quote === "/" && char === "[") inClass = true;
+    else if (quote === "/" && char === "]") inClass = false;
+    else if (char === quote && !inClass) return i;
+    else if (char === "\n" && quote !== "`") return i;
+  }
+  return code.length - 1;
+}

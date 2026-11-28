@@ -29,7 +29,9 @@ import type {
   SchemaOf,
   ToolOutcome,
   Transform,
-  Validation
+  Validation,
+  ToolCaller,
+  ToolInvoke
 } from "./types";
 
 /**
@@ -83,6 +85,23 @@ class EntryDraft<Value, Entry> implements Draft<Value, Entry> {
 
   keys(): IterableIterator<string> {
     return this.entries.keys();
+  }
+}
+
+/** A tool draft: also sets who may call a tool another extension set. */
+class ToolEntryDraft
+  extends EntryDraft<ExtensionTool, ToolEntry>
+  implements ToolDraft
+{
+  setCallers(name: string, callers: readonly ToolCaller[]): boolean {
+    const entry = this.entries.get(name);
+    if (!entry) return false;
+    // The same entry, changed in place: a schema still resolving for it
+    // lands on this object, not on a copy the draft no longer holds.
+    Object.assign(entry, {
+      definition: { ...entry.definition, callers: [...callers] }
+    });
+    return true;
   }
 }
 
@@ -207,15 +226,21 @@ export class ExtensionRuntime<
   async build(drafts: Drafts, build: BuildContext): Promise<Drafts> {
     const kept = new Map<string, ExtensionTool>();
     const pending: PromiseLike<unknown>[] = [];
-    const tools = new EntryDraft<ExtensionTool, ToolEntry>(
+    const tools = new ToolEntryDraft(
       drafts.tools,
       (toolName, tool) => {
         kept.set(toolName, tool);
         const converted = this.#convert(tool);
+        // This name's own entry: the conversion is cached by tool, and two
+        // names may share one tool but not their callers.
+        const entry = {
+          ...converted.entry,
+          definition: { ...converted.entry.definition }
+        };
         if (converted.schema) {
           pending.push(
             converted.schema.then((schema) => {
-              converted.entry.inputSchema = schema;
+              entry.inputSchema = schema;
             })
           );
         }
@@ -223,13 +248,13 @@ export class ExtensionRuntime<
           pending.push(
             converted.outputSchema.then(
               (schema) => {
-                converted.entry.outputSchema = schema;
+                entry.outputSchema = schema;
               },
               (error: unknown) => this.#warnOutputSchema(toolName, error)
             )
           );
         }
-        return converted.entry;
+        return entry;
       },
       (toolName) => kept.delete(toolName)
     );
@@ -361,7 +386,8 @@ export class ExtensionRuntime<
     name: string,
     input: unknown,
     call: ToolCall,
-    onOutput: (output: unknown) => void | Promise<void>
+    onOutput: (output: unknown) => void | Promise<void>,
+    invoke?: ToolInvoke
   ): Promise<ToolOutcome> {
     const execute = (await this.#toolFor(call.session, name)).execute;
     if (typeof execute !== "function") {
@@ -375,8 +401,9 @@ export class ExtensionRuntime<
         toolCallId: call.id,
         messages: call.messages,
         abortSignal: controller.signal,
-        context: undefined
-      });
+        context: undefined,
+        ...(invoke && { invoke })
+      } as Parameters<typeof execute>[1]);
       if (!isAsyncIterable(result)) return { ok: true, output: result };
       let last: unknown;
       for await (const output of result) {

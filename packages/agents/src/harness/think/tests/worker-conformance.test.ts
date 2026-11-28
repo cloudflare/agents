@@ -33,8 +33,25 @@ async function observe(handle: Promise<ExtensionHandle>) {
   const direct = await handle;
   const call = { id: "c", session: "s", messages: [] };
   const outputs: unknown[] = [];
+  // The harness's side of `invoke`: runs the extension's own tools.
+  const invoked: unknown[] = [];
+  const invoke = async (tool: string, input: unknown) => {
+    invoked.push([tool, input]);
+    return direct.execute(tool, input, call, () => {});
+  };
   return {
     tools: JSON.stringify(modelTools(built.tools, undefined)),
+    offered: Object.keys(modelTools(built.tools, undefined)),
+    sum3: {
+      outcome: await direct.execute(
+        "sum3",
+        { a: 1, b: 2, c: 3 },
+        call,
+        () => {},
+        invoke
+      ),
+      invoked
+    },
     recovery: (built.tools.add as { recovery?: string }).recovery,
     system: built.system,
     hooks: (await direct.describe()).hooks,
@@ -81,6 +98,15 @@ describe("extensions: one file in process and in a Worker", () => {
       recovery: "rerun",
       system: "Rules.",
       add: { ok: true, output: 5 },
+      offered: ["add", "count", "sum3", "fail"],
+      sum3: {
+        outcome: { ok: true, output: 12 },
+        invoked: [
+          ["add", { a: 1, b: 2 }],
+          ["add", { a: 3, b: 3 }],
+          ["double", { n: 6 }]
+        ]
+      },
       count: { outcome: { ok: true, output: 3 }, outputs: [1, 2, 3] },
       fail: { ok: false, errorText: "it failed" },
       approval: true,

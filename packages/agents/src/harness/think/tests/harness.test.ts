@@ -740,6 +740,408 @@ describe("ThinkHarness approvals and client tools", () => {
   });
 });
 
+describe("ThinkHarness: a tool that calls other tools (invoke)", () => {
+  it("runs them as its own steps and keeps a code-only tool from the model", async () => {
+    const stub = fresh();
+    expect(text(await stub.prompt("compose"))).toBe("tool said: 9");
+    expect(await stub.tripledRuns()).toBe(1);
+    const offered = await stub.lastOffered();
+    expect(offered).toContain("compose");
+    expect(offered).not.toContain("tripled");
+  });
+
+  it("runs the tool hooks for each call", async () => {
+    const stub = fresh();
+    await stub.setBlock("tripled");
+    expect(text(await stub.prompt("compose"))).toBe(
+      "tool said: blocked by policy"
+    );
+    expect(await stub.tripledRuns()).toBe(0);
+  });
+
+  it("refuses a model's call to a code-only tool", async () => {
+    const stub = fresh();
+    // As for any name the model wasn't offered: the AI SDK's invalid call.
+    expect(text(await stub.prompt("call tripled"))).toMatch(
+      /^tool said: error: /
+    );
+    expect(await stub.tripledRuns()).toBe(0);
+  });
+
+  it("parks the turn for a call that needs approval, then runs the tool again from the top", async () => {
+    const stub = fresh();
+    await stub.prompt("compose approve");
+    expect((await stub.messages()).at(-1)).toBe(
+      "assistant: [compose approval-requested]"
+    );
+    const [call] = await stub.lastToolCalls();
+    expect(
+      call?.approvalId?.startsWith(`approval:${call?.toolCallId}/3#`)
+    ).toBe(true);
+    expect(await stub.tripledRuns()).toBe(1);
+    expect(await stub.dangerousRuns()).toBe(0);
+    // The parked tool was aborted, and what it called is kept.
+    expect(await stub.composeAborted()).toBe(true);
+    expect(await stub.parkedAnnotations()).toBe(1);
+    // Listed as the call that waits: its own tool and input.
+    expect(await stub.pendingApprovals()).toEqual([
+      {
+        approvalId: call?.approvalId,
+        toolCallId: `${call?.toolCallId}/3`,
+        toolName: "dangerous",
+        input: {}
+      }
+    ]);
+
+    const receipt = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "done",
+      text: "tool said: did the dangerous thing"
+    });
+    // tripled was answered from what the parked call kept, which goes.
+    expect(await stub.tripledRuns()).toBe(1);
+    expect(await stub.dangerousRuns()).toBe(1);
+    expect(await stub.parkedAnnotations()).toBe(0);
+  });
+
+  it("denies the whole call when the approval inside it is refused", async () => {
+    const stub = fresh();
+    await stub.prompt("compose approve");
+    const [call] = await stub.lastToolCalls();
+    const receipt = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: false
+    });
+    // As a refused approval of the call itself.
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "done",
+      text: "tool said: error: Tool call execution denied."
+    });
+    expect(await stub.dangerousRuns()).toBe(0);
+    expect(await stub.parkedAnnotations()).toBe(0);
+  });
+
+  it("asks again when a rerun tool makes a different call where the approved one was", async () => {
+    const stub = fresh();
+    await stub.prompt("compose approve");
+    const [call] = await stub.lastToolCalls();
+    // The rerun calls dangerous with other input at the approved position.
+    await stub.setDangerousFlavor("other");
+    const receipt = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    await stub.wait(receipt.operationId);
+    expect(await stub.dangerousRuns()).toBe(0);
+    expect((await stub.messages()).at(-1)).toBe(
+      "assistant: [compose approval-requested]"
+    );
+    // The new request has its own id: the earlier answer doesn't apply.
+    const [again] = await stub.lastToolCalls();
+    expect(again?.approvalId).not.toBe(call?.approvalId);
+    const stale = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    expect((await stub.wait(stale.operationId)).status).toBe("unanswered");
+    expect(await stub.dangerousRuns()).toBe(0);
+  });
+
+  it("aborts a nested tool whose call parks, as it aborts the tool that called it", async () => {
+    const stub = fresh();
+    await stub.prompt("compose relay");
+    expect((await stub.messages()).at(-1)).toBe(
+      "assistant: [compose approval-requested]"
+    );
+    expect(await stub.relayAborted()).toBe(true);
+    // Approved, the nested tool runs again on the approved path, and the
+    // approved call runs.
+    const [call] = await stub.lastToolCalls();
+    const approved = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    expect(text(await stub.wait(approved.operationId))).toBe(
+      "tool said: did the dangerous thing"
+    );
+    expect(await stub.dangerousCount()).toBe(1);
+  });
+
+  it("doesn't give a call made in another order after an approval the result another call got", async () => {
+    const stub = fresh();
+    await stub.prompt("compose order");
+    const [call] = await stub.lastToolCalls();
+    const approved = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    const said = text(await stub.wait(approved.operationId)) ?? "";
+    // b is now first: it isn't given a's result, nor a b's.
+    expect(said).not.toContain("b: label a");
+    expect(said).not.toContain("a: label b");
+    expect(said).toContain("different order");
+    expect(await stub.labelRuns()).toBe(2);
+  });
+
+  it("answers a call after an approval whose input has its keys in another order", async () => {
+    const stub = fresh();
+    await stub.prompt("compose key order");
+    const [call] = await stub.lastToolCalls();
+    const approved = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    expect(text(await stub.wait(approved.operationId))).toBe(
+      "tool said: pair 12"
+    );
+    expect(await stub.labelRuns()).toBe(1);
+  });
+
+  it("doesn't run again after an approval a call whose step an eviction kept for another order", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const receipt = await stub.submit("compose order gate approve");
+    await stub.gateStarted(1);
+    stub = await crash(name);
+    await stub.release();
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    await stub.wait(receipt.operationId);
+    const [call] = await stub.lastToolCalls();
+    expect(call?.approvalId).toBeDefined();
+    const approved = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    const said = text(await stub.wait(approved.operationId)) ?? "";
+    // Neither label ran again: their steps' results were kept for the park.
+    expect(await stub.labelRuns()).toBe(2);
+    expect(said).toContain("different order");
+    expect(await stub.dangerousCount()).toBe(1);
+  });
+
+  it("doesn't give a call made in another order after an eviction the result another call's step kept", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const receipt = await stub.submit("compose order gate");
+    await stub.gateStarted(1);
+    stub = await crash(name);
+    await stub.release();
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    const said = text(await stub.wait(receipt.operationId)) ?? "";
+    expect(said).not.toContain("b: label a");
+    expect(said).not.toContain("a: label b");
+    expect(said).toContain("different order");
+    expect(await stub.labelRuns()).toBe(2);
+  });
+
+  it("asks for the approval at once while a sibling runs, and keeps the sibling's result when it settles", async () => {
+    const stub = fresh();
+    const receipt = await stub.submit("compose parallel");
+    await stub.gateStarted(1);
+    // The approval is asked before the sibling ends.
+    await stub.wait(receipt.operationId);
+    const [call] = await stub.lastToolCalls();
+    expect(call?.approvalId).toBeDefined();
+    await stub.release();
+    // The sibling's result joins what the park kept (multiply, tripled, gate).
+    await vi.waitFor(async () => expect(await stub.parkedKept()).toBe(1));
+    const approved = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    expect(await stub.wait(approved.operationId)).toMatchObject({
+      status: "done"
+    });
+    // The write ran once; its result was kept.
+    expect(await stub.gateRuns()).toBe(1);
+    expect(await stub.dangerousRuns()).toBe(1);
+  });
+
+  it("keeps a write's receipt whenever it settles around the park", async () => {
+    // The write settles 0..30 turns (microtasks and timers) after the park
+    // aborts it: before, during and after the park is written.
+    for (let hops = 0; hops <= 30; hops += 1) {
+      const stub = fresh();
+      await stub.setReceiptHops(hops);
+      await stub.prompt("compose receipt");
+      const [call] = await stub.lastToolCalls();
+      // Approved once the write has settled.
+      await vi.waitFor(async () =>
+        expect(await stub.toolAttempts()).toContain("after receipt_write:1")
+      );
+      const receipt = await stub.answer({
+        type: "approval",
+        approvalId: call?.approvalId ?? "",
+        approved: true
+      });
+      expect([hops, text(await stub.wait(receipt.operationId))]).toEqual([
+        hops,
+        expect.stringContaining("receipt")
+      ]);
+      expect(await stub.receiptRuns()).toBe(1);
+    }
+  }, 60_000);
+
+  it("keeps a write's receipt that settles after a later park answered it as interrupted", async () => {
+    const stub = fresh();
+    await stub.prompt("compose pending");
+    const [first] = await stub.lastToolCalls();
+    expect(await stub.pendingRuns()).toBe(1);
+    // Approved while the write runs: it is interrupted for now, and the
+    // script asks its second approval.
+    const once = await stub.answer({
+      type: "approval",
+      approvalId: first?.approvalId ?? "",
+      approved: true
+    });
+    await stub.wait(once.operationId);
+    const [second] = await stub.lastToolCalls();
+    expect(second?.approvalId).not.toBe(first?.approvalId);
+    // The write, from before the first approval, settles now.
+    await stub.releasePending();
+    await vi.waitFor(async () =>
+      expect(await stub.toolAttempts()).toContain("after pending_write:1")
+    );
+    const twice = await stub.answer({
+      type: "approval",
+      approvalId: second?.approvalId ?? "",
+      approved: true
+    });
+    expect(text(await stub.wait(twice.operationId))).toContain(
+      "pending receipt"
+    );
+    expect(await stub.pendingRuns()).toBe(1);
+  });
+
+  it("keeps the newer read when one from an earlier approval settles after the next park", async () => {
+    const stub = fresh();
+    await stub.prompt("compose rounds");
+    await stub.readStarted(1);
+    const [first] = await stub.lastToolCalls();
+    // Approved: the read reruns (read 2), returns v2, and the script parks
+    // again for its second approval.
+    const once = await stub.answer({
+      type: "approval",
+      approvalId: first?.approvalId ?? "",
+      approved: true
+    });
+    await stub.readStarted(2);
+    await stub.releaseRead(2);
+    await stub.wait(once.operationId);
+    const [second] = await stub.lastToolCalls();
+    expect(second?.approvalId).not.toBe(first?.approvalId);
+    // Read 1, from before the first approval, settles now.
+    await stub.releaseRead(1);
+    await vi.waitFor(async () =>
+      expect(
+        (await stub.toolAttempts()).filter((a) =>
+          a.startsWith("after versioned_read")
+        )
+      ).toHaveLength(2)
+    );
+    const twice = await stub.answer({
+      type: "approval",
+      approvalId: second?.approvalId ?? "",
+      approved: true
+    });
+    expect(text(await stub.wait(twice.operationId))).toContain("read v2");
+  });
+
+  it("reports a write the park cut short as interrupted, and doesn't run it again", async () => {
+    const stub = fresh();
+    await stub.prompt("compose write");
+    const [call] = await stub.lastToolCalls();
+    expect(await stub.writeRuns()).toBe(1);
+    await stub.release();
+    const receipt = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    // Interrupted by the park, not by a restart.
+    expect(text(await stub.wait(receipt.operationId))).toContain(
+      "because another call waited for approval"
+    );
+    expect(await stub.writeRuns()).toBe(1);
+  });
+
+  it("runs again a sibling the park cut short, rather than keep its abort", async () => {
+    const stub = fresh();
+    await stub.prompt("compose abortable");
+    const [call] = await stub.lastToolCalls();
+    expect(await stub.abortableRuns()).toBe(1);
+    await stub.release();
+    const receipt = await stub.answer({
+      type: "approval",
+      approvalId: call?.approvalId ?? "",
+      approved: true
+    });
+    expect(await stub.wait(receipt.operationId)).toMatchObject({
+      status: "done",
+      text: "tool said: did the dangerous thing"
+    });
+    expect(await stub.abortableRuns()).toBe(2);
+  });
+
+  it("keeps what each of two tools parked in one step", async () => {
+    const stub = fresh();
+    await stub.prompt("compose approve twice");
+    expect(await stub.parkedCalls()).toBe(2);
+    expect(await stub.pendingApprovals()).toHaveLength(2);
+  });
+
+  it("gives a fork the calls a parked tool kept", async () => {
+    const stub = fresh();
+    const source = await stub.createSession();
+    await stub.prompt("compose approve", source);
+    expect(await stub.tripledRuns()).toBe(1);
+    const fork = await stub.fork(source);
+    const [call] = await stub.lastToolCalls(fork);
+    const receipt = await stub.answer(
+      {
+        type: "approval",
+        approvalId: call?.approvalId ?? "",
+        approved: true
+      },
+      fork
+    );
+    expect(await stub.wait(receipt.operationId, fork)).toMatchObject({
+      status: "done",
+      text: "tool said: did the dangerous thing"
+    });
+    // tripled was answered from what the fork kept, not run again.
+    expect(await stub.tripledRuns()).toBe(1);
+  });
+
+  it("answers the calls a rerun tool made before an eviction from their steps", async () => {
+    const name = crypto.randomUUID();
+    let stub = fresh(name);
+    const receipt = await stub.submit("compose gate");
+    await stub.gateStarted(1);
+
+    stub = await crash(name);
+    await stub.release();
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    const result = await stub.wait(receipt.operationId);
+    expect(result).toMatchObject({ status: "done", text: "tool said: 9" });
+    // multiply and tripled ran once; the gate, cut short, ran again.
+    expect(await stub.tripledRuns()).toBe(1);
+    expect(await stub.gateRuns()).toBe(2);
+  });
+});
+
 describe("ThinkHarness durability", () => {
   it("reports a tool call an eviction cut short, instead of rerunning it", async () => {
     const name = crypto.randomUUID();

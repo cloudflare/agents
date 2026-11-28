@@ -219,6 +219,11 @@
       "import": "./dist/harness/think/index.js",
       "require": "./dist/harness/think/index.js"
     },
+    "./harness/think/extensions": {
+      "types": "./dist/harness/think/extensions/index.d.ts",
+      "import": "./dist/harness/think/extensions/index.js",
+      "require": "./dist/harness/think/extensions/index.js"
+    },
     "./harness/container": {
       "types": "./dist/harness/container/index.d.ts",
       "import": "./dist/harness/container/index.js",

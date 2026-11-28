@@ -14,5 +14,11 @@ declare namespace Cloudflare {
     THINK_HARNESS_FACET_CHILD: DurableObjectNamespace<
       import("./worker").ThinkHarnessFacetChild
     >;
+    THINK_CODEMODE: DurableObjectNamespace<
+      import("./worker").ThinkCodemodeObject
+    >;
+    CODEMODE_SANDBOX: DurableObjectNamespace<
+      import("./worker").CodemodeSandbox
+    >;
   }
 }
