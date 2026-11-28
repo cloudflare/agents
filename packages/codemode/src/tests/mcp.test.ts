@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -102,6 +102,70 @@ function buildReferencedOpenApiSpec({
 }
 
 describe("codeMcpServer", () => {
+  it("should use the Workers-safe JSON schema validator for the upstream client", async () => {
+    const validators: string[] = [];
+    const original = Client.prototype.listTools;
+    const spy = vi
+      .spyOn(Client.prototype, "listTools")
+      .mockImplementation(function (this: Client, ...args) {
+        validators.push(
+          (this as unknown as { _jsonSchemaValidator: object })
+            ._jsonSchemaValidator.constructor.name
+        );
+        return original.apply(this, args);
+      });
+    try {
+      const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+      await codeMcpServer({ server: createUpstreamServer(), executor });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(validators).toEqual(["CfWorkerJsonSchemaValidator"]);
+  });
+
+  it("code tool should discover and call an upstream tool with an outputSchema", async () => {
+    const upstream = createUpstreamServer();
+    upstream.registerTool(
+      "stats",
+      {
+        description: "Return structured stats",
+        inputSchema: { values: z.array(z.number()) },
+        outputSchema: { count: z.number(), total: z.number() }
+      },
+      async ({ values }) => {
+        const structuredContent = {
+          count: values.length,
+          total: values.reduce((a, b) => a + b, 0)
+        };
+        return {
+          content: [
+            {
+              type: "text" as const,
+              // Not JSON, so the test fails if structuredContent is ignored
+              text: `count=${structuredContent.count} total=${structuredContent.total}`
+            }
+          ],
+          structuredContent
+        };
+      }
+    );
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const wrapped = await codeMcpServer({ server: upstream, executor });
+    const client = await connectClient(wrapped);
+
+    const result = await client.callTool({
+      name: "code",
+      arguments: {
+        code: "async () => await codemode.stats({ values: [1, 2, 3] })"
+      }
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(callText(result))).toEqual({ count: 3, total: 6 });
+
+    await client.close();
+  });
+
   it("should expose a single code tool", async () => {
     const upstream = createUpstreamServer();
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
