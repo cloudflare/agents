@@ -9511,7 +9511,10 @@ function createDurablePauseMockModel(
 // arguments. Mirrors how a real model terminates a structured workflow turn by
 // calling the synthetic final-answer tool — exercises the #1685 capture path
 // without a network round-trip.
-function createFinalAnswerMockModel(args: unknown): LanguageModel {
+function createFinalAnswerMockModel(
+  args: unknown,
+  onCall?: (call: { toolChoice: unknown; tools: string[] }) => void
+): LanguageModel {
   return {
     specificationVersion: "v3",
     provider: "test",
@@ -9525,6 +9528,10 @@ function createFinalAnswerMockModel(args: unknown): LanguageModel {
         toolChoice?: { type?: string; toolName?: string };
         tools?: Array<{ name?: string }>;
       };
+      onCall?.({
+        toolChoice: opts.toolChoice,
+        tools: (opts.tools ?? []).map((t) => String(t.name))
+      });
       const toolName =
         opts.toolChoice?.type === "tool" && opts.toolChoice.toolName
           ? opts.toolChoice.toolName
@@ -11418,7 +11425,9 @@ export class ThinkProgrammaticTestAgent extends Think {
       );
     }
     if (this._finalAnswerResponse !== undefined) {
-      return createFinalAnswerMockModel(this._finalAnswerResponse);
+      return createFinalAnswerMockModel(this._finalAnswerResponse, (call) =>
+        this._finalAnswerCalls.push(call)
+      );
     }
     // A hold kept for the isolate after a reset: taken once, by the first
     // model call of that isolate.
@@ -11776,7 +11785,36 @@ export class ThinkProgrammaticTestAgent extends Think {
     };
   }
 
-  override async beforeTurn(ctx: TurnContext): Promise<void> {
+  private _afterToolNames: string[] = [];
+
+  override afterToolCall(ctx: ToolCallResultContext): void {
+    this._afterToolNames.push(ctx.toolName);
+  }
+
+  private _beforeToolNames: string[] = [];
+
+  override beforeToolCall(ctx: ToolCallContext): void {
+    this._beforeToolNames.push(ctx.toolName);
+  }
+
+  /** The tools `beforeToolCall` heard of, in order. */
+  async getBeforeToolNamesForTest(): Promise<string[]> {
+    return this._beforeToolNames;
+  }
+
+  /** The tools `afterToolCall` heard of, in order. */
+  async getAfterToolNamesForTest(): Promise<string[]> {
+    return this._afterToolNames;
+  }
+
+  private _turnConfigForTest: TurnConfig | null = null;
+
+  /** Every turn's `beforeTurn` returns this config. */
+  async setTurnConfigOverride(config: TurnConfig | null): Promise<void> {
+    this._turnConfigForTest = config;
+  }
+
+  override async beforeTurn(ctx: TurnContext): Promise<TurnConfig | void> {
     const gate = this._turnGate;
     if (gate && !ctx.continuation) {
       this._turnGate = null;
@@ -11824,6 +11862,7 @@ export class ThinkProgrammaticTestAgent extends Think {
           error instanceof Error ? error.message : String(error);
       }
     }
+    return this._turnConfigForTest ?? undefined;
   }
 
   private async _runNestedAdmissionForTest(
@@ -12133,6 +12172,14 @@ export class ThinkProgrammaticTestAgent extends Think {
 
   // Make the next turn(s) terminate by calling the structured-output
   // `think_final_answer` tool with `args` as its arguments (issue #1685).
+  private _finalAnswerCalls: Array<{ toolChoice: unknown; tools: string[] }> =
+    [];
+
+  /** The tool choice and tool names each final-answer model call got. */
+  async getFinalAnswerCallsForTest(): Promise<string> {
+    return JSON.stringify(this._finalAnswerCalls);
+  }
+
   async setFinalAnswerResponseForTest(args: unknown): Promise<void> {
     this._finalAnswerResponse = args;
   }

@@ -43,6 +43,8 @@ import {
   convertToModelMessages,
   getToolName,
   isToolUIPart,
+  jsonSchema,
+  tool,
   type LanguageModel,
   type LanguageModelUsage,
   type ToolSet,
@@ -137,8 +139,14 @@ import {
 import {
   WORKFLOW_NOTIFICATION_SINK,
   sendWorkflowNotification,
-  workflowNotificationSink
+  workflowNotificationSink,
+  workflowPromptContext
 } from "../workflow-notifications";
+import {
+  THINK_FINAL_ANSWER_TOOL_NAME,
+  thinkFinalAnswerInstruction,
+  withoutFinalAnswerParts
+} from "../inference/structured-output";
 import {
   admittedSubmissionMetadata,
   SKIPPED_BY_RESET,
@@ -714,7 +722,7 @@ export class Think<
         const frozen = (await this.#context?.freezeSystemPrompt()) ?? "";
         return frozen ? undefined : this.getSystemPrompt();
       },
-      tools: () => this.getTools(),
+      tools: async () => this.#withFinalAnswer(await this.getTools()),
       // The harness cuts older messages as Think does, by its step.
       truncationStep: () => this.truncationStep,
       // A turn's `beforeTurn` may set its own, as in Think.
@@ -731,9 +739,30 @@ export class Think<
         return self.#recoveryOptions();
       },
       hooks: {
+        // As in Think: a workflow turn's final-answer tool is plumbing,
+        // never stored. A reply that held only it is not stored at all.
+        // As in Think: a structured workflow turn that ends without its
+        // final-answer tool's answer fails.
+        beforeTurnEnd: ({ operationId }) => {
+          const final = this.#finalAnswer;
+          if (final?.operationId === operationId && !final.output) {
+            throw new Error(
+              `Model ended the turn without calling the ${final.name} tool`
+            );
+          }
+        },
+        storedReply: (message) => {
+          const kept = withoutFinalAnswerParts(message);
+          return kept === message ||
+            kept.parts.some((part) => part.type !== "step-start")
+            ? kept
+            : { ...kept, parts: [] };
+        },
         onRecovery: (context) => this.#onRecovery(context),
         beforeTurn: (turn) => this.#beforeTurn(turn),
         beforeToolCall: async (call) => {
+          // As in Think, the final-answer tool is plumbing: no hook sees it.
+          if (this.#isFinalAnswer(call)) return undefined;
           // The step's chunks reach extensions before its tool calls do.
           await this.#chunkHooks;
           // A call approved after a restart runs before any model call of
@@ -816,6 +845,7 @@ export class Think<
           return decision;
         },
         afterToolCall: async (result) => {
+          if (this.#isFinalAnswer(result)) return;
           const kept = this.#modelInputs.get(result.toolCallId);
           // From the decision to run it to its result, as Think times
           // `execute`: not the approval before it or the hooks after.
@@ -867,6 +897,7 @@ export class Think<
           await this.#endStep(operationId, message);
           const segment = stepSegments(message);
           const ended = { operationId, step, finishReason, segment, usage };
+
           // A step that called tools ends once they ran, as an AI SDK step
           // does: at the next step, or at the turn's end.
           if (stepResultOf(message, segment).toolCalls.length > 0) {
@@ -2109,6 +2140,59 @@ export class Think<
   /** The running turn's own `maxSteps`, from its `beforeTurn`. */
   #turnMaxSteps: number | undefined;
 
+  /**
+   * The running operation's workflow prompt, when it asked for structured
+   * output: the turn offers `think_final_answer` with its schema, and the
+   * call's input is the output the workflow is told.
+   */
+  #finalAnswer:
+    | {
+        readonly operationId: string;
+        readonly schema: unknown;
+        name: string;
+        output?: { readonly value: unknown };
+      }
+    | undefined;
+
+  /** Whether `call` is the running workflow turn's final-answer tool. */
+  #isFinalAnswer(call: {
+    readonly operationId: string;
+    readonly toolName: string;
+  }): boolean {
+    const final = this.#finalAnswer;
+    return (
+      final?.operationId === call.operationId && final.name === call.toolName
+    );
+  }
+
+  /** The tools on offer, with the final-answer tool on a workflow turn. */
+  #withFinalAnswer(tools: ToolSet): ToolSet {
+    const final = this.#finalAnswer;
+    if (!final) return tools;
+    // As in Think: a tool of the app's with the name gets a suffixed one.
+    let name = THINK_FINAL_ANSWER_TOOL_NAME;
+    for (let suffix = 1; name in tools; suffix++) {
+      name = `${THINK_FINAL_ANSWER_TOOL_NAME}_${suffix}`;
+    }
+    final.name = name;
+    return {
+      ...tools,
+      [name]: tool({
+        description:
+          "Provide your final answer. The arguments MUST match the required " +
+          "schema. Calling this tool ends the task — call it exactly once " +
+          "when you have everything you need.",
+        inputSchema: jsonSchema(final.schema as never),
+        execute: async (input: unknown) => {
+          final.output = { value: input };
+          // The answer ends the turn: no model call after it.
+          this.#turnMaxSteps = 0;
+          return "Final answer recorded.";
+        }
+      })
+    };
+  }
+
   /** The extensions' `beforeTurn` changes, kept for the operation. */
   #extensionTurn:
     | { readonly operationId: string; readonly changes: TurnConfig }
@@ -2652,6 +2736,20 @@ export class Think<
   async #submissionStatus(status: ThinkOperationInspection): Promise<void> {
     const inspection = submissionInspection(status);
     const { submissionId, requestId } = inspection;
+    // A workflow prompt that asks for structured output arms the turn's
+    // final-answer tool before its tools are built.
+    if (status.status === "running") {
+      const schema = workflowPromptContext(inspection.metadata ?? null)?.output
+        ?.schema;
+      this.#finalAnswer =
+        schema === undefined
+          ? undefined
+          : {
+              operationId: status.operationId,
+              schema,
+              name: THINK_FINAL_ANSWER_TOOL_NAME
+            };
+    }
     if (status.status === "queued") {
       this._emit("submission:create", {
         submissionId,
@@ -2662,7 +2760,12 @@ export class Think<
     // The workflow that submitted it is told first, as on Think. A repeated
     // terminal report joins the delivery while it is open.
     if (isTerminalSubmissionStatus(inspection.status)) {
-      sendWorkflowNotification(this.tasks, inspection);
+      const final =
+        this.#finalAnswer?.operationId === status.operationId
+          ? this.#finalAnswer
+          : undefined;
+      if (final) this.#finalAnswer = undefined;
+      sendWorkflowNotification(this.tasks, inspection, final?.output?.value);
     }
     this._emit("submission:status", {
       submissionId,
@@ -3407,10 +3510,39 @@ export class Think<
     // A narrowing channel limits the tools the model is offered, and a
     // selection cannot bring back a tool it removed.
     const selected = step.activeTools ?? config.activeTools;
-    const activeTools = channel?.tools
+    const chosenTools = channel?.tools
       ? (selected ?? Object.keys(tools)).filter((name) => name in tools)
       : selected;
-    const toolChoice = step.toolChoice ?? config.toolChoice;
+    // A workflow turn that asked for structured output ends by calling the
+    // final-answer tool, as in Think: the prompt says so, and a tool call
+    // is required.
+    const final =
+      this.#finalAnswer?.operationId === turn.operationId
+        ? this.#finalAnswer
+        : undefined;
+    // As in Think: with tools of its own the turn must call one each step,
+    // else the final-answer tool; and on its last permitted step, that one.
+    const lastStep =
+      final !== undefined &&
+      step.toolChoice === undefined &&
+      turn.step >= (config.maxSteps ?? this.maxSteps) - 1;
+    const pinned = final && { type: "tool" as const, toolName: final.name };
+    const toolChoice = lastStep
+      ? pinned
+      : (step.toolChoice ??
+        config.toolChoice ??
+        (final
+          ? Object.keys(tools).some((name) => name !== final.name)
+            ? "required"
+            : pinned
+          : undefined));
+    // A turn that names its active tools keeps the final-answer tool on.
+    const activeTools =
+      final && lastStep
+        ? [final.name]
+        : final && chosenTools
+          ? [...chosenTools, final.name]
+          : chosenTools;
     const callSettings = defined({
       topP: config.topP,
       topK: config.topK,
@@ -3426,9 +3558,15 @@ export class Think<
     // As in Think: recorded once the turn is prepared, so a continuation
     // never extends a turn whose preparation threw.
     if (first) this.#lastTurnChannel = this.#turnChannel.channelId;
+    const sentSystem =
+      final && typeof system === "string"
+        ? [system, thinkFinalAnswerInstruction(final.name)]
+            .filter(Boolean)
+            .join("\n\n")
+        : system;
     return {
       model: sent,
-      ...(typeof system === "string" && { system }),
+      ...(typeof sentSystem === "string" && { system: sentSystem }),
       ...(messages && { messages }),
       ...(activeTools && { activeTools: [...activeTools] }),
       ...(toolChoice !== undefined && {
