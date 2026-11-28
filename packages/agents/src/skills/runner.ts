@@ -1,7 +1,6 @@
 import { RpcTarget } from "cloudflare:workers";
 import { DynamicWorkerExecutor, resolveProvider } from "@cloudflare/codemode";
 import type { ToolProvider } from "@cloudflare/codemode";
-import { Bash, defineCommand } from "just-bash";
 import type { ToolSet } from "ai";
 import { extensionOf, parseSkillResourcePath } from "./resource";
 import type {
@@ -843,11 +842,25 @@ async function runPythonScript(
 
 // ── Bash runtime ──────────────────────────────────────────────────────
 
+// `just-bash` is an optional peer and only Bash skill scripts need it, so it
+// loads on demand. A static import would break bundling for every Worker that
+// imports the runner (including through `@cloudflare/think`) without it.
+async function loadJustBash(): Promise<typeof import("just-bash")> {
+  try {
+    return await import("just-bash");
+  } catch (error) {
+    throw new Error(
+      `Running Bash skill scripts requires the optional "just-bash" package; install it to use them. (${error instanceof Error ? error.message : String(error)})`
+    );
+  }
+}
+
 async function runBashScript(
   request: SkillScriptRequest,
   options: WorkerSkillScriptRunnerOptions,
   bridge: SkillScriptHostBridge
 ): Promise<unknown> {
+  const { Bash, defineCommand } = await loadJustBash();
   const customCommands = [];
 
   if (bridge.workspaceAccess !== "none") {
