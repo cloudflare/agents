@@ -1649,14 +1649,37 @@ describe("think messengers core", () => {
       const agent = await sendBurst(`notice-hook-${crypto.randomUUID()}`, [
         { id: "n1", text: "hello", threadId: "fake:dm-notice" }
       ]);
-      let calls: Array<{ kind: string; content: string }> = [];
-      for (let i = 0; i < 50; i++) {
-        calls = await agent.getAdapterCalls();
-        if (calls.some((call) => call.content === "hook notice")) break;
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-      expect(calls).toContainEqual({ kind: "post", content: "hook notice" });
-      expect(await agent.getPostThreadsForTest()).not.toContain(undefined);
+      await vi.waitFor(
+        async () =>
+          expect(await agent.getAdapterCalls()).toContainEqual({
+            kind: "post",
+            content: "hook notice"
+          }),
+        { timeout: 5000, interval: 20 }
+      );
+      expect(new Set(await agent.getPostThreadsForTest())).toEqual(
+        new Set(["fake:dm-notice"])
+      );
+    });
+
+    it("posts a tool's notice to the turn's thread", async () => {
+      const agent = await sendBurst(`notice-tool-${crypto.randomUUID()}`, [
+        { id: "n1", text: "hello", threadId: "fake:dm-tool" }
+      ]);
+      await vi.waitFor(
+        async () =>
+          expect(
+            (await agent.getAdapterCalls()).map((call) => call.content)
+          ).toContain("Got it"),
+        { timeout: 5000, interval: 20 }
+      );
+      expect(await agent.getAdapterCalls()).toContainEqual({
+        kind: "post",
+        content: "tool notice"
+      });
+      expect(new Set(await agent.getPostThreadsForTest())).toEqual(
+        new Set(["fake:dm-tool"])
+      );
     });
 
     it("runs a messenger's turn on its channel", async () => {
