@@ -149,6 +149,18 @@ describe("OpenCodeHarness on OpenCode v2", () => {
     expect(await stub.holdRuns()).toBe(2);
   });
 
+  it("answers a wait as soon as its run ends", async () => {
+    const stub = fresh();
+    // The pause for a run resuming after an eviction is heartbeatMs / 30:
+    // a minute here, past the test timeout.
+    await stub.setHeartbeat(30 * 60_000);
+    const receipt = await stub.submit("hold");
+    await stub.holdStarted(1);
+    const waiting = stub.wait(receipt.operationId);
+    await stub.release();
+    expect(await waiting).toMatchObject({ status: "done", text: "echo: hold" });
+  });
+
   it("withdraws a queued operation, and aborts the running work", async () => {
     const stub = fresh();
     const held = await stub.submit("hold");
