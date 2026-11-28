@@ -107,9 +107,11 @@ export class ThinkContextOverflow {
     const baseline = messages.length;
     this.#baseline = baseline;
     this.#runBaseline = baseline;
-    // Kept by reference, and only when the guard is on: read only when it
-    // compacts.
-    this.#runPrompt = this.#options.config()?.proactive ? messages : [];
+    // Kept by reference (the run holds the same array), whether or not the
+    // guard is on now: the guard's setting is read at each step, so one
+    // turned on mid-run still finds the run's boundary. Replaced at the next
+    // run.
+    this.#runPrompt = messages;
     this.#compactedHead = undefined;
     this.#proactiveCompactions = 0;
   }
