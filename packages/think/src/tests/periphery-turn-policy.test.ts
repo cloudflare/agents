@@ -238,19 +238,19 @@ describe("ThinkContextOverflow", () => {
     ]);
   });
 
-  it("keeps no prompt for a run whose guard is off", async () => {
+  it("finds the run's prompt for a guard turned on after the run began", async () => {
     let config: ContextOverflowConfig | undefined = undefined;
     const head: ModelMessage = { role: "user", content: "old" };
     const step: ModelMessage = { role: "assistant", content: "in flight" };
     const { guard } = overflow(undefined, { config: () => config });
     guard.beginRun([head]);
-    // Turned on after the run began: with no prompt kept, the run's steps
-    // are found by count, as before the prompt was kept.
     config = { proactive: { maxInputTokens: 100 } };
+    // A beforeStep put context in front: the run's prompt is still found, so
+    // only the step's own message follows the compacted head.
     const prepended = { role: "system", content: "ctx" } as ModelMessage;
     expect(
       await guard.compactBeforeStep(stepEvent(95, [prepended, head, step]))
-    ).toEqual([{ role: "user", content: "summary" }, head, step]);
+    ).toEqual([{ role: "user", content: "summary" }, step]);
   });
 
   it("compacts before a step over budget and keeps the in-flight tail", async () => {
