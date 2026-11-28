@@ -107,8 +107,9 @@ export class ThinkContextOverflow {
     const baseline = messages.length;
     this.#baseline = baseline;
     this.#runBaseline = baseline;
-    // Kept by reference: read only when the guard compacts.
-    this.#runPrompt = messages;
+    // Kept by reference, and only when the guard is on: read only when it
+    // compacts.
+    this.#runPrompt = this.#options.config()?.proactive ? messages : [];
     this.#compactedHead = undefined;
     this.#proactiveCompactions = 0;
   }
@@ -133,17 +134,20 @@ export class ThinkContextOverflow {
   }
 
   /**
-   * This run's in-flight steps. Where the step's messages still start with
-   * the compacted head or the run's own prompt, what follows it. Where a
-   * `beforeStep` rewrote that start, what follows the first copy of the
-   * prompt's last message: a step's own messages come after it, so one
-   * that repeats it is never taken for the boundary.
+   * This run's in-flight steps. Where the step's messages hold the
+   * compacted head or the run's own prompt whole (at the start, or after
+   * what a `beforeStep` put in front of it), what follows it. Where a
+   * `beforeStep` rewrote it, what follows the first copy of the prompt's
+   * last message: a step's own messages come after it, so one that repeats
+   * it is never taken for the boundary.
    */
   #inFlight(messages: readonly ModelMessage[]): ModelMessage[] {
     const head = this.#compactedHead;
-    if (head && startsWith(messages, head)) return messages.slice(head.length);
     const prompt = this.#runPrompt;
-    if (startsWith(messages, prompt)) return messages.slice(prompt.length);
+    for (const known of head ? [head, prompt] : [prompt]) {
+      const at = indexOfRun(messages, known);
+      if (at >= 0) return messages.slice(at + known.length);
+    }
     const last = prompt.at(-1);
     if (last !== undefined) {
       const key = JSON.stringify(last);
@@ -328,6 +332,28 @@ export class ThinkContextOverflow {
       return undefined;
     }
   }
+}
+
+/**
+ * Where `run` first appears whole and in order in `messages`, or -1. An empty
+ * run is never found: it marks no boundary.
+ */
+function indexOfRun(
+  messages: readonly ModelMessage[],
+  run: readonly ModelMessage[]
+): number {
+  if (run.length === 0) return -1;
+  if (startsWith(messages, run)) return 0;
+  const first = JSON.stringify(run[0]);
+  for (let at = 1; at + run.length <= messages.length; at++) {
+    if (
+      (messages[at] === run[0] || JSON.stringify(messages[at]) === first) &&
+      startsWith(messages.slice(at), run)
+    ) {
+      return at;
+    }
+  }
+  return -1;
 }
 
 /** Whether `messages` starts with `prefix`: the same objects, or equal JSON. */
