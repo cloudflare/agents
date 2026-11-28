@@ -4,7 +4,8 @@ export {
   BareAssistantAgent,
   LoopTestAgent,
   LoopToolTestAgent,
-  OverflowRecoveryTestAgent
+  OverflowRecoveryTestAgent,
+  OverflowReminderTestAgent
 } from "./assistant-agent-loop";
 export {
   ThinkTestAgent,

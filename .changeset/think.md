@@ -11,4 +11,4 @@ Think.
 - `submitMessages` stores messages whole up to 16 MiB.
 - `deliverNotice` before the first webhook no longer throws.
 - Sandboxed extensions work in sub-agents and enforce `permissions.network` when the Worker re-exports `HostBridgeLoopback` (#3173).
-- With `contextOverflow.proactive` on AI SDK 6, the steps after the guard compacted keep sending the compacted history (with the turn's steps so far). AI SDK 6 doesn't carry a step's `prepareStep` messages into the next, so those steps used to send the whole history again.
+- With `contextOverflow.proactive` on AI SDK 6, the steps after the guard compacted no longer send the whole history again.

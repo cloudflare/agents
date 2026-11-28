@@ -583,6 +583,8 @@ export class Think<
         replyParts?: number;
         /** Whether the turn continues a reply (its first call's value). */
         continuation?: boolean;
+        /** The message the turn's history ends at. */
+        readonly leafId?: string;
         /** The proactive compactions the turn tried (`contextOverflow`). */
         proactive?: number;
         /** The history a proactive compaction left, for the turn's later calls. */
@@ -3867,10 +3869,16 @@ export class Think<
       ? await this.beforeTurn(context)
       : (this.#ownTurn?.own ?? undefined);
     if (first) {
+      // The message the turn's history ends at (a regenerate's is its
+      // question, not the active leaf), for a reactive compaction.
+      const leafId = turn.messages
+        .filter((message) => message.id !== CONTEXT_REMINDER_MESSAGE_ID)
+        .at(-1)?.id;
       this.#ownTurn = {
         operationId: turn.operationId,
         own,
-        ...(resolved && { defaultModel: resolved })
+        ...(resolved && { defaultModel: resolved }),
+        ...(leafId !== undefined && { leafId })
       };
     }
     // As on Think: a turn may set its own stall timeout. The harness asks
@@ -4250,9 +4258,15 @@ export class Think<
     const config = this.contextOverflow;
     if (!config?.reactive || signal.aborted) return false;
     if ((config.maxRetries ?? 1) <= 0) return false;
+    // The branch the turn answers, as Think compacts it (a regenerate
+    // answers an earlier message than the active leaf).
+    const leafId =
+      this.#ownTurn?.operationId === operationId
+        ? this.#ownTurn.leafId
+        : undefined;
     let shortened = false;
     try {
-      shortened = Boolean(await this.session.compact());
+      shortened = Boolean(await this.session.compact(leafId));
     } catch (error) {
       console.warn(
         `[Think] context-overflow compaction failed: ${error instanceof Error ? error.message : String(error)}`
@@ -4338,7 +4352,13 @@ export class Think<
       if (!shortened) {
         return compactedHead ? withLive(compactedHead) : undefined;
       }
-      const head = (await this.session.getHistory(question)) as UIMessage[];
+      // Through the context's projection, as every other call's history:
+      // the reminders recorded on its messages, and those a summary hides,
+      // are sent again.
+      const stored = await this.session.getHistory(question);
+      const head = (
+        this.#context ? await this.#context.project(stored) : stored
+      ) as UIMessage[];
       own.compactedHead = head;
       return await withLive(head);
     } catch (error) {

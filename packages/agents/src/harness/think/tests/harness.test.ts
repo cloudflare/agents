@@ -550,6 +550,10 @@ describe("ThinkHarness turns", () => {
     expect(result.status).toBe("unanswered");
     expect(reason(result)).toMatch(/Network connection lost/);
     expect(await stub.modelCalls()).toBe(0);
+    // The classifier heard which operation it was.
+    const classified = await stub.classifiedFor();
+    expect(classified).toHaveLength(1);
+    expect(classified[0]).not.toBe("");
   });
 
   it("takes a client tool declaration that is not a list as none", async () => {

@@ -66,6 +66,7 @@ const PENDING_RELEASE_KEY = "pending-release";
 const DANGEROUS_FLAVOR_KEY = "dangerous-flavor";
 const COMPOSE_ABORTED_KEY = "test:compose-aborted";
 const PROGRESS_DONE_KEY = "test:progress-done";
+const CLASSIFIED_FOR_KEY = "test:classified-for";
 const NOTE_IN_BEFORE_TURN_KEY = "test:note-in-before-turn";
 const ACTIVE_TOOLS_KEY = "test:active-tools";
 const LATE_EXAMPLES_KEY = "test:late-examples";
@@ -728,10 +729,16 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
     },
     hooks: {
       // An app's own classifier that ends a lost connection, when asked.
-      classifyError: (error) =>
-        this.ctx.storage.kv.get<boolean>(FATAL_CLASSIFIER_KEY)
+      classifyError: (error, context) => {
+        // The operation each classification was asked for.
+        this.ctx.storage.kv.put(CLASSIFIED_FOR_KEY, [
+          ...(this.ctx.storage.kv.get<string[]>(CLASSIFIED_FOR_KEY) ?? []),
+          context?.operationId ?? ""
+        ]);
+        return this.ctx.storage.kv.get<boolean>(FATAL_CLASSIFIER_KEY)
           ? "fail"
-          : classifyContextOverflow(error),
+          : classifyContextOverflow(error);
+      },
       onRecovery: ({ partial }) => {
         this.ctx.storage.kv.put(RECOVERY_PARTIAL_KEY, partial?.id ?? null);
         if (this.ctx.storage.kv.get<boolean>(ABANDON_KEY)) return "abandon";
@@ -1864,6 +1871,11 @@ export class ThinkHarnessTestObject extends DurableObject<Cloudflare.Env> {
   }
 
   /** From now on, the app's classifier calls every model error `fail`. */
+  /** The operation each `classifyError` call was given, in order. */
+  classifiedFor(): string[] {
+    return this.ctx.storage.kv.get<string[]>(CLASSIFIED_FOR_KEY) ?? [];
+  }
+
   classifyEveryErrorAsFail(): void {
     this.ctx.storage.kv.put(FATAL_CLASSIFIER_KEY, true);
   }

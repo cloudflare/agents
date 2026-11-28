@@ -9,6 +9,7 @@ import type { LanguageModel, ModelMessage, ToolSet, UIMessage } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
 import type { Session } from "../../think";
+import type { ContextConfig } from "agents/context";
 import type { ObservabilityEvent } from "agents/observability";
 import type { ChatResponseResult, SaveMessagesResult } from "agents/chat";
 import { Think } from "../../think";
@@ -1368,6 +1369,16 @@ export class OverflowRecoveryTestAgent extends Think {
     this._model = undefined;
   }
 
+  /** The reactive backstop on, and every model call overflowing or not. */
+  async armReactiveForTest(alwaysOverflow: boolean): Promise<void> {
+    this.proactiveMode = false;
+    this.proactiveMultiFire = false;
+    this.compactionNoOp = false;
+    this.alwaysOverflow = alwaysOverflow;
+    this.contextOverflow = { reactive: true };
+    this._model = undefined;
+  }
+
   async getMessageIdsForTest(): Promise<Array<{ id: string; role: string }>> {
     return this.messages.map((m) => ({ id: m.id, role: m.role }));
   }
@@ -1854,5 +1865,52 @@ export class OverflowRecoveryTestAgent extends Think {
       beforeTurnContinuations: this.beforeTurnContinuations,
       promptIncludedSeedMarker: this.promptIncludedSeedMarker
     };
+  }
+}
+
+/**
+ * The overflow agent with a `whenChanged: "remind"` block: its value
+ * changes after the prompt was frozen, so the next turn's question carries
+ * the change as a reminder.
+ */
+export class OverflowReminderTestAgent extends OverflowRecoveryTestAgent {
+  #environment: string | null = null;
+
+  override configureContext(): ContextConfig[] {
+    return [
+      {
+        label: "environment",
+        provider: { get: async () => this.#environment },
+        whenChanged: "remind"
+      }
+    ];
+  }
+
+  /**
+   * A turn with the block as first sent, a turn whose question delivers
+   * its change as a reminder, then a turn the proactive guard compacts:
+   * the reminder is recorded on the second turn's question, which the
+   * third turn's prompt still holds.
+   */
+  async testProactiveAfterReminder(): Promise<OverflowChatResult> {
+    // A fresh model for each turn: its steps count from one.
+    const freshModel = () => {
+      (this as unknown as { _model: unknown })._model = undefined;
+    };
+    // The first two turns run their tools with no guard, so nothing
+    // compacts (a compaction would take the new value into the prompt).
+    const plain = async (message: string) => {
+      freshModel();
+      this.proactiveMode = true;
+      this.proactiveMultiFire = true;
+      this.contextOverflow = undefined;
+      await this.chat(message, new TestCollectingCallback());
+    };
+    this.#environment = "Today is Monday.";
+    await plain("use the echo tool");
+    this.#environment = "Today is Tuesday.";
+    await plain("use the echo tool again");
+    freshModel();
+    return this.testProactiveMultiFire("and once more", 1);
   }
 }

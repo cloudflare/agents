@@ -20,6 +20,7 @@ import {
 import { capabilitySchema } from "../../lifecycle/schema";
 import { REPLAY_ITEM_BYTES } from "../../internal/platform-limits";
 import { Sessions } from "../../sessions/sessions";
+import { byteLength } from "../../sessions/sanitize";
 import { Streams } from "../../streams/streams";
 import { isPlatformFailure, isPlatformTransientError } from "../../retries";
 import {
@@ -2532,7 +2533,9 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             // classifier says otherwise, as for a model call's failure.
             if (isPlatformTransientError(error)) {
               const kind = await this.#extensions.hook("classifyError", {
-                error
+                error,
+                session: turn.session,
+                operationId: turn.operationId
               });
               if (kind === undefined || kind === "retry") {
                 throw new ModelCallError("retry", error);
@@ -2678,7 +2681,8 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
             if (json !== undefined) {
               // The output shares the run result's size bound: past its own
               // bound the turn fails, naming the size, before it settles.
-              const bytes = JSON.stringify(json)?.length ?? 0;
+              // UTF-8, as the run's result is measured.
+              const bytes = byteLength(JSON.stringify(json) ?? "");
               if (bytes > MAX_OUTPUT_BYTES) {
                 throw new ModelCallError(
                   "fail",
@@ -2720,10 +2724,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           progressed = true;
           continue;
         }
-        // The model's answer ended the turn (not a wait for a client): the
-        // host may still fail it, as Think fails a structured turn that
-        // never gave its answer.
-        if (action._tag === "end") {
+        // The model's answer ended the turn, or it waits for a client (an
+        // approval, a client tool): the host may still fail it, as Think
+        // fails a structured turn whose stream ended without its answer.
+        if (action._tag === "end" || action._tag === "await-input") {
           try {
             await this.#options.hooks?.beforeTurnEnd?.({
               session: turn.session,
@@ -3767,7 +3771,10 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
         streams.deleteUnchecked(streamId);
       }
     };
-    const keep = message && settleOpenCalls(message, reason);
+    // As the chat host stores a reply: the host's policy for what is kept.
+    const settled = message && settleOpenCalls(message, reason);
+    const storedReply = this.#options.hooks?.storedReply;
+    const keep = settled && storedReply ? storedReply(settled) : settled;
     if (!keep || !hasContent(keep)) {
       drop();
       return undefined;

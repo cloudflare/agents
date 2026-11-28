@@ -44,6 +44,10 @@
         "name": "OverflowRecoveryTestAgent"
       },
       {
+        "class_name": "OverflowReminderTestAgent",
+        "name": "OverflowReminderTestAgent"
+      },
+      {
         "class_name": "ThinkTestAgent",
         "name": "ThinkTestAgent"
       },
@@ -313,6 +317,7 @@
         "LoopTestAgent",
         "LoopToolTestAgent",
         "OverflowRecoveryTestAgent",
+        "OverflowReminderTestAgent",
         "ThinkTestAgent",
         "ThinkContinueOverrideTestAgent",
         "ThinkPropsTestAgent",

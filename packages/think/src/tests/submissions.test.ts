@@ -86,6 +86,7 @@ type ThinkSubmissionTestStub = {
   statusReportsQueuedForTest(submissionId: string): Promise<number>;
   releaseSubmissionStatusHookForTest(): Promise<void>;
   setProgrammaticResponseForTest(response: string): Promise<void>;
+  echoNeedsApprovalForTest(): Promise<void>;
   useRecoveryToolModelForTest(options?: {
     resetAfterTool?: boolean;
   }): Promise<void>;
@@ -2476,6 +2477,41 @@ describe("Think durable submissions", () => {
     });
   }, 30_000);
 
+  it("stores no final-answer part from a structured turn whose answer's input does not parse", async () => {
+    const agent = await freshAgent();
+    // The only step the channel permits gives an answer that doesn't parse.
+    await agent.setFinalAnswerResponseForTest({ rawInputForTest: '{"title":' });
+    await agent.testSubmitOnChannel("answer", "brief", {
+      submissionId: "sub-bad-final-input",
+      metadata: {
+        [workflowPromptMetadataKey]: {
+          workflow: {
+            name: "TEST_WORKFLOW",
+            id: "workflow-bad-final-input",
+            stepName: "draft-report",
+            eventType: "think-prompt-bad-final-input"
+          },
+          output: {
+            schema: {
+              type: "object",
+              properties: { title: { type: "string" } },
+              required: ["title"],
+              additionalProperties: false
+            }
+          },
+          fingerprint: "fingerprint"
+        }
+      }
+    });
+    // However it settles, its transcript holds no part of the tool.
+    await waitForWorkflowEvent(
+      agent,
+      (entry) => entry.event.type === "think-prompt-bad-final-input"
+    );
+    const messages = await agent.getMessagesForTest();
+    expect(JSON.stringify(messages)).not.toContain("think_final_answer");
+  }, 30_000);
+
   it("requires a tool call on a structured turn with tools of its own", async () => {
     const agent = await freshAgent();
     await agent.setFinalAnswerResponseForTest({ title: "Pinned" });
@@ -2554,6 +2590,47 @@ describe("Think durable submissions", () => {
         /without calling the think_final_answer tool/
       )
     });
+  }, 30_000);
+
+  it("fails a structured workflow turn that stops for an approval before its final answer", async () => {
+    const agent = await freshAgent();
+    // The model calls a tool that needs approval, so the turn stops there.
+    await agent.useRecoveryToolModelForTest();
+    await agent.echoNeedsApprovalForTest();
+    await agent.testSubmitMessages("call the tool", {
+      submissionId: "sub-approval-first",
+      metadata: {
+        [workflowPromptMetadataKey]: {
+          workflow: {
+            name: "TEST_WORKFLOW",
+            id: "workflow-approval-first",
+            stepName: "draft-report",
+            eventType: "think-prompt-approval-first"
+          },
+          output: {
+            schema: {
+              type: "object",
+              properties: { title: { type: "string" } },
+              required: ["title"],
+              additionalProperties: false
+            }
+          },
+          fingerprint: "fingerprint"
+        }
+      }
+    });
+    const event = await waitForWorkflowEvent(
+      agent,
+      (entry) => entry.event.type === "think-prompt-approval-first"
+    );
+    expect(event.event.payload).toMatchObject({
+      submissionId: "sub-approval-first",
+      status: "error",
+      error: expect.stringMatching(
+        /without calling the think_final_answer tool/
+      )
+    });
+    expect(await agent.getRecoveryToolExecutionsForTest()).toBe(0);
   }, 30_000);
 
   it("delivers a structured output that fits a workflow event, and fails one that does not with the reason", async () => {

@@ -500,8 +500,9 @@ export type ThinkHarnessHooks = {
     | undefined
     | Promise<Record<string, unknown> | undefined>;
   /**
-   * @internal The turn's model loop ended with an answer. Throw to fail the
-   * operation with the error's message instead.
+   * @internal The turn's model loop ended, with an answer or waiting for a
+   * client (an approval, a client tool). Throw to fail the operation with
+   * the error's message instead.
    */
   readonly beforeTurnEnd?: (context: {
     readonly session: ThinkSessionId;

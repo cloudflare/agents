@@ -9580,7 +9580,10 @@ function createFinalAnswerMockModel(
               .map((t) => t.name)
               .find((n) => n?.startsWith("think_final_answer")) ??
             "think_final_answer");
-      const input = JSON.stringify(args);
+      // `{ rawInputForTest }`: input text that need not parse.
+      const raw = (args as { rawInputForTest?: unknown } | null)
+        ?.rawInputForTest;
+      const input = typeof raw === "string" ? raw : JSON.stringify(args);
       const id = "final-answer-call";
       const stream = new ReadableStream({
         async start(controller) {
@@ -11315,6 +11318,7 @@ export class ThinkContinueOverrideTestAgent extends ThinkTestAgent {
 
 /** Where {@link ThinkProgrammaticTestAgent} keeps its tool model's setup. */
 const RECOVERY_TOOL_MODEL_KEY = "test:recovery-tool-model";
+const ECHO_NEEDS_APPROVAL_KEY = "test:echo-needs-approval";
 /** And how many times that model's tool ran. */
 const RECOVERY_TOOL_EXECUTIONS_KEY = "test:recovery-tool-executions";
 /** Where a test keeps the stale window it set, across a reset. */
@@ -11570,6 +11574,9 @@ export class ThinkProgrammaticTestAgent extends Think {
       echo: tool({
         description: "Persist one recovery test side effect",
         inputSchema: z.object({ message: z.string() }),
+        // `echoNeedsApprovalForTest`: the call waits for an approval.
+        needsApproval: () =>
+          this.ctx.storage.kv.get<boolean>(ECHO_NEEDS_APPROVAL_KEY) === true,
         execute: ({ message }: { message: string }) => {
           // Counted in storage: the count outlives a reset.
           this.ctx.storage.kv.put(
@@ -11599,6 +11606,11 @@ export class ThinkProgrammaticTestAgent extends Think {
     this.ctx.storage.kv.put(RECOVERY_TOOL_MODEL_KEY, {
       resetAfterTool: options.resetAfterTool === true
     });
+  }
+
+  /** The tool-calling model's `echo` waits for an approval. */
+  async echoNeedsApprovalForTest(): Promise<void> {
+    this.ctx.storage.kv.put(ECHO_NEEDS_APPROVAL_KEY, true);
   }
 
   async getRecoveryToolExecutionsForTest(): Promise<number> {

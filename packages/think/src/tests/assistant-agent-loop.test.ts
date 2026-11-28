@@ -280,6 +280,7 @@ describe("Think — agentic loop", () => {
       ): Promise<OverflowResult>;
       getCompactedBranches(): Promise<string[][]>;
       armProactiveForTest(): Promise<void>;
+      armReactiveForTest(alwaysOverflow: boolean): Promise<void>;
       armResumeForTest(): Promise<void>;
       chatArmedForTest(message: string): Promise<void>;
       getMessageIdsForTest(): Promise<Array<{ id: string; role: string }>>;
@@ -941,6 +942,57 @@ describe("Think — agentic loop", () => {
       ws.close();
     });
 
+    it("compacts an overflowing regenerate on the branch it answers, not the active one", async () => {
+      const room = crypto.randomUUID();
+      const agent = (await getAgentByName(
+        env.OverflowRecoveryTestAgent,
+        room
+      )) as unknown as OverflowAgent;
+      const res = await exports.default.fetch(
+        `http://example.com/agents/overflow-recovery-test-agent/${room}`,
+        { headers: { Upgrade: "websocket" } }
+      );
+      const ws = res.webSocket as WebSocket;
+      ws.accept();
+      const turn = (body: Record<string, unknown>) =>
+        new Promise<void>((resolve) => {
+          const handler = (e: MessageEvent) => {
+            const msg = JSON.parse(e.data as string) as Record<string, unknown>;
+            if (msg.type === "cf_agent_use_chat_response" && msg.done) {
+              ws.removeEventListener("message", handler);
+              resolve();
+            }
+          };
+          ws.addEventListener("message", handler);
+          ws.send(
+            JSON.stringify({
+              type: "cf_agent_use_chat_request",
+              id: crypto.randomUUID(),
+              init: { method: "POST", body: JSON.stringify(body) }
+            })
+          );
+        });
+      const question = {
+        id: "regen-question",
+        role: "user",
+        parts: [{ type: "text", text: "use the echo tool" }]
+      };
+      await agent.armReactiveForTest(false);
+      await turn({ messages: [question] });
+      const first = (await agent.getMessageIdsForTest()).find(
+        (m) => m.role === "assistant"
+      )?.id;
+      expect(first).toBeDefined();
+      // The regenerate overflows and compacts: on the question's branch,
+      // which doesn't hold the first answer.
+      await agent.armReactiveForTest(true);
+      await turn({ messages: [question], trigger: "regenerate-message" });
+      const branches = await agent.getCompactedBranches();
+      expect(branches.length).toBeGreaterThanOrEqual(1);
+      expect(branches.at(-1)).not.toContain(first);
+      ws.close();
+    });
+
     it("compacts the branch a programmatic input ending with an assistant message leaves", async () => {
       const agent = (await getAgentByName(
         env.OverflowRecoveryTestAgent,
@@ -982,6 +1034,25 @@ describe("Think — agentic loop", () => {
       expect(result.compactionCount).toBe(1);
       expect(result.error).toContain("tool schema");
       expect(result.errorClassification).not.toBe("context_overflow");
+    });
+
+    it("keeps the question's context reminder in the compacted prompt", async () => {
+      const agent = (await getAgentByName(
+        env.OverflowReminderTestAgent,
+        crypto.randomUUID()
+      )) as unknown as OverflowAgent & {
+        testProactiveAfterReminder(): Promise<{ done: boolean }>;
+      };
+      const result = await agent.testProactiveAfterReminder();
+      expect(result.done).toBe(true);
+      const prompts = await agent.getProactiveStepPrompts();
+      // The second turn's question delivered the change as a reminder; the
+      // third turn's prompt carries it, before and after the guard compacts,
+      // and the system prompt still has the value first sent.
+      expect(prompts[0].prompt).toContain("Today is Monday.");
+      expect(prompts[0].prompt).toContain("Today is Tuesday.");
+      expect(prompts[1].hasSummary).toBe(true);
+      expect(prompts[1].prompt).toContain("Today is Tuesday.");
     });
 
     it("keeps sending the compacted history after the guard's budget is spent", async () => {
