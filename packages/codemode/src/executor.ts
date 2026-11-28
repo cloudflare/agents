@@ -371,7 +371,16 @@ export class DynamicWorkerExecutor implements Executor {
       "Promise",
       "setTimeout",
       "Error",
-      "console"
+      "String",
+      "console",
+      "Object",
+      "Proxy",
+      "JSON",
+      "Math",
+      "Uint8Array",
+      "ArrayBuffer",
+      "btoa",
+      "atob"
     ]);
     const VALID_IDENT = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
     const seenNames = new Set<string>();
@@ -508,7 +517,7 @@ export class DynamicWorkerExecutor implements Executor {
         "      ]);",
         "      return { result, logs: __logs };",
         "    } catch (err) {",
-        "      return { result: undefined, error: err.message, logs: __logs };",
+        "      return { result: undefined, error: err instanceof Error ? err.message : String(err), logs: __logs };",
         "    }",
         "  }",
         "}"
