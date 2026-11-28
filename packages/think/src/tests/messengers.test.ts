@@ -2414,15 +2414,23 @@ describe("think messengers core", () => {
       "still posts the reply when the %s typing request never settles",
       async (stalled) => {
         let calls = 0;
+        // The test owns the requests it stalls: each is settled when it
+        // ends, so nothing it started is left pending for a later test.
+        const stalledRequests: Array<() => void> = [];
         const { delivered, posts } = deliver(() => {
           calls++;
           return stalled === "first" || calls > 1
-            ? new Promise<void>(() => {})
+            ? new Promise<void>((resolve) => stalledRequests.push(resolve))
             : Promise.resolve();
         });
-        await settle(delivered);
+        try {
+          await settle(delivered);
 
-        expect(posts).toEqual(["hi"]);
+          expect(posts).toEqual(["hi"]);
+        } finally {
+          for (const release of stalledRequests) release();
+          await vi.advanceTimersByTimeAsync(0);
+        }
       }
     );
   });
