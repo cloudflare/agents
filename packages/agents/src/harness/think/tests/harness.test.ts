@@ -784,6 +784,17 @@ describe("ThinkHarness approvals and client tools", () => {
 });
 
 describe("ThinkHarness: a tool that calls other tools (invoke)", () => {
+  it("reports no progress from a streaming tool after a call inside it parks", async () => {
+    const stub = fresh();
+    await stub.prompt("progress park");
+    expect((await stub.messages()).at(-1)).toBe(
+      "assistant: [progress_park approval-requested]"
+    );
+    // "after" came once the park aborted the tool, which ignored it.
+    await vi.waitFor(async () => expect(await stub.progressDone()).toBe(true));
+    expect(await stub.progress()).toEqual(["before"]);
+  });
+
   it("runs them as its own steps and keeps a code-only tool from the model", async () => {
     const stub = fresh();
     expect(text(await stub.prompt("compose"))).toBe("tool said: 9");

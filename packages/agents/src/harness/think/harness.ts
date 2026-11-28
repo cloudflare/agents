@@ -3496,10 +3496,13 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                 settled: new Map(),
                 provisional: new Set(kept?.provisional)
               };
+              // The turn's stop, or the park when a call inside it waits
+              // for approval.
+              const toolSignal = AbortSignal.any([signal, parking.signal]);
               const running = executeTool(tool, input, {
                 toolCallId,
                 messages: modelMessages,
-                abortSignal: AbortSignal.any([signal, parking.signal]),
+                abortSignal: toolSignal,
                 invoke: this.#invoker(
                   turn,
                   stepIndex,
@@ -3510,7 +3513,7 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
                 ),
                 onPreliminary: (output) => {
                   // A tool that ignores its abort reports nothing after it.
-                  if (signal.aborted) return;
+                  if (toolSignal.aborted) return;
                   const chunk: UIMessageChunk = {
                     type: "tool-output-available",
                     toolCallId,
