@@ -2065,24 +2065,26 @@ export class ThinkHarness<TOOLS extends ToolSet = ToolSet>
           break;
         }
         // While the latest reply still waits on a client (a client tool's
-        // call, an approval), there is nothing to answer yet: the client's
-        // answer continues that reply.
+        // call, an approval), a continuation has nothing to answer yet: the
+        // client's answer continues that reply. A new reply asks anyway.
         // As on Think, from the client tools the session's client declared:
         // no build for it.
-        const declared = await handle.internal_config(CLIENT_TOOLS_KEY);
-        const parsed: unknown = declared === null ? [] : JSON.parse(declared);
-        const clientTools = new Set(
-          (Array.isArray(parsed) ? parsed : []).flatMap((tool: unknown) =>
-            tool !== null &&
-            typeof tool === "object" &&
-            typeof (tool as { name?: unknown }).name === "string"
-              ? [(tool as { name: string }).name]
-              : []
-          )
-        );
-        if (continuationWaitsOnClient([latest], clientTools)) {
-          unanswered = "awaiting_client";
-          break;
+        if (input.continuation) {
+          const declared = await handle.internal_config(CLIENT_TOOLS_KEY);
+          const parsed: unknown = declared === null ? [] : JSON.parse(declared);
+          const clientTools = new Set(
+            (Array.isArray(parsed) ? parsed : []).flatMap((tool: unknown) =>
+              tool !== null &&
+              typeof tool === "object" &&
+              typeof (tool as { name?: unknown }).name === "string"
+                ? [(tool as { name: string }).name]
+                : []
+            )
+          );
+          if (continuationWaitsOnClient([latest], clientTools)) {
+            unanswered = "awaiting_client";
+            break;
+          }
         }
         this.lifecycle.storage.transactionSync(() =>
           progress({

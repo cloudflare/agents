@@ -1926,12 +1926,16 @@ export class Think<
     }
   }
 
-  /** Ask the harness for a new reply over the history as it stands. */
-  #replyAgain(operationId: string) {
+  /**
+   * Ask the harness for a new reply over the history as it stands. Only a
+   * continuation (`continueLastTurn`) waits while the reply waits on a
+   * client; a new turn with no new message asks the model, as on Think.
+   */
+  #replyAgain(operationId: string, continuation = false) {
     this.#newReplies.add(operationId);
     return this.harness.enqueue(
       this.harness.session().id,
-      { kind: "reply" },
+      continuation ? { kind: "reply", continuation: true } : { kind: "reply" },
       // Kept with the operation, so a turn restored after a restart is
       // still told it continues.
       { operationId, metadata: { [NEW_REPLY_KEY]: true } }
@@ -2066,7 +2070,7 @@ export class Think<
     if (channel !== undefined) this.#explicitChannels.set(operationId, channel);
     try {
       // As on Think: a new assistant message, not an append.
-      return await this.#replyAgain(operationId);
+      return await this.#replyAgain(operationId, true);
     } catch (error) {
       this.#explicitChannels.delete(operationId);
       throw error;

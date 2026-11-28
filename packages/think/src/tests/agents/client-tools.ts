@@ -1056,6 +1056,11 @@ export class ThinkClientToolsAgent extends Think {
     return result.status;
   }
 
+  /** `saveMessages([])`: a new reply over the history as it stands. */
+  async saveNoMessagesForTest(): Promise<string> {
+    return (await this.saveMessages([])).status;
+  }
+
   override async beforeTurn(ctx: TurnContext): Promise<TurnConfig | void> {
     this._turnBodies.push(ctx.body ?? null);
     this._lastTurnToolNames = Object.keys(ctx.tools);

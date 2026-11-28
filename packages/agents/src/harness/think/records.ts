@@ -43,9 +43,10 @@ export type OperationInput =
   /**
    * @internal Answer the history as it stands, with a new assistant message
    * after the latest message: Think's `continueLastTurn()` and an empty
-   * `saveMessages()`. Brings no message of its own.
+   * `saveMessages()`. Brings no message of its own. A `continuation` is
+   * not answered while the latest reply waits on a client.
    */
-  | { readonly kind: "reply" };
+  | { readonly kind: "reply"; readonly continuation?: true };
 
 /**
  * An open operation a released version left in the store, with its progress
