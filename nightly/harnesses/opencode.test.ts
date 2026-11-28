@@ -7,7 +7,7 @@
 // is closed 30 s after its last use).
 
 import { describe, expect, inject, it } from "vitest";
-import { deployHarnesses } from "./deploy";
+import { deployHarness } from "./deploy";
 import {
   call,
   converse,
@@ -45,7 +45,8 @@ describe("the OpenCode harness on a deployment", () => {
     const room = `update-${Date.now()}`;
     const { operationId } = await submit("opencode", room, "hold");
     await seen(room, "hold", 1);
-    await deployHarnesses(
+    await deployHarness(
+      "opencode",
       inject("probeName"),
       inject("probeKey"),
       "opencode-update"

@@ -5,7 +5,7 @@
 // back. Every room ends with nothing pending and no alarm.
 
 import { describe, expect, inject, it } from "vitest";
-import { deployHarnesses } from "./deploy";
+import { deployHarness } from "./deploy";
 import {
   call,
   converse,
@@ -50,7 +50,12 @@ describe("the Pi harness on a deployment", () => {
     const { operationId } = await submit("pi", room, "gate");
     await seen(room, "gate", 1);
     // An immediate code update resets the busy object.
-    await deployHarnesses(inject("probeName"), inject("probeKey"), "pi-update");
+    await deployHarness(
+      "pi",
+      inject("probeName"),
+      inject("probeKey"),
+      "pi-update"
+    );
     await seen(room, "gate", 2);
     await call("pi", room, "probeRelease");
     expect((await ended("pi", room, operationId)).status).toBe("done");

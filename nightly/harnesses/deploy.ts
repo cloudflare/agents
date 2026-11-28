@@ -1,6 +1,6 @@
-// Global setups for the two harness suites: each deploys the harness Worker
-// under its own unique name (so one suite's code update does not reset the
-// other's objects) and deletes it afterwards.
+// Global setups for the two harness suites: each deploys its own harness's
+// Worker (`wrangler.<kind>.jsonc`) under a unique name and deletes it
+// afterwards.
 
 import path from "node:path";
 import type { TestProject } from "vitest/node";
@@ -14,9 +14,16 @@ declare module "vitest" {
 
 const DIR = import.meta.dirname;
 
-export function deployHarnesses(name: string, key: string, build: string) {
+export type Kind = "pi" | "opencode";
+
+export function deployHarness(
+  kind: Kind,
+  name: string,
+  key: string,
+  build: string
+) {
   return deploy({
-    config: path.join(DIR, "wrangler.jsonc"),
+    config: path.join(DIR, `wrangler.${kind}.jsonc`),
     cwd: DIR,
     name,
     key,
@@ -24,11 +31,11 @@ export function deployHarnesses(name: string, key: string, build: string) {
   });
 }
 
-export async function setup(project: TestProject, prefix: string) {
-  const name = workerName(prefix);
+export async function setup(project: TestProject, kind: Kind) {
+  const name = workerName(kind);
   const key = crypto.randomUUID();
   try {
-    project.provide("probeUrl", await deployHarnesses(name, key, "first"));
+    project.provide("probeUrl", await deployHarness(kind, name, key, "first"));
     project.provide("probeKey", key);
     project.provide("probeName", name);
   } catch (e) {

@@ -1,0 +1,22 @@
+{
+  // The OpenCode suite's Worker. The suite deploys it under a unique name
+  // (`nightly-opencode-<id>`), deploys it again mid-run for the code update
+  // case, and deletes it when it ends.
+  "name": "nightly-opencode",
+  "main": "opencode.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "ai": { "binding": "AI" },
+  "durable_objects": {
+    // A deploy resets a busy object at once instead of after up to 300 s.
+    "code_update_strategy": { "mode": "immediate" },
+    "bindings": [
+      { "class_name": "OpenCodeProbe", "name": "OpenCodeProbe" },
+      { "class_name": "Witness", "name": "Witness" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["OpenCodeProbe", "Witness"] }
+  ]
+}

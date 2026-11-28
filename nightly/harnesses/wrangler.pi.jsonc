@@ -1,14 +1,14 @@
 {
-  // The harness suite's Worker. The suite deploys it under a unique name
-  // (`nightly-harnesses-<id>`), deploys it again mid-run for the code update
-  // case, and deletes it when it ends.
-  "name": "nightly-harnesses",
-  "main": "worker.ts",
+  // The Pi suite's Worker. The suite deploys it under a unique name
+  // (`nightly-pi-<id>`), deploys it again mid-run for the code update case,
+  // and deletes it when it ends.
+  "name": "nightly-pi",
+  "main": "pi.ts",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "ai": { "binding": "AI" },
-  // A real Browser Rendering session for the Pi browser tool.
+  // A real Browser Rendering session for the browser tool.
   "browser": { "binding": "BROWSER" },
   // The browser tool and codemode run model code in Dynamic Workers.
   "worker_loaders": [{ "binding": "LOADER" }],
@@ -17,14 +17,8 @@
     "code_update_strategy": { "mode": "immediate" },
     "bindings": [
       { "class_name": "PiProbe", "name": "PiProbe" },
-      { "class_name": "OpenCodeProbe", "name": "OpenCodeProbe" },
       { "class_name": "Witness", "name": "Witness" }
     ]
   },
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["PiProbe", "OpenCodeProbe", "Witness"]
-    }
-  ]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["PiProbe", "Witness"] }]
 }
