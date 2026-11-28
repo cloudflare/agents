@@ -3036,6 +3036,37 @@ describe("Think — before-turn repair", () => {
     await closeWS(ws);
   });
 
+  it("an empty saveMessages still asks the model while the reply waits on a client tool call", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    // As above: the latest reply ended on a call to the client's tool that
+    // nobody has answered.
+    await agent.setTextOnlyMode(true);
+    const donePromise = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("hello")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    await donePromise;
+    await agent.persistToolCallMessage([
+      makeUserMessage("do it"),
+      makeToolMessage("tc-pending", "client_action", "input-available")
+    ]);
+    const modelCalls = ((await agent.getTextOnlyPromptsForTest()) as unknown[])
+      .length;
+
+    // Only a continuation waits for the client. A new turn with no new
+    // message is a new reply over the history, so it calls the model.
+    expect(await agent.saveNoMessagesForTest()).toBe("completed");
+    expect(
+      ((await agent.getTextOnlyPromptsForTest()) as unknown[]).length
+    ).toBe(modelCalls + 1);
+
+    await closeWS(ws);
+  });
+
   it("a repair after a continuation turn ended does not run as a continuation", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);

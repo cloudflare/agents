@@ -39,7 +39,14 @@ export type OperationInput =
   /** Answer a user message again, on a new branch beside earlier answers. */
   | { readonly kind: "regenerate"; readonly messageId?: string }
   /** Continue the latest assistant message. */
-  | { readonly kind: "continue" };
+  | { readonly kind: "continue" }
+  /**
+   * @internal Answer the history as it stands, with a new assistant message
+   * after the latest message: Think's `continueLastTurn()` and an empty
+   * `saveMessages()`. Brings no message of its own. A `continuation` is
+   * not answered while the latest reply waits on a client.
+   */
+  | { readonly kind: "reply"; readonly continuation?: true };
 
 /**
  * An open operation a released version left in the store, with its progress

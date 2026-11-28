@@ -52,6 +52,49 @@ describe("ThinkHarness turns", () => {
     expect(text(await stub.prompt("again"))).toBe("echo: again");
   });
 
+  it("answers the history again with a new assistant message for the internal reply input", async () => {
+    const stub = fresh();
+    await stub.prompt("hello");
+    const before = await stub.messageIds();
+    const result = await runInDurableObject(
+      stub,
+      async (instance: ThinkHarnessTestObject) => {
+        const session = instance.harness.session();
+        const receipt = await instance.harness.enqueue(
+          session.id,
+          { kind: "reply" },
+          {}
+        );
+        return session.wait(receipt.operationId);
+      }
+    );
+    // The test model answers a history that ends with its reply "continued".
+    expect(result).toMatchObject({ status: "done", text: "continued" });
+    // A new message after the latest one; the earlier reply is untouched.
+    expect(await stub.messages()).toEqual([
+      "user: hello",
+      "assistant: echo: hello",
+      "assistant: continued"
+    ]);
+    expect((await stub.messageIds()).slice(0, 2)).toEqual(before);
+  });
+
+  it("ends the internal reply input not_found on an empty session", async () => {
+    const result = await runInDurableObject(
+      fresh(),
+      async (instance: ThinkHarnessTestObject) => {
+        const session = instance.harness.session();
+        const receipt = await instance.harness.enqueue(
+          session.id,
+          { kind: "reply" },
+          {}
+        );
+        return session.wait(receipt.operationId);
+      }
+    );
+    expect(reason(result)).toBe("not_found");
+  });
+
   it("checks incoming ids against storage without reading the transcript", async () => {
     const stub = fresh();
     await stub.prompt("hello");

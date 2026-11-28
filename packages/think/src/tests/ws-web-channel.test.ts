@@ -197,6 +197,17 @@ describe("Think — WebSocket chat runs on the web channel (#2255)", () => {
     ws.close();
   });
 
+  it("runs an explicit-channel continuation on the channel it names", async () => {
+    const { agent, ws } = await freshAgent();
+    await sendChat(ws, [userMessage("hello")]);
+    await agent.resetCapturedTurnChannelsForTest();
+
+    await agent.runChannelTurnForTest({ continuation: true, channel: "voice" });
+
+    expect(await agent.getCapturedTurnChannelsForTest()).toEqual(["voice"]);
+    ws.close();
+  });
+
   it("extends the channel an explicit-channel continuation ran on", async () => {
     const { agent, ws } = await freshAgent();
     await sendChat(ws, [userMessage("hello")]);
