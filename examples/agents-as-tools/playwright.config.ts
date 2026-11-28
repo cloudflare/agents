@@ -14,9 +14,9 @@ import { defineConfig, devices } from "@playwright/test";
  *   - `playwright install --with-deps chromium`
  *   - A Workers AI auth shape (env var or `wrangler login` + the
  *     account being addressable from CI)
- *   - Whatever flake budget shows up (real LLMs are non-deterministic;
- *     prompts are biased to pick specific tools but a flake-retry
- *     count > 0 will eventually be needed)
+ *   - No retries: real LLMs are non-deterministic, so the prompts are
+ *     biased to pick specific tools and the assertions check what the
+ *     tools did, not the model's words
  *
  * Concurrency:
  *   - `workers: 1`. Each test exercises a single Assistant DO that
@@ -55,14 +55,8 @@ export default defineConfig({
   // Don't share state across tests via parallel workers — see above.
   fullyParallel: false,
   workers: 1,
-  // Real Workers AI occasionally returns 504 Gateway Timeout (the
-  // upstream model is slow/overloaded). With `retries: 0` a single
-  // 504 fails the run, which is too brittle for a real-LLM e2e
-  // suite. With 1 retry we can ride out transient capacity issues
-  // while still surfacing actual regressions on the second attempt.
-  // Bump to 0 if you want to debug a "real" failure without retry
-  // masking it.
-  retries: process.env.E2E_NO_RETRY ? 0 : 1,
+  // No retries: a failure is a bug in the product or the test.
+  retries: 0,
   reporter: process.env.CI ? "list" : "list",
   use: {
     baseURL: `http://localhost:${PORT}`,
