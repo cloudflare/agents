@@ -2427,6 +2427,9 @@ describe("think messengers core", () => {
           await settle(delivered);
 
           expect(posts).toEqual(["hi"]);
+          // The request this case stalls was made, and is the only one:
+          // requests never overlap.
+          expect(stalledRequests).toHaveLength(1);
         } finally {
           for (const release of stalledRequests) release();
           await vi.advanceTimersByTimeAsync(0);
