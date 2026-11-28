@@ -2677,9 +2677,73 @@ export class ThinkTestAgent extends Think {
   /** Set to make `beforeTurn` wait for the turn's signal and fail with it. */
   private _beforeTurnAbortWait: (() => void) | null = null;
 
+  /** Set by {@link recoveryAttemptStartedInsideTurnForTest}. */
+  private _probeAttemptFromTurn = false;
+  private _probeAttempt:
+    | { runId: string; insideTurn: boolean | undefined }
+    | undefined;
+
+  /**
+   * Run a turn that starts a recovery attempt's run from inside itself, as
+   * a turn's own run is started, and report whether the attempt ran in the
+   * turn's context. `undefined` when the attempt never ran.
+   */
+  async recoveryAttemptStartedInsideTurnForTest(): Promise<
+    boolean | undefined
+  > {
+    this._probeAttemptFromTurn = true;
+    this._probeAttempt = undefined;
+    await this.testChat("start an attempt from inside this turn");
+    const probe = this._probeAttempt as
+      | { runId: string; insideTurn: boolean | undefined }
+      | undefined;
+    if (!probe) return undefined;
+    await this.tasks.wait(probe.runId, { timeoutMs: 10_000 });
+    return probe.insideTurn;
+  }
+
+  override async _chatRecoveryContinue(
+    data?: Parameters<Think["_chatRecoveryContinue"]>[0]
+  ): Promise<void> {
+    if (
+      (data as { probe?: boolean } | undefined)?.probe &&
+      this._probeAttempt
+    ) {
+      // The guard a recovery's own turn meets: it reads the context
+      // itself, whether or not that turn is still the running one.
+      try {
+        (
+          this as unknown as {
+            _assertNotInsideAdmittedTurn(trigger: string): void;
+          }
+        )._assertNotInsideAdmittedTurn("recovery-continue");
+        this._probeAttempt.insideTurn = false;
+      } catch {
+        this._probeAttempt.insideTurn = true;
+      }
+      return;
+    }
+    return super._chatRecoveryContinue(data);
+  }
+
   override beforeTurn(
     ctx: TurnContext
   ): TurnConfig | void | Promise<TurnConfig | void> {
+    if (this._probeAttemptFromTurn) {
+      this._probeAttemptFromTurn = false;
+      const runId = `probe-attempt-${crypto.randomUUID()}`;
+      this._probeAttempt = { runId, insideTurn: undefined };
+      // Started from inside the turn, and not awaited by it.
+      void this.tasks.run(
+        "__cf_internal_chat_recovery",
+        {
+          callback: "_chatRecoveryContinue",
+          data: { probe: true },
+          delaySeconds: 0
+        },
+        { runId, start: "now" }
+      );
+    }
     if (this._beforeTurnAbortWait) {
       const signal = ctx.abortSignal;
       this._beforeTurnAbortWait();
